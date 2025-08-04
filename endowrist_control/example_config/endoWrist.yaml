@@ -1,0 +1,28 @@
+ethercat_master:
+  time_step: 0.0012
+  update_rate_too_low_warn_threshold: 50 #50 
+
+ethercat_devices:
+  - type: Maxon
+    name: Maxon0
+    configuration_file: device_configurations/maxon.yaml
+    ethercat_bus: enp1s0
+    ethercat_address: 1
+
+  - type: Maxon
+    name: Maxon1
+    configuration_file: device_configurations/maxon.yaml
+    ethercat_bus: enp1s0
+    ethercat_address: 2
+
+  - type: Maxon
+    name: Maxon2
+    configuration_file: device_configurations/maxon.yaml
+    ethercat_bus: enp1s0
+    ethercat_address: 3
+
+  - type: Maxon
+    name: Maxon3
+    configuration_file: device_configurations/maxon.yaml
+    ethercat_bus: enp1s0
+    ethercat_address: 4
