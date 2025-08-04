@@ -1,30 +1,16 @@
-// Copyright (c) 2021 Franka Emika GmbH
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 #include <Eigen/Eigen>
 #include <cassert>
 #include <cmath>
 #include <exception>
-#include <franka_example_controllers/joint_velocity_rcm_controller.hpp>
-#include <franka_example_controllers/rcm_kinematics.hpp>
+#include <new_controllers/joint_velocity_rcm_controller.hpp>
+#include <new_controllers/rcm_kinematics.hpp>
 #include <franka_msgs/srv/set_full_collision_behavior.hpp>
 #include <string>
 #include <chrono>
 
 using namespace std::chrono_literals;
 
-namespace franka_example_controllers {
+namespace new_controllers {
 
 
 
@@ -206,7 +192,7 @@ void JointVelocityRCMController::updateJointStates() {
     }
 }
 
-}  // namespace franka_example_controllers
+}  // namespace new_controllers
 #include "pluginlib/class_list_macros.hpp"
 // NOLINTNEXTLINE
-PLUGINLIB_EXPORT_CLASS(franka_example_controllers::JointVelocityRCMController, controller_interface::ControllerInterface)
+PLUGINLIB_EXPORT_CLASS(new_controllers::JointVelocityRCMController, controller_interface::ControllerInterface)

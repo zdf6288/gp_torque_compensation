@@ -44,7 +44,6 @@ CartesianVelocityExampleController::state_interface_configuration() const {
 controller_interface::return_type CartesianVelocityExampleController::update(
     const rclcpp::Time& /*time*/,
     const rclcpp::Duration& period) {
-  RCLCPP_INFO_STREAM(get_node()->get_logger(), "start update!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!11\n");
   elapsed_time_ = elapsed_time_ + period;
 
   double cycle = std::floor(pow(
@@ -67,7 +66,6 @@ controller_interface::return_type CartesianVelocityExampleController::update(
 }
 
 CallbackReturn CartesianVelocityExampleController::on_init() {
-  RCLCPP_INFO_STREAM(get_node()->get_logger(), "start on_init!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!11\n");
   return CallbackReturn::SUCCESS;
 }
 

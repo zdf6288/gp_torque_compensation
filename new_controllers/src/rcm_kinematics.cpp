@@ -1,6 +1,6 @@
 #ifndef RCM_KINEMATICS_HPP
 #define RCM_KINEMATICS_HPP
-#include "franka_example_controllers/rcm_kinematics.hpp"
+#include "new_controllers/rcm_kinematics.hpp"
 #endif
 
 static Matrix4d Ab0, A01, A12, A23, A34, A45, A56, A67, A7f, Afr, Arp, Ape, Afr1, Afr2, Afr3;

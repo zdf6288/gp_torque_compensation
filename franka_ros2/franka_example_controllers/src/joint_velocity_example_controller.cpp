@@ -12,200 +12,110 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include <Eigen/Eigen>
+#include <franka_example_controllers/joint_velocity_example_controller.hpp>
+#include <franka_msgs/srv/set_full_collision_behavior.hpp>
+
 #include <cassert>
 #include <cmath>
 #include <exception>
-#include <franka_example_controllers/joint_velocity_example_controller.hpp>
-#include <franka_example_controllers/rcm_kinematics.hpp>
-#include <franka_msgs/srv/set_full_collision_behavior.hpp>
 #include <string>
-#include <chrono>
+
+#include <Eigen/Eigen>
 
 using namespace std::chrono_literals;
 
 namespace franka_example_controllers {
 
+controller_interface::InterfaceConfiguration
+JointVelocityExampleController::command_interface_configuration() const {
+  controller_interface::InterfaceConfiguration config;
+  config.type = controller_interface::interface_configuration_type::INDIVIDUAL;
 
-
-controller_interface::InterfaceConfiguration JointVelocityExampleController::command_interface_configuration() const {
-    controller_interface::InterfaceConfiguration config;
-    config.type = controller_interface::interface_configuration_type::INDIVIDUAL;
-
-    for (int i = 1; i <= num_joints; ++i) {
-        config.names.push_back(arm_id_ + "_joint" + std::to_string(i) + "/velocity");
-    }
-    return config;
+  for (int i = 1; i <= num_joints; ++i) {
+    config.names.push_back(arm_id_ + "_joint" + std::to_string(i) + "/velocity");
+  }
+  return config;
 }
 
-
-
-controller_interface::InterfaceConfiguration JointVelocityExampleController::state_interface_configuration() const {
-    controller_interface::InterfaceConfiguration config;
-    config.type = controller_interface::interface_configuration_type::INDIVIDUAL;
-    for (int i = 1; i <= num_joints; ++i) {
-        config.names.push_back(arm_id_ + "_joint" + std::to_string(i) + "/position");
-        config.names.push_back(arm_id_ + "_joint" + std::to_string(i) + "/velocity");
-    }
-    return config;
+controller_interface::InterfaceConfiguration
+JointVelocityExampleController::state_interface_configuration() const {
+  controller_interface::InterfaceConfiguration config;
+  config.type = controller_interface::interface_configuration_type::INDIVIDUAL;
+  for (int i = 1; i <= num_joints; ++i) {
+    config.names.push_back(arm_id_ + "_joint" + std::to_string(i) + "/position");
+    config.names.push_back(arm_id_ + "_joint" + std::to_string(i) + "/velocity");
+  }
+  return config;
 }
 
-controller_interface::return_type JointVelocityExampleController::update(const rclcpp::Time& /*time*/, const rclcpp::Duration& period) {
+controller_interface::return_type JointVelocityExampleController::update(
+    const rclcpp::Time& /*time*/,
+    const rclcpp::Duration& period) {
+  elapsed_time_ = elapsed_time_ + period;
+  rclcpp::Duration time_max(8.0, 0.0);
+  double omega_max = 0.1;
+  double cycle = std::floor(std::pow(
+      -1.0, (elapsed_time_.seconds() - std::fmod(elapsed_time_.seconds(), time_max.seconds())) /
+                time_max.seconds()));
+  double omega = cycle * omega_max / 2.0 *
+                 (1.0 - std::cos(2.0 * M_PI / time_max.seconds() * elapsed_time_.seconds()));
 
-    /* Retrieve sample step */
-    double dt = period.seconds();
-
-    /* Obtain positions and Jacobians from Endowrist and RCM (from measurement + forward kinematics) */
-    updateJointStates();
-    RCMForwardKinematics(q_meas_, eta_, T_endo, T_rcm, J_endo, J_rcm);
-    p_rcm  = T_rcm.block<3, 1>(0, 3);
-    p_endo = T_endo.block<3, 1>(0, 3);
-
-    /* Obtain reference trajectory */
-    v_endo_ref << v_x, v_y, v_z;                   // TODO: mutex protection
-    p_endo_ref << p_endo_ref + dt * v_endo_ref;
-
-    /* Calculate RCM and tracking error */
-    error_endo = p_endo_ref - p_endo;
-    error_rcm = p_rcm_init_ - p_rcm;
-
-    /* Nullspace objective (maximize distance to joint limits) */
-    for (int i = 0; i < 8; i++) {
-        w_func[i] = (-1 / 16) * pow(((q_[i] - (qmax[i] - qmin[i]) / 2) / (qmax[i] - qmin[i])), 2);
+  for (int i = 0; i < num_joints; i++) {
+    if (i == 3 || i == 4) {
+      command_interfaces_[i].set_value(omega);
+    } else {
+      command_interfaces_[i].set_value(0.0);
     }
-    dwdq = (w_func - w_func_old_) / dt;
-    w_func_old_ = w_func;
-
-    /* Nullspace projections */
-    J_rcm_plus = J_rcm.transpose() * (J_rcm * J_rcm.transpose()).inverse(); //inverse 1
-    Null_Proj_1 = eye8 - J_rcm_plus * J_rcm;
-    J_endo_proj = J_endo * Null_Proj_1;
-    J_endo_proj_plus = J_endo_proj.transpose() * (J_endo_proj * J_endo_proj.transpose()).inverse(); //inverse 2
-    Null_Proj_2 = Null_Proj_1 * (eye8 - J_endo_proj_plus * J_endo_proj);
-
-
-    /* RCM multipriority control law */
-    dq_ = J_rcm_plus * (k_rcm_ * eye3 * (error_rcm)) + 
-                J_endo_proj_plus * ((v_endo_ref + k_endo_ * eye3 * (error_endo)) - J_endo * J_rcm_plus * (k_rcm_ * eye3 * (error_rcm))) 
-                        + Null_Proj_2 * dwdq;
-
-    /* Integrate to get joint angles*/
-    q_ = q_ + dq_ * dt;
-    eta_ = q_[7];
-
-    /* Saturate commandes velocities */
-    for (auto idx = 0; idx < 7; idx++) {
-        dq_[idx] = 0.8*dq_old_[idx] + 0.2*dq_[idx];
-        dq_[idx] = std ::min(10.0 * dt + dq_old_[idx], std ::max(-10.0 * dt + dq_old_[idx], dq_[idx]));
-        dq_old_[idx] = dq_[idx];
-    }
-
-    /* Send command to Joint Velocity Interface */
-    for (int i = 0; i < num_joints; i++) {
-        command_interfaces_[i].set_value(dq_[i]);
-    }
-
-    return controller_interface::return_type::OK;
+  }
+  return controller_interface::return_type::OK;
 }
-
-
 
 CallbackReturn JointVelocityExampleController::on_init() {
+  try {
+    auto_declare<std::string>("arm_id", "panda");
 
-    /* Get node */
-    auto node = get_node();
-
-    /* Create subscriber */
-    lambda_subscription_ = node->create_subscription<custom_msgs::msg::LambdaCommand>("/TwistRight", 10, std::bind(&JointVelocityExampleController::lambdaCommandCallback, this, std::placeholders::_1));
-
-    /* Init Franka Arm */
-    try {
-        auto_declare<std::string>("arm_id", "panda");
-
-    } catch (const std::exception& e) {
-        fprintf(stderr, "Exception thrown during init stage with message: %s \n", e.what());
-        return CallbackReturn::ERROR;
-    }
-
-    /* Init Control Variables */
-    q_.setZero();
-    dq_old_.setZero();
-    qmax << 2.7437, 1.7837, 2.9007, -0.1518, 2.8065, 4.5165, 3.0159, 0.59;
-    qmin << -2.7437, -1.7837, -2.9007, -3.0421, -2.8065, 0.5445, -3.0159, 0;
-    p_rcm.setZero();
-    p_rcm_init_.setZero();
-    p_endo_ref.setZero();
-    v_endo_ref.setZero();
-    w_func_old_.setZero();
-    eye3.setIdentity();
-    eye8.setIdentity();
-    eta_ = 0.435;
-
-    k_rcm_ = 5.0;  //TODO: Read from configuration / ROS param
-    k_endo_ = 5.0; //TODO: Read from configuration / ROS param
-
-    return CallbackReturn::SUCCESS;
+  } catch (const std::exception& e) {
+    fprintf(stderr, "Exception thrown during init stage with message: %s \n", e.what());
+    return CallbackReturn::ERROR;
+  }
+  return CallbackReturn::SUCCESS;
 }
 
+CallbackReturn JointVelocityExampleController::on_configure(
+    const rclcpp_lifecycle::State& /*previous_state*/) {
+  arm_id_ = get_node()->get_parameter("arm_id").as_string();
 
+  auto client = get_node()->create_client<franka_msgs::srv::SetFullCollisionBehavior>(
+      "service_server/set_full_collision_behavior");
+  auto request = std::make_shared<franka_msgs::srv::SetFullCollisionBehavior::Request>();
 
-CallbackReturn JointVelocityExampleController::on_configure(const rclcpp_lifecycle::State& /*previous_state*/) {
+  request->lower_torque_thresholds_acceleration = {20.0, 20.0, 18.0, 18.0, 16.0, 14.0, 12.0};
+  request->upper_torque_thresholds_acceleration = {20.0, 20.0, 18.0, 18.0, 16.0, 14.0, 12.0};
+  request->lower_torque_thresholds_nominal = {20.0, 20.0, 18.0, 18.0, 16.0, 14.0, 12.0};
+  request->upper_torque_thresholds_nominal = {20.0, 20.0, 18.0, 18.0, 16.0, 14.0, 12.0};
+  request->lower_force_thresholds_acceleration = {20.0, 20.0, 20.0, 25.0, 25.0, 25.0};
+  request->upper_force_thresholds_acceleration = {20.0, 20.0, 20.0, 25.0, 25.0, 25.0};
+  request->lower_force_thresholds_nominal = {20.0, 20.0, 20.0, 25.0, 25.0, 25.0};
+  request->upper_force_thresholds_nominal = {20.0, 20.0, 20.0, 25.0, 25.0, 25.0};
 
-    /* Initialize robot state / model interface */
-    arm_id_ = get_node()->get_parameter("arm_id").as_string();
+  if (!client->wait_for_service(20s)) {
+    RCLCPP_FATAL(get_node()->get_logger(), "service server can't be found.");
+    return CallbackReturn::FAILURE;
+  }
 
-    auto client = get_node()->create_client<franka_msgs::srv::SetFullCollisionBehavior>("service_server/set_full_collision_behavior");
-    auto request = std::make_shared<franka_msgs::srv::SetFullCollisionBehavior::Request>();
+  client->async_send_request(request);
 
-    request->lower_torque_thresholds_acceleration = {20.0, 20.0, 18.0, 18.0, 16.0, 14.0, 12.0};
-    request->upper_torque_thresholds_acceleration = {20.0, 20.0, 18.0, 18.0, 16.0, 14.0, 12.0};
-    request->lower_torque_thresholds_nominal = {20.0, 20.0, 18.0, 18.0, 16.0, 14.0, 12.0};
-    request->upper_torque_thresholds_nominal = {20.0, 20.0, 18.0, 18.0, 16.0, 14.0, 12.0};
-    request->lower_force_thresholds_acceleration = {20.0, 20.0, 20.0, 25.0, 25.0, 25.0};
-    request->upper_force_thresholds_acceleration = {20.0, 20.0, 20.0, 25.0, 25.0, 25.0};
-    request->lower_force_thresholds_nominal = {20.0, 20.0, 20.0, 25.0, 25.0, 25.0};
-    request->upper_force_thresholds_nominal = {20.0, 20.0, 20.0, 25.0, 25.0, 25.0};
-
-    if (!client->wait_for_service(20s)) {
-        RCLCPP_FATAL(get_node()->get_logger(), "service server can't be found.");
-        return CallbackReturn::FAILURE;
-    }
-
-    client->async_send_request(request);
-
-    return CallbackReturn::SUCCESS;
+  return CallbackReturn::SUCCESS;
 }
 
-
-
-CallbackReturn JointVelocityExampleController::on_activate(const rclcpp_lifecycle::State& /*previous_state*/) {
-    updateJointStates();
-    
-    RCMForwardKinematics(q_meas_, eta_, T_endo, T_rcm, J_endo, J_rcm);
-    p_rcm  = T_rcm.block<3, 1>(0, 3);
-    p_endo = T_endo.block<3, 1>(0, 3);
-
-    p_rcm_init_ = p_rcm;
-    p_endo_ref = p_endo;
-
-    Eigen::Map<const Eigen::Matrix<double, 7, 1>> q0(q_meas_.data());
-    q_ << q0, eta_;
-    return CallbackReturn::SUCCESS;
-}
-
-
-
-void JointVelocityExampleController::updateJointStates() {
-    for (auto i = 0; i < num_joints; ++i) {
-        const auto& position_interface = state_interfaces_.at(2 * i);
-
-        assert(position_interface.get_interface_name() == "position");
-
-        q_meas_[i] = position_interface.get_value();
-    }
+CallbackReturn JointVelocityExampleController::on_activate(
+    const rclcpp_lifecycle::State& /*previous_state*/) {
+  elapsed_time_ = rclcpp::Duration(0, 0);
+  return CallbackReturn::SUCCESS;
 }
 
 }  // namespace franka_example_controllers
 #include "pluginlib/class_list_macros.hpp"
 // NOLINTNEXTLINE
-PLUGINLIB_EXPORT_CLASS(franka_example_controllers::JointVelocityExampleController, controller_interface::ControllerInterface)
+PLUGINLIB_EXPORT_CLASS(franka_example_controllers::JointVelocityExampleController,
+                       controller_interface::ControllerInterface)

@@ -1,4 +1,4 @@
-model_example_controller:
+model_controller:
   arm_id: {
     type: string,
     default_value: "panda",

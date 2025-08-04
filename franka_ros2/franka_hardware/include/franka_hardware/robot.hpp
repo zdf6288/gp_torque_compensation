@@ -253,7 +253,7 @@ class Robot {
     std::mutex control_mutex_;
 
     std::unique_ptr<franka::Robot> robot_;
-    std::unique_ptr<franka::ActiveControl> active_control_;
+    std::unique_ptr<franka::ActiveControlBase> active_control_;    // original version:std::unique_ptr<franka::ActiveControl> active_control_;
     std::unique_ptr<franka::Model> model_;
     std::unique_ptr<Model> franka_hardware_model_;
 
