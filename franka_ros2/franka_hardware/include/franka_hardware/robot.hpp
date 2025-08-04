@@ -254,6 +254,8 @@ class Robot {
 
     std::unique_ptr<franka::Robot> robot_;
     std::unique_ptr<franka::ActiveControlBase> active_control_;    // original version:std::unique_ptr<franka::ActiveControl> active_control_;
+    // This is caused by upgrade of libfranka. The current lib franka version is 0.13.2. Although admitted to be compatible
+    // by the original franka_ros2 repo(libfranka >= 0.12.1, <=0.13.3), we still need to change this to make things work.
     std::unique_ptr<franka::Model> model_;
     std::unique_ptr<Model> franka_hardware_model_;
 
