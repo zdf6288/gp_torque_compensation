@@ -16,6 +16,7 @@ set(msg_files
   "msg/MotorCommand.msg"
   "msg/LambdaCommand.msg"
   "msg/MotorMeasurement.msg"
+  "msg/CustomVar.msg"
 )
 
 rosidl_generate_interfaces(${PROJECT_NAME}

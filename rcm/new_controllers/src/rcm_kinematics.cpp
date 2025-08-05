@@ -152,3 +152,4 @@ void RCMForwardKinematics(std::array<double, 7> q, double eta, Matrix4d &XX, Mat
     XXp = Abp;
     JJp = Jp.block<3, 8>(0, 0);
 }
+
