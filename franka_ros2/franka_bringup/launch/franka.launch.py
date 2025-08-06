@@ -115,7 +115,7 @@ def generate_launch_description():
             executable='spawner',
             arguments=['franka_robot_state_broadcaster'],
             output='screen',
-            # condition=UnlessCondition(use_fake_hardware),
+            condition=UnlessCondition(use_fake_hardware),
         ),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource([PathJoinSubstitution(
