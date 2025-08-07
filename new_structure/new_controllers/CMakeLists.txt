@@ -30,8 +30,7 @@ find_package(custom_msgs REQUIRED)
 add_library(
         ${PROJECT_NAME}
         SHARED
-        src/joint_velocity_rcm_controller.cpp
-        src/rcm_kinematics.cpp)
+        src/effort_repeater.cpp)
 
 target_include_directories(
         ${PROJECT_NAME}
@@ -84,5 +83,6 @@ ament_export_dependencies(
         rclcpp
         rclcpp_lifecycle
         hardware_interface
+        custom_msgs
 )
 ament_package()

@@ -5,6 +5,7 @@
 #include <Eigen/Eigen>
 #include <controller_interface/controller_interface.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <custom_msgs/msg/effort_command.hpp>
 
 using CallbackReturn = rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn;
 
@@ -27,14 +28,12 @@ class EffortRepeater : public controller_interface::ControllerInterface {
  private:
   std::string arm_id_;
   const int num_joints = 7;
-  Vector7d q_;
-  Vector7d initial_q_;
-  Vector7d dq_;
-  Vector7d dq_filtered_;
-  Vector7d k_gains_;
-  Vector7d d_gains_;
-  double elapsed_time_{0.0};
-  void updateJointStates();
+  Vector7d tau_d_received_;
+
+  // Subuscriber
+  rclcpp::Subscription<custom_msgs::msg::EffortCommand>::SharedPtr effort_command_sub_ ;
+  bool received_effort_command_{false} ;
+  void effortCommandCallback(const custom_msgs::msg::EffortCommand::SharedPtr msg) ;
 };
 
-}  // namespace franka_example_controllers
+}  // namespace new_controllers
