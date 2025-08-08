@@ -1,0 +1,8 @@
+<library path="cpp_relayer">
+    <class name="cpp_relayer/CPPRelayer"
+           type="cpp_relayer::CPPRelayer" base_class_type="controller_interface::ControllerInterface">
+        <description>
+            A parameter and command relayer coded in C++.
+        </description>
+    </class>
+</library>

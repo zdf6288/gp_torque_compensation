@@ -1,8 +1,0 @@
-<library path="new_controllers">
-    <class name="new_controllers/JointVelocityRCMController"
-           type="new_controllers::JointVelocityRCMController" base_class_type="controller_interface::ControllerInterface">
-        <description>
-            A joint velocity controller subject to RCM constraint.
-        </description>
-    </class>
-</library>

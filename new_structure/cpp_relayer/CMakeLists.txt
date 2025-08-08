@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.5)
-project(new_controllers)
+project(cpp_relayer)
 
 # Default to C++17
 if(NOT CMAKE_CXX_STANDARD)
@@ -30,7 +30,7 @@ find_package(custom_msgs REQUIRED)
 add_library(
         ${PROJECT_NAME}
         SHARED
-        src/effort_repeater.cpp)
+        src/cpp_relayer.cpp)
 
 target_include_directories(
         ${PROJECT_NAME}
@@ -55,7 +55,7 @@ generate_parameter_library(new_controllers_parameters src/model_controller_param
 target_link_libraries(${PROJECT_NAME} new_controllers_parameters)
 
 pluginlib_export_plugin_description_file(
-        controller_interface new_controllers.xml)
+        controller_interface cpp_relayer.xml)
 
 install(
         TARGETS
