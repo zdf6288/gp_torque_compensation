@@ -60,11 +60,13 @@ class EffortPDController(Node):
             dq_des[4] = dq_delta
             
             # PD control 
-            tau = np.dot(self.k_gains, (q_des - q)) + np.dot(self.d_gains, (dq_des - dq))
+            tau = self.k_gains * (q_des - q) + self.d_gains * (dq_des - dq)
             tau = np.clip(tau, -100.0, 100.0)
             
             # Publish on topic /effort_command
             self.effort_msg.efforts = tau.tolist()
+            print(f'published on topic /effort_command: {tau}')
+            print(f'self.effort_msg: {self.effort_msg}')
             self.effort_publisher.publish(self.effort_msg)
             self.get_logger().debug(f'published on topic /effort_command: {tau}')
             
