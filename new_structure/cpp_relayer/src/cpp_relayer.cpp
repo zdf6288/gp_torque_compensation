@@ -46,6 +46,9 @@ controller_interface::return_type CPPRelayer::update(
   state_param.header.stamp = get_node()->now();
   Eigen::Map<Eigen::VectorXd>(state_param.position.data(), num_joints) = q_;
   Eigen::Map<Eigen::VectorXd>(state_param.velocity.data(), num_joints) = dq_;
+  state_param.mass = std::vector<double>(mass_.begin(), mass_.end());
+  state_param.coriolis = std::vector<double>(coriolis_.begin(), coriolis_.end());
+  state_param.body_jacobian_flange = std::vector<double>(zero_jacobian_flange_.begin(), zero_jacobian_flange_.end());
   state_param_pub_->publish(state_param);
 
   return controller_interface::return_type::OK;
@@ -92,6 +95,7 @@ void CPPRelayer::effortCommandCallback(const custom_msgs::msg::EffortCommand::Sh
 }
 
 void CPPRelayer::updateStateParam() {
+  // joint position and velocity
   for (auto i = 0; i < num_joints; ++i) {
     const auto& position_interface = state_interfaces_.at(2 * i);
     const auto& velocity_interface = state_interfaces_.at(2 * i + 1);
@@ -102,6 +106,11 @@ void CPPRelayer::updateStateParam() {
     q_(i) = position_interface.get_value();
     dq_(i) = velocity_interface.get_value();
   }
+
+  // kinematic and dynamic parameters
+  mass_ = franka_robot_model_->getMassMatrix();
+  coriolis_ = franka_robot_model_->getCoriolisForceVector();
+  zero_jacobian_flange_ = franka_robot_model_->getBodyJacobian(franka::Frame::kFlange);
 }
 
 }  // namespace cpp_relayer
