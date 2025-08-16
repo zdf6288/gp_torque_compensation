@@ -23,9 +23,9 @@ find_package(hardware_interface REQUIRED)
 find_package(franka_msgs REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(franka_semantic_components REQUIRED)
-find_package(generate_parameter_library)
 find_package(std_msgs REQUIRED)
 find_package(custom_msgs REQUIRED)
+find_package(generate_parameter_library REQUIRED)
 
 add_library(
         ${PROJECT_NAME}
@@ -50,9 +50,9 @@ ament_target_dependencies(
         custom_msgs
 )
 
-generate_parameter_library(new_controllers_parameters src/model_controller_parameters.yaml)
+generate_parameter_library(cpp_relayer_parameters src/cpp_relayer_parameters.yaml)
 
-target_link_libraries(${PROJECT_NAME} new_controllers_parameters)
+target_link_libraries(${PROJECT_NAME} cpp_relayer_parameters)
 
 pluginlib_export_plugin_description_file(
         controller_interface cpp_relayer.xml)

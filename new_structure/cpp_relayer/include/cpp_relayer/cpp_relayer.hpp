@@ -7,6 +7,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <custom_msgs/msg/effort_command.hpp>
 #include <custom_msgs/msg/state_parameter.hpp>  
+#include "franka_semantic_components/franka_robot_model.hpp"
 
 using CallbackReturn = rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn;
 
@@ -34,7 +35,10 @@ class CPPRelayer : public controller_interface::ControllerInterface {
   Vector7d tau_d_received_;  // from effort command, to be sent via command interface
   std::array<double, 49> mass_;
   std::array<double, 7> coriolis_;
-  std::array<double, 42> zero_jacobian_flange_;
+  std::array<double, 42> body_jacobian_flange_;
+
+  // Franka robot model for kinematics and dynamics
+  std::unique_ptr<franka_semantic_components::FrankaRobotModel> franka_robot_model_;
 
   // Subuscriber
   rclcpp::Subscription<custom_msgs::msg::EffortCommand>::SharedPtr effort_command_sub_ ;
@@ -45,6 +49,7 @@ class CPPRelayer : public controller_interface::ControllerInterface {
   // Publisher
   rclcpp::Publisher<custom_msgs::msg::StateParameter>::SharedPtr state_param_pub_;
   void updateStateParam();
+
 
 };
 

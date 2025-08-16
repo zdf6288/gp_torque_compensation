@@ -11,6 +11,7 @@ setup(
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
         ('share/' + package_name + '/launch', ['launch/effort_pd_launch.py']),
+        ('share/' + package_name + '/launch', ['launch/cartesian_impedance_launch.py']),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -22,6 +23,7 @@ setup(
     entry_points={
         'console_scripts': [
             'effort_pd = py_controllers.effort_pd:main',
+            'cartesian_impedance = py_controllers.cartesian_impedance:main',
         ],
     },
 )

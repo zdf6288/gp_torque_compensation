@@ -19,6 +19,7 @@ set(msg_files
   "msg/CustomVar.msg"
   "msg/EffortCommand.msg"
   "msg/StateParameter.msg"
+  "msg/TaskSpaceCommand.msg"
 )
 
 rosidl_generate_interfaces(${PROJECT_NAME}

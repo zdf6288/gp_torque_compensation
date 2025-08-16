@@ -63,12 +63,12 @@ def generate_launch_description():
         ),
         Node(
             package='py_controllers',
-            executable='effort_pd',
-            name='effort_pd',
+            executable='cartesian_impedance',
+            name='cartesian_impedance',
             output='screen',
             parameters=[{
-                'k_gains': [24.0, 24.0, 24.0, 24.0, 10.0, 6.0, 2.0],
-                'd_gains': [2.0, 2.0, 2.0, 1.0, 1.0, 1.0, 0.5],
+                'k_q': [24.0, 24.0, 24.0, 24.0, 10.0, 6.0, 2.0],
+                'eta': 1.0,
             }]
         )
     ])

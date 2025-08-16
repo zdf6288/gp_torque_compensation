@@ -32,7 +32,7 @@ CPPRelayer::state_interface_configuration() const {
 
 controller_interface::return_type CPPRelayer::update(
     const rclcpp::Time& /*time*/,
-    const rclcpp::Duration& period) {
+    const rclcpp::Duration& /*period*/) {
 
   // EffortCommand message received
   for (int i = 0; i < num_joints; ++i) {
@@ -46,9 +46,12 @@ controller_interface::return_type CPPRelayer::update(
   state_param.header.stamp = get_node()->now();
   Eigen::Map<Eigen::VectorXd>(state_param.position.data(), num_joints) = q_;
   Eigen::Map<Eigen::VectorXd>(state_param.velocity.data(), num_joints) = dq_;
-  state_param.mass = std::vector<double>(mass_.begin(), mass_.end());
-  state_param.coriolis = std::vector<double>(coriolis_.begin(), coriolis_.end());
-  state_param.body_jacobian_flange = std::vector<double>(zero_jacobian_flange_.begin(), zero_jacobian_flange_.end());
+  
+  // 直接复制数组数据，因为消息字段是std::array类型
+  std::copy(mass_.begin(), mass_.end(), state_param.mass.begin());
+  std::copy(coriolis_.begin(), coriolis_.end(), state_param.coriolis.begin());
+  std::copy(body_jacobian_flange_.begin(), body_jacobian_flange_.end(), state_param.body_jacobian_flange.begin());
+  
   state_param_pub_->publish(state_param);
 
   return controller_interface::return_type::OK;
@@ -68,6 +71,15 @@ CallbackReturn CPPRelayer::on_configure(
     const rclcpp_lifecycle::State& /*previous_state*/) {
   arm_id_ = get_node()->get_parameter("arm_id").as_string();
 
+  // 使用franka_semantic_components::FrankaRobotModel
+  try {
+    franka_robot_model_ = std::make_unique<franka_semantic_components::FrankaRobotModel>(
+        arm_id_ + "/robot_model", arm_id_ + "/robot_state");
+  } catch (const std::exception& e) {
+    fprintf(stderr, "Failed to initialize Franka robot model: %s\n", e.what());
+    return CallbackReturn::ERROR;
+  }
+
   // Subscribe to /effort_command
   effort_command_sub_ = get_node()->create_subscription<custom_msgs::msg::EffortCommand>(
       "effort_command", 10, 
@@ -85,6 +97,12 @@ CallbackReturn CPPRelayer::on_activate(
   q_ = Vector7d::Zero();
   dq_ = Vector7d::Zero();
   tau_d_received_ = Vector7d::Zero();
+  
+  // 初始化数组为零
+  mass_.fill(0.0);
+  coriolis_.fill(0.0);
+  body_jacobian_flange_.fill(0.0);
+  
   updateStateParam();
 
   return CallbackReturn::SUCCESS;
@@ -107,10 +125,18 @@ void CPPRelayer::updateStateParam() {
     dq_(i) = velocity_interface.get_value();
   }
 
-  // kinematic and dynamic parameters
-  mass_ = franka_robot_model_->getMassMatrix();
-  coriolis_ = franka_robot_model_->getCoriolisForceVector();
-  zero_jacobian_flange_ = franka_robot_model_->getBodyJacobian(franka::Frame::kFlange);
+  // 使用FrankaRobotModel计算动力学参数
+  if (franka_robot_model_) {
+    try {
+      // FrankaRobotModel会自动处理状态接口，不需要手动创建RobotState
+      mass_ = franka_robot_model_->getMassMatrix();
+      coriolis_ = franka_robot_model_->getCoriolisForceVector();
+      body_jacobian_flange_ = franka_robot_model_->getBodyJacobian(franka::Frame::kFlange);
+    } catch (const std::exception& e) {
+      // 如果计算失败，保持默认值
+      RCLCPP_WARN(get_node()->get_logger(), "Failed to compute dynamics: %s", e.what());
+    }
+  }
 }
 
 }  // namespace cpp_relayer

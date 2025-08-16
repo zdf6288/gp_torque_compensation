@@ -1,5 +1,5 @@
-model_example_controller:
+cpp_relayer:
   arm_id: {
     type: string,
     default_value: "panda",
-  }
+  } 
