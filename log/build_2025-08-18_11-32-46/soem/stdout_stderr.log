@@ -1,0 +1,88 @@
+-- The C compiler identification is GNU 11.4.0
+-- The CXX compiler identification is GNU 11.4.0
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Check for working C compiler: /usr/bin/cc - skipped
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: /usr/bin/c++ - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- Found ament_cmake: 1.3.11 (/opt/ros/humble/share/ament_cmake/cmake)
+-- Found Python3: /usr/bin/python3 (found version "3.10.12") found components: Interpreter 
+[0mOS is linux[0m
+[0mCMAKE_SYSTEM_NAME is Linux [0m
+[0march is [0m
+-- Configuring done
+-- Generating done
+-- Build files have been written to: /home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/build/soem
+[ 16%] [32mBuilding C object CMakeFiles/soem.dir/include/soem/soem/ethercatconfig.c.o[0m
+[ 16%] [32mBuilding C object CMakeFiles/soem.dir/include/soem/soem/ethercatcoe.c.o[0m
+[ 25%] [32mBuilding C object CMakeFiles/soem.dir/include/soem/soem/ethercatbase.c.o[0m
+[ 33%] [32mBuilding C object CMakeFiles/soem.dir/include/soem/soem/ethercatdc.c.o[0m
+[ 41%] [32mBuilding C object CMakeFiles/soem.dir/include_linux/soem/osal/osal.c.o[0m
+[ 50%] [32mBuilding C object CMakeFiles/soem.dir/include_linux/soem/oshw/nicdrv.c.o[0m
+[ 58%] [32mBuilding C object CMakeFiles/soem.dir/include/soem/soem/ethercatfoe.c.o[0m
+[ 66%] [32mBuilding C object CMakeFiles/soem.dir/include/soem/soem/ethercatsoe.c.o[0m
+[ 91%] [32mBuilding C object CMakeFiles/soem.dir/include_linux/soem/oshw/oshw.c.o[0m
+[ 91%] [32mBuilding C object CMakeFiles/soem.dir/include/soem/soem/ethercatmain.c.o[0m
+[ 91%] [32mBuilding C object CMakeFiles/soem.dir/include/soem/soem/ethercatprint.c.o[0m
+[01m[K/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/soem_interface/soem/include/soem/soem/ethercatconfig.c:[m[K In function ‘[01m[Kecx_config_from_table[m[K’:
+[01m[K/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/soem_interface/soem/include/soem/soem/ethercatconfig.c:290:48:[m[K [01;35m[Kwarning: [m[Kunused parameter ‘[01m[Kcontext[m[K’ [[01;35m[K]8;;https://gcc.gnu.org/onlinedocs/gcc/Warning-Options.html#index-Wunused-parameter-Wunused-parameter]8;;[m[K]
+  290 | static int ecx_config_from_table([01;35m[Kecx_contextt *context[m[K, uint16 slave)
+      |                                  [01;35m[K~~~~~~~~~~~~~~^~~~~~~[m[K
+[01m[K/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/soem_interface/soem/include/soem/soem/ethercatconfig.c:290:64:[m[K [01;35m[Kwarning: [m[Kunused parameter ‘[01m[Kslave[m[K’ [[01;35m[K]8;;https://gcc.gnu.org/onlinedocs/gcc/Warning-Options.html#index-Wunused-parameter-Wunused-parameter]8;;[m[K]
+  290 | static int ecx_config_from_table(ecx_contextt *context, [01;35m[Kuint16 slave[m[K)
+      |                                                         [01;35m[K~~~~~~~^~~~~[m[K
+[01m[K/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/soem_interface/soem/include/soem/soem/ethercatconfig.c:[m[K In function ‘[01m[Kecx_config_map_group[m[K’:
+[01m[K/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/soem_interface/soem/include/soem/soem/ethercatconfig.c:918:19:[m[K [01;35m[Kwarning: [m[KISO C forbids passing argument 3 of ‘[01m[Kosal_thread_create[m[K’ between function pointer and ‘[01m[Kvoid *[m[K’ [[01;35m[K]8;;https://gcc.gnu.org/onlinedocs/gcc/Warning-Options.html#index-Wpedantic-Wpedantic]8;;[m[K]
+  918 |                   [01;35m[K&ecx_mapper_thread[m[K, &(ecx_mapt[thrn]));
+      |                   [01;35m[K^~~~~~~~~~~~~~~~~~[m[K
+In file included from [01m[K/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/soem_interface/soem/include/soem/soem/ethercatconfig.c:52[m[K:
+[01m[K/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/soem_interface/soem/include/soem/osal/osal.h:63:60:[m[K [01;36m[Knote: [m[Kexpected ‘[01m[Kvoid *[m[K’ but argument is of type ‘[01m[Kvoid (*)(void *)[m[K’
+   63 | int osal_thread_create(void *thandle, int stacksize, [01;36m[Kvoid *func[m[K, void *param);
+      |                                                      [01;36m[K~~~~~~^~~~[m[K
+[01m[K/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/soem_interface/soem/include/soem/soem/ethercatfoe.c:[m[K In function ‘[01m[Kecx_FOEdefinehook[m[K’:
+[01m[K/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/soem_interface/soem/include/soem/soem/ethercatfoe.c:94:20:[m[K [01;35m[Kwarning: [m[KISO C forbids assignment between function pointer and ‘[01m[Kvoid *[m[K’ [[01;35m[K]8;;https://gcc.gnu.org/onlinedocs/gcc/Warning-Options.html#index-Wpedantic-Wpedantic]8;;[m[K]
+   94 |   context->FOEhook [01;35m[K=[m[K hook;
+      |                    [01;35m[K^[m[K
+[01m[K/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/soem_interface/soem/include_linux/soem/osal/osal.c:[m[K In function ‘[01m[Kosal_gettimeofday[m[K’:
+[01m[K/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/soem_interface/soem/include_linux/soem/osal/osal.c:69:54:[m[K [01;35m[Kwarning: [m[Kright-hand operand of comma expression has no effect [[01;35m[K]8;;https://gcc.gnu.org/onlinedocs/gcc/Warning-Options.html#index-Wunused-value-Wunused-value]8;;[m[K]
+   69 |    return_value = clock_gettime(CLOCK_MONOTONIC, &ts)[01;35m[K,[m[K 0;
+      |                                                      [01;35m[K^[m[K
+[01m[K/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/soem_interface/soem/include_linux/soem/osal/osal.c:60:60:[m[K [01;35m[Kwarning: [m[Kunused parameter ‘[01m[Ktz[m[K’ [[01;35m[K]8;;https://gcc.gnu.org/onlinedocs/gcc/Warning-Options.html#index-Wunused-parameter-Wunused-parameter]8;;[m[K]
+   60 | int osal_gettimeofday(struct timeval *tv, [01;35m[Kstruct timezone *tz[m[K)
+      |                                           [01;35m[K~~~~~~~~~~~~~~~~~^~[m[K
+[01m[K/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/soem_interface/soem/include_linux/soem/osal/osal.c:[m[K In function ‘[01m[Kosal_time_diff[m[K’:
+[01m[K/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/soem_interface/soem/include_linux/soem/osal/osal.c:90:19:[m[K [01;35m[Kwarning: [m[Kcomparison of unsigned expression in ‘[01m[K< 0[m[K’ is always false [[01;35m[K]8;;https://gcc.gnu.org/onlinedocs/gcc/Warning-Options.html#index-Wtype-limits-Wtype-limits]8;;[m[K]
+   90 |    if (diff->usec [01;35m[K<[m[K 0) {
+      |                   [01;35m[K^[m[K
+[01m[K/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/soem_interface/soem/include_linux/soem/osal/osal.c:[m[K In function ‘[01m[Kosal_thread_create[m[K’:
+[01m[K/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/soem_interface/soem/include_linux/soem/osal/osal.c:144:41:[m[K [01;35m[Kwarning: [m[KISO C forbids passing argument 3 of ‘[01m[Kpthread_create[m[K’ between function pointer and ‘[01m[Kvoid *[m[K’ [[01;35m[K]8;;https://gcc.gnu.org/onlinedocs/gcc/Warning-Options.html#index-Wpedantic-Wpedantic]8;;[m[K]
+  144 |    ret = pthread_create(threadp, &attr, [01;35m[Kfunc[m[K, param);
+      |                                         [01;35m[K^~~~[m[K
+In file included from [01m[K/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/soem_interface/soem/include_linux/soem/osal/osal_defs.h:56[m[K,
+                 from [01m[K/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/soem_interface/soem/include/soem/osal/osal.h:29[m[K,
+                 from [01m[K/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/soem_interface/soem/include_linux/soem/osal/osal.c:47[m[K:
+[01m[K/usr/include/pthread.h:204:36:[m[K [01;36m[Knote: [m[Kexpected ‘[01m[Kvoid * (*)(void *)[m[K’ but argument is of type ‘[01m[Kvoid *[m[K’
+  204 |                            [01;36m[Kvoid *(*__start_routine) (void *)[m[K,
+      |                            [01;36m[K~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~[m[K
+[01m[K/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/soem_interface/soem/include_linux/soem/osal/osal.c:[m[K In function ‘[01m[Kosal_thread_create_rt[m[K’:
+[01m[K/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/soem_interface/soem/include_linux/soem/osal/osal.c:162:41:[m[K [01;35m[Kwarning: [m[KISO C forbids passing argument 3 of ‘[01m[Kpthread_create[m[K’ between function pointer and ‘[01m[Kvoid *[m[K’ [[01;35m[K]8;;https://gcc.gnu.org/onlinedocs/gcc/Warning-Options.html#index-Wpedantic-Wpedantic]8;;[m[K]
+  162 |    ret = pthread_create(threadp, &attr, [01;35m[Kfunc[m[K, param);
+      |                                         [01;35m[K^~~~[m[K
+In file included from [01m[K/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/soem_interface/soem/include_linux/soem/osal/osal_defs.h:56[m[K,
+                 from [01m[K/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/soem_interface/soem/include/soem/osal/osal.h:29[m[K,
+                 from [01m[K/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/soem_interface/soem/include_linux/soem/osal/osal.c:47[m[K:
+[01m[K/usr/include/pthread.h:204:36:[m[K [01;36m[Knote: [m[Kexpected ‘[01m[Kvoid * (*)(void *)[m[K’ but argument is of type ‘[01m[Kvoid *[m[K’
+  204 |                            [01;36m[Kvoid *(*__start_routine) (void *)[m[K,
+      |                            [01;36m[K~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~[m[K
+[01m[K/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/soem_interface/soem/include/soem/soem/ethercatmain.c:360:2:[m[K [01;35m[Kwarning: [m[KISO C does not allow extra ‘[01m[K;[m[K’ outside of a function [[01;35m[K]8;;https://gcc.gnu.org/onlinedocs/gcc/Warning-Options.html#index-Wpedantic-Wpedantic]8;;[m[K]
+  360 | }[01;35m[K;[m[K
+      |  [01;35m[K^[m[K
+[100%] [32m[1mLinking C shared library libsoem.so[0m
+gmake[2]: *** [CMakeFiles/soem.dir/build.make:257: libsoem.so] Interrupt
+gmake[1]: *** [CMakeFiles/Makefile2:137: CMakeFiles/soem.dir/all] Interrupt
+gmake: *** [Makefile:146: all] Interrupt

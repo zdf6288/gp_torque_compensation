@@ -1,0 +1,18 @@
+{
+  "package_name": "franka_msgs",
+  "non_idl_tuples": [
+    "/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/franka_ros2/franka_msgs:action/Grasp.action",
+    "/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/franka_ros2/franka_msgs:action/Homing.action",
+    "/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/franka_ros2/franka_msgs:action/Move.action",
+    "/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/franka_ros2/franka_msgs:msg/Errors.msg",
+    "/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/franka_ros2/franka_msgs:msg/GraspEpsilon.msg",
+    "/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/franka_ros2/franka_msgs:msg/FrankaRobotState.msg",
+    "/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/franka_ros2/franka_msgs:srv/SetCartesianStiffness.srv",
+    "/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/franka_ros2/franka_msgs:srv/SetTCPFrame.srv",
+    "/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/franka_ros2/franka_msgs:srv/SetForceTorqueCollisionBehavior.srv",
+    "/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/franka_ros2/franka_msgs:srv/SetFullCollisionBehavior.srv",
+    "/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/franka_ros2/franka_msgs:srv/SetJointStiffness.srv",
+    "/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/franka_ros2/franka_msgs:srv/SetStiffnessFrame.srv",
+    "/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/franka_ros2/franka_msgs:srv/SetLoad.srv"
+  ]
+}

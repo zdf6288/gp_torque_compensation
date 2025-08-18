@@ -1,0 +1,91 @@
+[0.035s] Invoking command in '/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/build/soem': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/nuc_6g_life_3/franka_ros2_endowrist_ws/install/py_controllers:/opt/ros/humble /usr/bin/cmake /home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/soem_interface/soem -DCMAKE_INSTALL_PREFIX=/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/install/soem
+[0.173s] -- The C compiler identification is GNU 11.4.0
+[0.268s] -- The CXX compiler identification is GNU 11.4.0
+[0.280s] -- Detecting C compiler ABI info
+[0.429s] -- Detecting C compiler ABI info - done
+[0.440s] -- Check for working C compiler: /usr/bin/cc - skipped
+[0.440s] -- Detecting C compile features
+[0.440s] -- Detecting C compile features - done
+[0.444s] -- Detecting CXX compiler ABI info
+[0.581s] -- Detecting CXX compiler ABI info - done
+[0.589s] -- Check for working CXX compiler: /usr/bin/c++ - skipped
+[0.589s] -- Detecting CXX compile features
+[0.590s] -- Detecting CXX compile features - done
+[0.594s] -- Found ament_cmake: 1.3.11 (/opt/ros/humble/share/ament_cmake/cmake)
+[0.799s] -- Found Python3: /usr/bin/python3 (found version "3.10.12") found components: Interpreter 
+[0.966s] [0mOS is linux[0m
+[0.966s] [0mCMAKE_SYSTEM_NAME is Linux [0m
+[0.966s] [0march is [0m
+[1.036s] -- Configuring done
+[1.040s] -- Generating done
+[1.042s] -- Build files have been written to: /home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/build/soem
+[1.047s] Invoked command in '/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/build/soem' returned '0': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/nuc_6g_life_3/franka_ros2_endowrist_ws/install/py_controllers:/opt/ros/humble /usr/bin/cmake /home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/soem_interface/soem -DCMAKE_INSTALL_PREFIX=/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/install/soem
+[1.049s] Invoking command in '/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/build/soem': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/nuc_6g_life_3/franka_ros2_endowrist_ws/install/py_controllers:/opt/ros/humble /usr/bin/cmake --build /home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/build/soem -- -j16 -l16
+[1.166s] [ 16%] [32mBuilding C object CMakeFiles/soem.dir/include/soem/soem/ethercatconfig.c.o[0m
+[1.166s] [ 16%] [32mBuilding C object CMakeFiles/soem.dir/include/soem/soem/ethercatcoe.c.o[0m
+[1.171s] [ 25%] [32mBuilding C object CMakeFiles/soem.dir/include/soem/soem/ethercatbase.c.o[0m
+[1.171s] [ 33%] [32mBuilding C object CMakeFiles/soem.dir/include/soem/soem/ethercatdc.c.o[0m
+[1.180s] [ 41%] [32mBuilding C object CMakeFiles/soem.dir/include_linux/soem/osal/osal.c.o[0m
+[1.181s] [ 50%] [32mBuilding C object CMakeFiles/soem.dir/include_linux/soem/oshw/nicdrv.c.o[0m
+[1.187s] [ 58%] [32mBuilding C object CMakeFiles/soem.dir/include/soem/soem/ethercatfoe.c.o[0m
+[1.196s] [ 66%] [32mBuilding C object CMakeFiles/soem.dir/include/soem/soem/ethercatsoe.c.o[0m
+[1.199s] [ 91%] [32mBuilding C object CMakeFiles/soem.dir/include_linux/soem/oshw/oshw.c.o[0m
+[1.199s] [ 91%] [32mBuilding C object CMakeFiles/soem.dir/include/soem/soem/ethercatmain.c.o[0m
+[1.199s] [ 91%] [32mBuilding C object CMakeFiles/soem.dir/include/soem/soem/ethercatprint.c.o[0m
+[1.237s] [01m[K/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/soem_interface/soem/include/soem/soem/ethercatconfig.c:[m[K In function ‘[01m[Kecx_config_from_table[m[K’:
+[1.237s] [01m[K/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/soem_interface/soem/include/soem/soem/ethercatconfig.c:290:48:[m[K [01;35m[Kwarning: [m[Kunused parameter ‘[01m[Kcontext[m[K’ [[01;35m[K]8;;https://gcc.gnu.org/onlinedocs/gcc/Warning-Options.html#index-Wunused-parameter-Wunused-parameter]8;;[m[K]
+[1.238s]   290 | static int ecx_config_from_table([01;35m[Kecx_contextt *context[m[K, uint16 slave)
+[1.238s]       |                                  [01;35m[K~~~~~~~~~~~~~~^~~~~~~[m[K
+[1.238s] [01m[K/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/soem_interface/soem/include/soem/soem/ethercatconfig.c:290:64:[m[K [01;35m[Kwarning: [m[Kunused parameter ‘[01m[Kslave[m[K’ [[01;35m[K]8;;https://gcc.gnu.org/onlinedocs/gcc/Warning-Options.html#index-Wunused-parameter-Wunused-parameter]8;;[m[K]
+[1.238s]   290 | static int ecx_config_from_table(ecx_contextt *context, [01;35m[Kuint16 slave[m[K)
+[1.238s]       |                                                         [01;35m[K~~~~~~~^~~~~[m[K
+[1.241s] [01m[K/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/soem_interface/soem/include/soem/soem/ethercatconfig.c:[m[K In function ‘[01m[Kecx_config_map_group[m[K’:
+[1.241s] [01m[K/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/soem_interface/soem/include/soem/soem/ethercatconfig.c:918:19:[m[K [01;35m[Kwarning: [m[KISO C forbids passing argument 3 of ‘[01m[Kosal_thread_create[m[K’ between function pointer and ‘[01m[Kvoid *[m[K’ [[01;35m[K]8;;https://gcc.gnu.org/onlinedocs/gcc/Warning-Options.html#index-Wpedantic-Wpedantic]8;;[m[K]
+[1.242s]   918 |                   [01;35m[K&ecx_mapper_thread[m[K, &(ecx_mapt[thrn]));
+[1.242s]       |                   [01;35m[K^~~~~~~~~~~~~~~~~~[m[K
+[1.242s] In file included from [01m[K/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/soem_interface/soem/include/soem/soem/ethercatconfig.c:52[m[K:
+[1.242s] [01m[K/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/soem_interface/soem/include/soem/osal/osal.h:63:60:[m[K [01;36m[Knote: [m[Kexpected ‘[01m[Kvoid *[m[K’ but argument is of type ‘[01m[Kvoid (*)(void *)[m[K’
+[1.242s]    63 | int osal_thread_create(void *thandle, int stacksize, [01;36m[Kvoid *func[m[K, void *param);
+[1.242s]       |                                                      [01;36m[K~~~~~~^~~~[m[K
+[1.262s] [01m[K/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/soem_interface/soem/include/soem/soem/ethercatfoe.c:[m[K In function ‘[01m[Kecx_FOEdefinehook[m[K’:
+[1.262s] [01m[K/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/soem_interface/soem/include/soem/soem/ethercatfoe.c:94:20:[m[K [01;35m[Kwarning: [m[KISO C forbids assignment between function pointer and ‘[01m[Kvoid *[m[K’ [[01;35m[K]8;;https://gcc.gnu.org/onlinedocs/gcc/Warning-Options.html#index-Wpedantic-Wpedantic]8;;[m[K]
+[1.262s]    94 |   context->FOEhook [01;35m[K=[m[K hook;
+[1.262s]       |                    [01;35m[K^[m[K
+[1.262s] [01m[K/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/soem_interface/soem/include_linux/soem/osal/osal.c:[m[K In function ‘[01m[Kosal_gettimeofday[m[K’:
+[1.265s] [01m[K/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/soem_interface/soem/include_linux/soem/osal/osal.c:69:54:[m[K [01;35m[Kwarning: [m[Kright-hand operand of comma expression has no effect [[01;35m[K]8;;https://gcc.gnu.org/onlinedocs/gcc/Warning-Options.html#index-Wunused-value-Wunused-value]8;;[m[K]
+[1.265s]    69 |    return_value = clock_gettime(CLOCK_MONOTONIC, &ts)[01;35m[K,[m[K 0;
+[1.265s]       |                                                      [01;35m[K^[m[K
+[1.265s] [01m[K/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/soem_interface/soem/include_linux/soem/osal/osal.c:60:60:[m[K [01;35m[Kwarning: [m[Kunused parameter ‘[01m[Ktz[m[K’ [[01;35m[K]8;;https://gcc.gnu.org/onlinedocs/gcc/Warning-Options.html#index-Wunused-parameter-Wunused-parameter]8;;[m[K]
+[1.266s]    60 | int osal_gettimeofday(struct timeval *tv, [01;35m[Kstruct timezone *tz[m[K)
+[1.266s]       |                                           [01;35m[K~~~~~~~~~~~~~~~~~^~[m[K
+[1.266s] [01m[K/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/soem_interface/soem/include_linux/soem/osal/osal.c:[m[K In function ‘[01m[Kosal_time_diff[m[K’:
+[1.266s] [01m[K/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/soem_interface/soem/include_linux/soem/osal/osal.c:90:19:[m[K [01;35m[Kwarning: [m[Kcomparison of unsigned expression in ‘[01m[K< 0[m[K’ is always false [[01;35m[K]8;;https://gcc.gnu.org/onlinedocs/gcc/Warning-Options.html#index-Wtype-limits-Wtype-limits]8;;[m[K]
+[1.266s]    90 |    if (diff->usec [01;35m[K<[m[K 0) {
+[1.266s]       |                   [01;35m[K^[m[K
+[1.266s] [01m[K/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/soem_interface/soem/include_linux/soem/osal/osal.c:[m[K In function ‘[01m[Kosal_thread_create[m[K’:
+[1.266s] [01m[K/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/soem_interface/soem/include_linux/soem/osal/osal.c:144:41:[m[K [01;35m[Kwarning: [m[KISO C forbids passing argument 3 of ‘[01m[Kpthread_create[m[K’ between function pointer and ‘[01m[Kvoid *[m[K’ [[01;35m[K]8;;https://gcc.gnu.org/onlinedocs/gcc/Warning-Options.html#index-Wpedantic-Wpedantic]8;;[m[K]
+[1.266s]   144 |    ret = pthread_create(threadp, &attr, [01;35m[Kfunc[m[K, param);
+[1.266s]       |                                         [01;35m[K^~~~[m[K
+[1.266s] In file included from [01m[K/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/soem_interface/soem/include_linux/soem/osal/osal_defs.h:56[m[K,
+[1.266s]                  from [01m[K/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/soem_interface/soem/include/soem/osal/osal.h:29[m[K,
+[1.266s]                  from [01m[K/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/soem_interface/soem/include_linux/soem/osal/osal.c:47[m[K:
+[1.266s] [01m[K/usr/include/pthread.h:204:36:[m[K [01;36m[Knote: [m[Kexpected ‘[01m[Kvoid * (*)(void *)[m[K’ but argument is of type ‘[01m[Kvoid *[m[K’
+[1.267s]   204 |                            [01;36m[Kvoid *(*__start_routine) (void *)[m[K,
+[1.267s]       |                            [01;36m[K~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~[m[K
+[1.267s] [01m[K/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/soem_interface/soem/include_linux/soem/osal/osal.c:[m[K In function ‘[01m[Kosal_thread_create_rt[m[K’:
+[1.267s] [01m[K/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/soem_interface/soem/include_linux/soem/osal/osal.c:162:41:[m[K [01;35m[Kwarning: [m[KISO C forbids passing argument 3 of ‘[01m[Kpthread_create[m[K’ between function pointer and ‘[01m[Kvoid *[m[K’ [[01;35m[K]8;;https://gcc.gnu.org/onlinedocs/gcc/Warning-Options.html#index-Wpedantic-Wpedantic]8;;[m[K]
+[1.267s]   162 |    ret = pthread_create(threadp, &attr, [01;35m[Kfunc[m[K, param);
+[1.267s]       |                                         [01;35m[K^~~~[m[K
+[1.267s] In file included from [01m[K/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/soem_interface/soem/include_linux/soem/osal/osal_defs.h:56[m[K,
+[1.267s]                  from [01m[K/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/soem_interface/soem/include/soem/osal/osal.h:29[m[K,
+[1.267s]                  from [01m[K/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/soem_interface/soem/include_linux/soem/osal/osal.c:47[m[K:
+[1.267s] [01m[K/usr/include/pthread.h:204:36:[m[K [01;36m[Knote: [m[Kexpected ‘[01m[Kvoid * (*)(void *)[m[K’ but argument is of type ‘[01m[Kvoid *[m[K’
+[1.267s]   204 |                            [01;36m[Kvoid *(*__start_routine) (void *)[m[K,
+[1.267s]       |                            [01;36m[K~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~[m[K
+[1.273s] [01m[K/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/soem_interface/soem/include/soem/soem/ethercatmain.c:360:2:[m[K [01;35m[Kwarning: [m[KISO C does not allow extra ‘[01m[K;[m[K’ outside of a function [[01;35m[K]8;;https://gcc.gnu.org/onlinedocs/gcc/Warning-Options.html#index-Wpedantic-Wpedantic]8;;[m[K]
+[1.273s]   360 | }[01;35m[K;[m[K
+[1.274s]       |  [01;35m[K^[m[K
+[1.390s] [100%] [32m[1mLinking C shared library libsoem.so[0m
+[1.404s] gmake[2]: *** [CMakeFiles/soem.dir/build.make:257: libsoem.so] Interrupt
+[1.404s] gmake[1]: *** [CMakeFiles/Makefile2:137: CMakeFiles/soem.dir/all] Interrupt
+[1.404s] gmake: *** [Makefile:146: all] Interrupt

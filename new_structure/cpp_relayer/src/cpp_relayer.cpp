@@ -7,6 +7,9 @@
 
 #include <Eigen/Eigen>
 
+#include "hardware_interface/types/hardware_interface_return_values.hpp"
+#include "hardware_interface/types/hardware_interface_type_values.hpp"
+
 namespace cpp_relayer {
 
 controller_interface::InterfaceConfiguration
@@ -27,6 +30,9 @@ CPPRelayer::state_interface_configuration() const {
     config.names.push_back(arm_id_ + "_joint" + std::to_string(i) + "/position");
     config.names.push_back(arm_id_ + "_joint" + std::to_string(i) + "/velocity");
   }
+  for (const auto& franka_robot_model_name : franka_robot_model_->get_state_interface_names()) {
+    config.names.push_back(franka_robot_model_name);
+  }
   return config;
 }
 
@@ -46,8 +52,7 @@ controller_interface::return_type CPPRelayer::update(
   state_param.header.stamp = get_node()->now();
   Eigen::Map<Eigen::VectorXd>(state_param.position.data(), num_joints) = q_;
   Eigen::Map<Eigen::VectorXd>(state_param.velocity.data(), num_joints) = dq_;
-  
-  // 直接复制数组数据，因为消息字段是std::array类型
+  std::copy(o_t_f_.begin(), o_t_f_.end(), state_param.o_t_f.begin());
   std::copy(mass_.begin(), mass_.end(), state_param.mass.begin());
   std::copy(coriolis_.begin(), coriolis_.end(), state_param.coriolis.begin());
   std::copy(body_jacobian_flange_.begin(), body_jacobian_flange_.end(), state_param.body_jacobian_flange.begin());
@@ -60,7 +65,8 @@ controller_interface::return_type CPPRelayer::update(
 CallbackReturn CPPRelayer::on_init() {
   try {
     auto_declare<std::string>("arm_id", "panda");
-  } catch (const std::exception& e) {
+  } 
+  catch (const std::exception& e) {
     fprintf(stderr, "Exception thrown during init stage with message: %s \n", e.what());
     return CallbackReturn::ERROR;
   }
@@ -69,14 +75,11 @@ CallbackReturn CPPRelayer::on_init() {
 
 CallbackReturn CPPRelayer::on_configure(
     const rclcpp_lifecycle::State& /*previous_state*/) {
-  arm_id_ = get_node()->get_parameter("arm_id").as_string();
-
-  // 使用franka_semantic_components::FrankaRobotModel
   try {
-    franka_robot_model_ = std::make_unique<franka_semantic_components::FrankaRobotModel>(
-        arm_id_ + "/robot_model", arm_id_ + "/robot_state");
-  } catch (const std::exception& e) {
-    fprintf(stderr, "Failed to initialize Franka robot model: %s\n", e.what());
+    arm_id_ = get_node()->get_parameter("arm_id").as_string();
+  } 
+  catch (const std::exception& e) {
+    RCLCPP_ERROR(get_node()->get_logger(), "Failed to get arm_id parameter: %s", e.what());
     return CallbackReturn::ERROR;
   }
 
@@ -89,7 +92,19 @@ CallbackReturn CPPRelayer::on_configure(
   state_param_pub_ = get_node()->create_publisher<custom_msgs::msg::StateParameter>(
       "state_parameter", 10);
 
-  return CallbackReturn::SUCCESS;
+  // franka_semantic_components::FrankaRobotModel
+  try {
+    franka_robot_model_ = std::make_unique<franka_semantic_components::FrankaRobotModel>(
+      franka_semantic_components::FrankaRobotModel(arm_id_ + "/" + k_robot_model_interface_name,
+                                                   arm_id_ + "/" + k_robot_state_interface_name));
+
+    RCLCPP_DEBUG(get_node()->get_logger(), "configured successfully");
+    return CallbackReturn::SUCCESS;
+  } 
+  catch (const std::exception& e) {
+    RCLCPP_ERROR(get_node()->get_logger(), "Failed to configure controller: %s", e.what());
+    return CallbackReturn::ERROR;
+  }
 }
 
 CallbackReturn CPPRelayer::on_activate(
@@ -97,11 +112,12 @@ CallbackReturn CPPRelayer::on_activate(
   q_ = Vector7d::Zero();
   dq_ = Vector7d::Zero();
   tau_d_received_ = Vector7d::Zero();
-  
-  // 初始化数组为零
+  o_t_f_.fill(0.0);
   mass_.fill(0.0);
   coriolis_.fill(0.0);
   body_jacobian_flange_.fill(0.0);
+
+  franka_robot_model_->assign_loaned_state_interfaces(state_interfaces_);
   
   updateStateParam();
 
@@ -125,15 +141,16 @@ void CPPRelayer::updateStateParam() {
     dq_(i) = velocity_interface.get_value();
   }
 
-  // 使用FrankaRobotModel计算动力学参数
+  // get kinematics and dynamics parameters from franka_robot_model_(franka_semantic_components)
   if (franka_robot_model_) {
     try {
-      // FrankaRobotModel会自动处理状态接口，不需要手动创建RobotState
+      o_t_f_ = franka_robot_model_->getPoseMatrix(franka::Frame::kFlange);
       mass_ = franka_robot_model_->getMassMatrix();
       coriolis_ = franka_robot_model_->getCoriolisForceVector();
       body_jacobian_flange_ = franka_robot_model_->getBodyJacobian(franka::Frame::kFlange);
-    } catch (const std::exception& e) {
-      // 如果计算失败，保持默认值
+      
+    } 
+    catch (const std::exception& e) {
       RCLCPP_WARN(get_node()->get_logger(), "Failed to compute dynamics: %s", e.what());
     }
   }

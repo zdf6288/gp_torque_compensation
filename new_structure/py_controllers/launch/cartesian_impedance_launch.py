@@ -67,8 +67,8 @@ def generate_launch_description():
             name='cartesian_impedance',
             output='screen',
             parameters=[{
-                'k_q': [24.0, 24.0, 24.0, 24.0, 10.0, 6.0, 2.0],
-                'eta': 1.0,
+                'k_gains': [20, 20, 20, 10, 10, 10],
+                'eta': 0.707,
             }]
         )
     ])
