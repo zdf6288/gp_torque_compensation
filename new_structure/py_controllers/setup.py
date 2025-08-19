@@ -26,6 +26,7 @@ setup(
             'effort_pd = py_controllers.effort_pd:main',
             'cartesian_impedance = py_controllers.cartesian_impedance:main',
             'cartesian_model_free = py_controllers.cartesian_model_free:main',
+            'trajectory_publisher = py_controllers.trajectory_publisher:main',
         ],
     },
 )
