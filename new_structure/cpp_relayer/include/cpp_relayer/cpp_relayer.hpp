@@ -36,7 +36,7 @@ class CPPRelayer : public controller_interface::ControllerInterface {
   std::array<double, 16> o_t_f_;
   std::array<double, 49> mass_;
   std::array<double, 7> coriolis_;
-  std::array<double, 42> body_jacobian_flange_;
+  std::array<double, 42> zero_jacobian_flange_;
 
   // Franka robot model for kinematics and dynamics
   std::unique_ptr<franka_semantic_components::FrankaRobotModel> franka_robot_model_;

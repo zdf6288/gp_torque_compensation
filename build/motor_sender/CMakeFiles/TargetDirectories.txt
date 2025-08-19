@@ -1,9 +1,0 @@
-/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/build/motor_sender/CMakeFiles/uninstall.dir
-/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/build/motor_sender/CMakeFiles/motor_sender_uninstall.dir
-/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/build/motor_sender/CMakeFiles/test.dir
-/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/build/motor_sender/CMakeFiles/edit_cache.dir
-/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/build/motor_sender/CMakeFiles/rebuild_cache.dir
-/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/build/motor_sender/CMakeFiles/list_install_components.dir
-/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/build/motor_sender/CMakeFiles/install.dir
-/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/build/motor_sender/CMakeFiles/install/local.dir
-/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/build/motor_sender/CMakeFiles/install/strip.dir

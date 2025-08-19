@@ -55,7 +55,7 @@ controller_interface::return_type CPPRelayer::update(
   std::copy(o_t_f_.begin(), o_t_f_.end(), state_param.o_t_f.begin());
   std::copy(mass_.begin(), mass_.end(), state_param.mass.begin());
   std::copy(coriolis_.begin(), coriolis_.end(), state_param.coriolis.begin());
-  std::copy(body_jacobian_flange_.begin(), body_jacobian_flange_.end(), state_param.body_jacobian_flange.begin());
+  std::copy(zero_jacobian_flange_.begin(), zero_jacobian_flange_.end(), state_param.zero_jacobian_flange.begin());
   
   state_param_pub_->publish(state_param);
 
@@ -115,7 +115,7 @@ CallbackReturn CPPRelayer::on_activate(
   o_t_f_.fill(0.0);
   mass_.fill(0.0);
   coriolis_.fill(0.0);
-  body_jacobian_flange_.fill(0.0);
+  zero_jacobian_flange_.fill(0.0);
 
   franka_robot_model_->assign_loaned_state_interfaces(state_interfaces_);
   
@@ -147,7 +147,7 @@ void CPPRelayer::updateStateParam() {
       o_t_f_ = franka_robot_model_->getPoseMatrix(franka::Frame::kFlange);
       mass_ = franka_robot_model_->getMassMatrix();
       coriolis_ = franka_robot_model_->getCoriolisForceVector();
-      body_jacobian_flange_ = franka_robot_model_->getBodyJacobian(franka::Frame::kFlange);
+      zero_jacobian_flange_ = franka_robot_model_->getZeroJacobian(franka::Frame::kFlange);
       
     } 
     catch (const std::exception& e) {

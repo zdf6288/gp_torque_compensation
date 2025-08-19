@@ -1,8 +1,0 @@
-[33mCMake Warning (dev) at /usr/share/cmake-3.22/Modules/CMakeDependentOption.cmake:84 (message):
-  Policy CMP0127 is not set: cmake_dependent_option() supports full Condition
-  Syntax.  Run "cmake --help-policy CMP0127" for policy details.  Use the
-  cmake_policy command to set the policy and suppress this warning.
-Call Stack (most recent call first):
-  CMakeLists.txt:6 (cmake_dependent_option)
-This warning is for project developers.  Use -Wno-dev to suppress it.
-[0m

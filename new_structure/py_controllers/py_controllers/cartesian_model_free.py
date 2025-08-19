@@ -4,7 +4,6 @@ import rclpy
 from rclpy.node import Node
 from custom_msgs.msg import StateParameter, EffortCommand, TaskSpaceCommand
 import numpy as np
-from scipy.spatial.transform import Rotation
 import matplotlib.pyplot as plt
 import signal
 import sys
@@ -26,23 +25,26 @@ class CartesianModelFreeController(Node):
         self.effort_publisher = self.create_publisher(
             EffortCommand, '/effort_command', 10)
         
-        self.declare_parameter('k_gains', [200, 200, 200, 50, 50, 50])
+        self.declare_parameter('k_gains', [400, 400, 400, 100, 100, 100])
         self.k_gains = np.array(self.get_parameter('k_gains').value, dtype=float)
         self.K_gains = np.diag(self.k_gains)
-        self.eta = 0.707
+        self.eta = 1.0
         
         self.q_initial = None               # initial joint position q0
         self.t_initial = None               # initial time
         self.t_last = None                  # last time
         self.dq_buffer = None               # buffer for joint velocity dq
-        self.body_jacobian_buffer = None    # buffer for body jacobian matrix in flange frame
+        self.zero_jacobian_buffer = None    # buffer for zero jacobian matrix in flange frame
 
-        self.task_command_received = False
-        self.x_des = None
-        self.dx_des = None
-        self.ddx_des = None
-        self.x_init = None
+        self.task_command_received = False  # flag for task space command received
+        self.x_des = None                   # desired position from task space command
+        self.dx_des = None                  # desired velocity from task space command
+        self.ddx_des = None                 # desired acceleration from task space command
+        self.x_init = None                  # initial position for trajectory tracking
 
+        self.effort_msg = EffortCommand()
+        self.get_logger().info('Cartesian Model Free controller node started')
+        
         # 数据记录列表
         self.tau_history = []
         self.F_history = []
@@ -50,14 +52,10 @@ class CartesianModelFreeController(Node):
         self.x_history = []
         self.x_des_history = []
 
-        self.effort_msg = EffortCommand()
-        self.get_logger().info('Cartesian Model Free controller node started')
-        
         # 设置信号处理器
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
     
-   
     
     def taskCommandCallback(self, msg):
         """callback function for /task_space_command subscriber"""
@@ -98,46 +96,43 @@ class CartesianModelFreeController(Node):
                 ddq = (dq - self.dq_buffer) / dt
                 self.dq_buffer = dq.copy()
 
-            # get O_T_F, mass, coriolis, flange-framed body jacobian matrix J(q) and dJ(q)
+            # get O_T_F, mass, coriolis, flange-framed zero jacobian matrix J(q) and dJ(q)
             o_t_f_array = np.array(msg.o_t_f)                           # vectorized 4x4 pose matrix in flange frame, column-major
             mass_matrix_array = np.array(msg.mass)                      # vectorized 7x7 mass matrix, column-major
             coriolis_matrix_array = np.array(msg.coriolis)              # vectorized diagonal elements of 7x7 coriolis matrix
-            body_jacobian_array = np.array(msg.body_jacobian_flange)    # vectorized 6x7 body jacobian matrix in flange frame, column-major
+            zero_jacobian_array = np.array(msg.zero_jacobian_flange)    # vectorized 6x7 zero jacobian matrix in flange frame, column-major
 
             o_t_f = o_t_f_array.reshape(4, 4, order='F')                    # 4x4 pose matrix in flange frame, column-major
             mass = mass_matrix_array.reshape(7, 7, order='F')               # 7x7
             coriolis = np.diag(coriolis_matrix_array)                       # 7x7
-            body_jacobian = body_jacobian_array.reshape(6, 7, order='F')    # 6x7
-            body_jacobian_transpose = body_jacobian.T                       # 7x6
-            body_jacobian_pseudoinverse = np.linalg.pinv(body_jacobian)     # 7x6, pseudoinverse obtained by SVD
-            if self.body_jacobian_buffer is None:  
-                dbody_jacobian = np.zeros_like(body_jacobian)
+            zero_jacobian = zero_jacobian_array.reshape(6, 7, order='F')    # 6x7
+            zero_jacobian_transpose = zero_jacobian.T                       # 7x6
+            zero_jacobian_pseudoinverse = np.linalg.pinv(zero_jacobian)     # 7x6, pseudoinverse obtained by SVD
+            if self.zero_jacobian_buffer is None:  
+                dzero_jacobian = np.zeros_like(zero_jacobian)
             else:
-                dbody_jacobian = (body_jacobian - self.body_jacobian_buffer) / dt
-                self.body_jacobian_buffer = body_jacobian.copy()
+                dzero_jacobian = (zero_jacobian - self.zero_jacobian_buffer) / dt
+                self.zero_jacobian_buffer = zero_jacobian.copy()
 
             # get x and dx
-            position = o_t_f[:3, 3]
-            rotation_matrix = o_t_f[:3, :3]
-            r = Rotation.from_matrix(rotation_matrix).as_euler('xyz')
-            x = np.concatenate((position, r))
-            dx = body_jacobian @ dq
-            # ddx = body_jacobian @ ddq + dbody_jacobian @ dq
+            x = o_t_f[:3, 3]            # 3x1 position, only x-y-z
+            dx = zero_jacobian @ dq     # 6x1 velocity
+            # ddx = zero_jacobian @ ddq + dzero_jacobian @ dq
             # self.get_logger().info(f"x: {x.tolist()}, dx: {dx.tolist()}")
 
             if self.x_init is None:
                 self.x_init = x.copy()
             else:
                 self.x_des = self.x_init.copy()
-                self.x_des[1] = self.x_init[1] + 0.1 * np.sin(2 * np.pi / 10 * t_elapsed)
+                self.x_des[1] = self.x_init[1] + 0.1 * np.sin(2 * np.pi / 5 * t_elapsed)
 
-            # self.get_logger().info(f"body_jacobian_transpose: {body_jacobian_transpose[:, :3].tolist()}")
+            # self.get_logger().info(f"zero_jacobian_transpose: {zero_jacobian_transpose[:, :3].tolist()}")
             # self.get_logger().info(f"self.K_gains: {self.K_gains[:3, :3].tolist()}")
             self.get_logger().info(f"x: {x[:3].tolist()}, self.x_des: {self.x_des[:3].tolist()}")
             # self.get_logger().info(f"dx: {dx[:3].tolist()}, self.dx_des: {self.dx_des[:3].tolist()}")
 
             # get K_gains and D_gains
-            lambda_matrix = np.linalg.inv(body_jacobian @ np.linalg.inv(mass) @ body_jacobian.T)
+            lambda_matrix = np.linalg.inv(zero_jacobian @ np.linalg.inv(mass) @ zero_jacobian.T)
             eigvals, _ = np.linalg.eig(lambda_matrix)
             d_gains = 2 * self.eta * np.sqrt(eigvals @ self.K_gains)
             D_gains = np.diag(d_gains)
@@ -148,8 +143,8 @@ class CartesianModelFreeController(Node):
             # calculate tau
             F = -self.K_gains[:3, :3] @ \
                 (x[:3] - self.x_des[:3]) - D_gains[:3, :3] @ (dx[:3] - self.dx_des[:3])
-            tau = body_jacobian_transpose[:, :3] @ F
-            # tau = body_jacobian_transpose[:, :3] @ (-self.K_gains[:3, :3] @ \
+            tau = zero_jacobian_transpose[:, :3] @ F
+            # tau = zero_jacobian_transpose[:, :3] @ (-self.K_gains[:3, :3] @ \
             #     (x[:3] - self.x_des[:3]) - D_gains[:3, :3] @ (dx[:3] - self.dx_des[:3]))
 
 

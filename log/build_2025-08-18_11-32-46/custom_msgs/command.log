@@ -1,1 +1,0 @@
-Invoking command in '/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/build/custom_msgs': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/nuc_6g_life_3/franka_ros2_endowrist_ws/install/py_controllers:/opt/ros/humble /usr/bin/cmake /home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/custom_msgs -DCMAKE_INSTALL_PREFIX=/home/nuc_6g_life_3/franka_ros2_endowrist_ws/src/install/custom_msgs
