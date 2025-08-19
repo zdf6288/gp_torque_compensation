@@ -25,7 +25,7 @@ class CartesianImpedanceController(Node):
         self.effort_publisher = self.create_publisher(
             EffortCommand, '/effort_command', 10)
         
-        self.declare_parameter('k_gains', [1000, 1000, 1000, 200, 200, 200])
+        self.declare_parameter('k_gains', [200, 200, 200, 100, 100, 100])
         self.k_gains = np.array(self.get_parameter('k_gains').value, dtype=float)
         self.K_gains = np.diag(self.k_gains)
         self.eta = 1.0
