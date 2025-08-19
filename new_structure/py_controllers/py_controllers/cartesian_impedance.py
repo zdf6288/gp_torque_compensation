@@ -25,7 +25,7 @@ class CartesianImpedanceController(Node):
         self.effort_publisher = self.create_publisher(
             EffortCommand, '/effort_command', 10)
         
-        self.declare_parameter('k_gains', [200, 200, 200, 100, 100, 100])
+        self.declare_parameter('k_gains', [1000, 500, 1000, 200, 200, 200])
         self.k_gains = np.array(self.get_parameter('k_gains').value, dtype=float)
         self.K_gains = np.diag(self.k_gains)
         self.eta = 1.0
@@ -117,7 +117,7 @@ class CartesianImpedanceController(Node):
             self.get_logger().info(f"x: {x.tolist()}, dx: {dx.tolist()}")
 
             # get K_gains and D_gains
-            lambda_matrix = zero_jacobian_pseudoinverse.T @ mass @ zero_jacobian_pseudoinverse
+            lambda_matrix = np.linalg.inv(zero_jacobian @ np.linalg.inv(mass) @ zero_jacobian.T)
             eigvals, _ = np.linalg.eig(lambda_matrix)
             d_gains = 2 * self.eta * np.sqrt(eigvals @ self.K_gains)
             D_gains = np.diag(d_gains)

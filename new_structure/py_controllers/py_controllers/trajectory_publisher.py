@@ -21,7 +21,7 @@ class TrajectoryPublisher(Node):
         self.timer = self.create_timer(0.001, self.timer_callback)  # 0.001秒 = 1000 Hz
         
         # 圆形轨迹参数
-        self.declare_parameter('circle_radius', 0.2)  # 圆形半径 (米)
+        self.declare_parameter('circle_radius', 0.05)  # 圆形半径 (米)
         self.declare_parameter('circle_frequency', 0.1)  # 圆形运动频率 (Hz)
         self.declare_parameter('circle_center_x', 0.5)  # 圆心x坐标
         self.declare_parameter('circle_center_y', 0.0)  # 圆心y坐标
