@@ -2,7 +2,7 @@
 
 import rclpy
 from rclpy.node import Node
-from custom_msgs.msg import TaskSpaceCommand
+from custom_msgs.msg import TaskSpaceCommand, StateParameter
 from std_msgs.msg import Header
 import numpy as np
 import time
@@ -16,6 +16,10 @@ class TrajectoryPublisher(Node):
         # publish on /task_space_command
         self.trajectory_publisher = self.create_publisher(
             TaskSpaceCommand, '/task_space_command', 10)
+        
+        # subscribe to /state_parameter to get robot current state
+        self.state_subscription = self.create_subscription(
+            StateParameter, '/state_parameter', self.stateCallback, 10)
         
         # publish frequency: 1000 Hz
         self.timer = self.create_timer(0.001, self.timer_callback)  # 0.001 second = 1000 Hz
@@ -34,6 +38,10 @@ class TrajectoryPublisher(Node):
         self.center_z = self.get_parameter('circle_center_z').value
 
         # transition parameters to reach the start point of trajectory smoothly
+        self.robot_initial_x = None
+        self.robot_initial_y = None
+        self.robot_initial_z = None
+        self.robot_initial_received = False
         self.declare_parameter('transition_duration', 3.0)  # seconds to reach start point
         self.declare_parameter('use_transition', True)      
         self.transition_duration = self.get_parameter('transition_duration').value
@@ -56,15 +64,44 @@ class TrajectoryPublisher(Node):
         if self.use_transition:
             self.get_logger().info(f'Transition duration: {self.transition_duration} s')
     
+    def stateCallback(self, msg):
+        """Callback function to receive robot state and extract initial position"""
+        if not self.robot_initial_received:
+            try:
+                # Extract current end-effector position from o_t_f matrix
+                o_t_f_array = np.array(msg.o_t_f, dtype=float)
+                o_t_f = o_t_f_array.reshape(4, 4, order='F')
+                
+                # Get current position (x, y, z)
+                self.robot_initial_x = o_t_f[0, 3]
+                self.robot_initial_y = o_t_f[1, 3]
+                self.robot_initial_z = o_t_f[2, 3]
+                
+                self.robot_initial_received = True
+                
+                self.get_logger().info(f'Robot initial position recorded: ({self.robot_initial_x:.3f}, {self.robot_initial_y:.3f}, {self.robot_initial_z:.3f})')
+                
+                # Start transition after receiving initial position
+                if self.use_transition:
+                    self.transition_start_time = self.get_clock().now()
+                    self.get_logger().info('Starting transition to trajectory start point')
+                
+            except Exception as e:
+                self.get_logger().error(f'Error extracting robot initial position: {str(e)}')
+    
     def timer_callback(self):
         """timer callback function, period: 1ms"""
         try:
+            # Wait for robot initial state before proceeding
+            if not self.robot_initial_received:
+                return
+            
             # calculate elapsed time
             current_time = self.get_clock().now()
             elapsed_time = (current_time - self.start_time).nanoseconds / 1e9
             
             if self.use_transition and not self.transition_complete:
-                # Transition phase: move to trajectory start point
+                # Transition phase: move from current robot position to trajectory start point
                 if self.transition_start_time is None:
                     self.transition_start_time = current_time
                 
@@ -78,28 +115,27 @@ class TrajectoryPublisher(Node):
                     self.start_time = current_time
                     elapsed_time = 0.0
                 else:
-                    # Generate smooth transition trajectory
+                    # Generate smooth transition trajectory from robot initial position to start point
                     # Use 5th order polynomial for smooth motion
                     t = transition_elapsed / self.transition_duration
                     s = 10*t**3 - 15*t**4 + 6*t**5  # smooth s-curve
                     
-                    # Interpolate from current position (assume 0,0,0 for now) to start point
-                    # In practice, you might want to get the actual current position from state feedback
-                    x = s * self.trajectory_start_x
-                    y = s * self.trajectory_start_y
-                    z = s * self.trajectory_start_z
+                    # Interpolate from robot initial position to trajectory start point
+                    x = self.robot_initial_x + s * (self.trajectory_start_x - self.robot_initial_x)
+                    y = self.robot_initial_y + s * (self.trajectory_start_y - self.robot_initial_y)
+                    z = self.robot_initial_z + s * (self.trajectory_start_z - self.robot_initial_z)
                     
                     # Smooth velocity and acceleration
                     ds_dt = (30*t**2 - 60*t**3 + 30*t**4) / self.transition_duration
                     d2s_dt2 = (60*t - 180*t**2 + 120*t**3) / (self.transition_duration**2)
                     
-                    dx = ds_dt * self.trajectory_start_x
-                    dy = ds_dt * self.trajectory_start_y
-                    dz = ds_dt * self.trajectory_start_z
+                    dx = ds_dt * (self.trajectory_start_x - self.robot_initial_x)
+                    dy = ds_dt * (self.trajectory_start_y - self.robot_initial_y)
+                    dz = ds_dt * (self.trajectory_start_z - self.robot_initial_z)
                     
-                    ddx = d2s_dt2 * self.trajectory_start_x
-                    ddy = d2s_dt2 * self.trajectory_start_y
-                    ddz = d2s_dt2 * self.trajectory_start_z
+                    ddx = d2s_dt2 * (self.trajectory_start_x - self.robot_initial_x)
+                    ddy = d2s_dt2 * (self.trajectory_start_y - self.robot_initial_y)
+                    ddz = d2s_dt2 * (self.trajectory_start_z - self.robot_initial_z)
                     
             else:
                 # Circular trajectory phase

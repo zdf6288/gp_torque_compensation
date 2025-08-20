@@ -25,7 +25,7 @@ class CartesianImpedanceController(Node):
         self.effort_publisher = self.create_publisher(
             EffortCommand, '/effort_command', 10)
         
-        self.declare_parameter('k_gains', [1000, 500, 1000, 200, 200, 200])
+        self.declare_parameter('k_gains', [1200, 500, 1000, 200, 200, 200])
         self.k_gains = np.array(self.get_parameter('k_gains').value, dtype=float)
         self.K_gains = np.diag(self.k_gains)
         self.eta = 1.0
@@ -50,6 +50,8 @@ class CartesianImpedanceController(Node):
         self.time_history = []
         self.x_history = []
         self.x_des_history = []
+        self.dx_history = []           # 新增：实际速度记录
+        self.dx_des_history = []       # 新增：期望速度记录
 
         # 设置信号处理器
         signal.signal(signal.SIGINT, self.signal_handler)
@@ -147,6 +149,8 @@ class CartesianImpedanceController(Node):
             self.time_history.append(t_elapsed)
             self.x_history.append(x.tolist())
             self.x_des_history.append(self.x_des.tolist())
+            self.dx_history.append(dx[:3].tolist())      # 新增：记录实际速度 (x, y, z)
+            self.dx_des_history.append(self.dx_des[:3].tolist())  # 新增：记录期望速度 (x, y, z)
 
         except Exception as e:
             self.get_logger().error(f'Parameter error: {str(e)}')
@@ -158,52 +162,92 @@ class CartesianImpedanceController(Node):
         sys.exit(0)
     
     def plot_data(self):
-        """绘制记录的tau和位置数据"""
+        """绘制记录的6个子图数据"""
         if not self.tau_history:
             self.get_logger().info('没有数据可绘制')
             return
             
         try:
-            # 创建子图
-            fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 10))
+            # 创建2行3列的子图
+            fig, axes = plt.subplots(2, 3, figsize=(18, 12))
             fig.suptitle('Cartesian Impedance Controller Data', fontsize=16)
             
-            # 绘制tau数据
-            ax1.plot(self.time_history, self.tau_history)
-            ax1.set_title('Joint Torques (tau)')
-            ax1.set_xlabel('Time (s)')
-            ax1.set_ylabel('Torque (Nm)')
-            ax1.legend([f'Joint {i+1}' for i in range(len(self.tau_history[0]))])
-            ax1.grid(True)
+            # 第一行：关节力矩、速度对比、位置误差
+            # 1. 关节力矩图
+            tau_history_array = np.array(self.tau_history)
+            for i in range(tau_history_array.shape[1]):
+                axes[0, 0].plot(self.time_history, tau_history_array[:, i], label=f'Joint {i+1}')
+            axes[0, 0].set_title('Joint Torques (tau)')
+            axes[0, 0].set_xlabel('Time (s)')
+            axes[0, 0].set_ylabel('Torque (Nm)')
+            axes[0, 0].legend()
+            axes[0, 0].grid(True)
             
-            # 绘制Z位置轨迹
+            # 2. 期望与实际速度对比图
+            dx_history_array = np.array(self.dx_history)
+            dx_des_history_array = np.array(self.dx_des_history)
+            
+            # 绘制x方向速度
+            axes[0, 1].plot(self.time_history, dx_history_array[:, 0], 'b-', label='Actual dx', linewidth=2)
+            axes[0, 1].plot(self.time_history, dx_des_history_array[:, 0], 'r--', label='Desired dx', linewidth=2)
+            # 绘制y方向速度
+            axes[0, 1].plot(self.time_history, dx_history_array[:, 1], 'g-', label='Actual dy', linewidth=2)
+            axes[0, 1].plot(self.time_history, dx_des_history_array[:, 1], 'm--', label='Desired dy', linewidth=2)
+            # 绘制z方向速度
+            axes[0, 1].plot(self.time_history, dx_history_array[:, 2], 'c-', label='Actual dz', linewidth=2)
+            axes[0, 1].plot(self.time_history, dx_des_history_array[:, 2], 'y--', label='Desired dz', linewidth=2)
+            
+            axes[0, 1].set_title('Desired vs Actual Velocity')
+            axes[0, 1].set_xlabel('Time (s)')
+            axes[0, 1].set_ylabel('Velocity (m/s)')
+            axes[0, 1].legend()
+            axes[0, 1].grid(True)
+            
+            # 3. 位置误差的欧几里得距离
             x_history_array = np.array(self.x_history)
             x_des_history_array = np.array(self.x_des_history)
-            ax2.plot(self.time_history, x_history_array[:, 2], 'b-', label='Actual Z')
-            ax2.plot(self.time_history, x_des_history_array[:, 2], 'r--', label='Desired Z')
-            ax2.set_title('Z Position Trajectory')
-            ax2.set_xlabel('Time (s)')
-            ax2.set_ylabel('Position (m)')
-            ax2.legend()
-            ax2.grid(True)
             
-            # 绘制X位置轨迹
-            ax3.plot(self.time_history, x_history_array[:, 0], 'b-', label='Actual X')
-            ax3.plot(self.time_history, x_des_history_array[:, 0], 'r--', label='Desired X')
-            ax3.set_title('X Position Trajectory')
-            ax3.set_xlabel('Time (s)')
-            ax3.set_ylabel('Position (m)')
-            ax3.legend()
-            ax3.grid(True)
+            # 计算欧几里得距离
+            position_errors = []
+            for i in range(len(self.x_history)):
+                actual_pos = np.array(self.x_history[i][:3])  # 只取x, y, z
+                desired_pos = np.array(self.x_des_history[i][:3])
+                error = np.linalg.norm(actual_pos - desired_pos)
+                position_errors.append(error)
             
-            # 绘制Y位置轨迹
-            ax4.plot(self.time_history, x_history_array[:, 1], 'b-', label='Actual Y')
-            ax4.plot(self.time_history, x_des_history_array[:, 1], 'r--', label='Desired Y')
-            ax4.set_title('Y Position Trajectory')
-            ax4.set_xlabel('Time (s)')
-            ax4.set_ylabel('Position (m)')
-            ax4.legend()
-            ax4.grid(True)
+            axes[0, 2].plot(self.time_history, position_errors, 'r-', linewidth=2)
+            axes[0, 2].set_title('Position Error (Euclidean Distance)')
+            axes[0, 2].set_xlabel('Time (s)')
+            axes[0, 2].set_ylabel('Error (m)')
+            axes[0, 2].grid(True)
+            
+            # 第二行：x, y, z位置轨迹
+            # 4. X位置轨迹
+            axes[1, 0].plot(self.time_history, x_history_array[:, 0], 'b-', label='Actual X', linewidth=2)
+            axes[1, 0].plot(self.time_history, x_des_history_array[:, 0], 'r--', label='Desired X', linewidth=2)
+            axes[1, 0].set_title('X Position Trajectory')
+            axes[1, 0].set_xlabel('Time (s)')
+            axes[1, 0].set_ylabel('Position (m)')
+            axes[1, 0].legend()
+            axes[1, 0].grid(True)
+            
+            # 5. Y位置轨迹
+            axes[1, 1].plot(self.time_history, x_history_array[:, 1], 'b-', label='Actual Y', linewidth=2)
+            axes[1, 1].plot(self.time_history, x_des_history_array[:, 1], 'r--', label='Desired Y', linewidth=2)
+            axes[1, 1].set_title('Y Position Trajectory')
+            axes[1, 1].set_xlabel('Time (s)')
+            axes[1, 1].set_ylabel('Position (m)')
+            axes[1, 1].legend()
+            axes[1, 1].grid(True)
+            
+            # 6. Z位置轨迹
+            axes[1, 2].plot(self.time_history, x_history_array[:, 2], 'b-', label='Actual Z', linewidth=2)
+            axes[1, 2].plot(self.time_history, x_des_history_array[:, 2], 'r--', label='Desired Z', linewidth=2)
+            axes[1, 2].set_title('Z Position Trajectory')
+            axes[1, 2].set_xlabel('Time (s)')
+            axes[1, 2].set_ylabel('Position (m)')
+            axes[1, 2].legend()
+            axes[1, 2].grid(True)
             
             plt.tight_layout()
             
@@ -234,6 +278,8 @@ class CartesianImpedanceController(Node):
                 header.extend([f'tau_{i+1}' for i in range(len(self.tau_history[0]))])
                 header.extend(['x_actual', 'y_actual', 'z_actual'])
                 header.extend(['x_desired', 'y_desired', 'z_desired'])
+                header.extend(['dx_actual', 'dy_actual', 'dz_actual'])
+                header.extend(['dx_desired', 'dy_desired', 'dz_desired'])
                 writer.writerow(header)
                 
                 # 写入数据
@@ -242,6 +288,8 @@ class CartesianImpedanceController(Node):
                     row.extend(self.tau_history[i])
                     row.extend(self.x_history[i][:3])
                     row.extend(self.x_des_history[i][:3])
+                    row.extend(self.dx_history[i])
+                    row.extend(self.dx_des_history[i])
                     writer.writerow(row)
                     
             self.get_logger().info(f'数据已保存到 {filename}')
