@@ -27,6 +27,7 @@ setup(
             'cartesian_impedance = py_controllers.cartesian_impedance:main',
             'cartesian_model_free = py_controllers.cartesian_model_free:main',
             'trajectory_publisher = py_controllers.trajectory_publisher:main',
+            'trajectory_eclipse = py_controllers.trajectory_eclipse:main',
         ],
     },
 )

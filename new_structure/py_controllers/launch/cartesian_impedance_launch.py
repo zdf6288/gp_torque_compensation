@@ -83,5 +83,18 @@ def generate_launch_description():
             #     'circle_center_y': 0.0,      # 圆心y坐标
             #     'circle_center_z': 0.3,      # 圆心z坐标
             # }]
-        )
+        ),
+        # Node(
+        #     package='py_controllers',
+        #     executable='trajectory_eclipse',
+        #     name='trajectory_eclipse',
+        #     output='screen',
+        #     # parameters=[{
+        #     #     'circle_radius': 0.2,        # 圆形轨迹半径 (米)
+        #     #     'circle_frequency': 0.5,     # 圆形运动频率 (Hz)
+        #     #     'circle_center_x': 0.5,      # 圆心x坐标
+        #     #     'circle_center_y': 0.0,      # 圆心y坐标
+        #     #     'circle_center_z': 0.3,      # 圆心z坐标
+        #     # }]
+        # )
     ])
