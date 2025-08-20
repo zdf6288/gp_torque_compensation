@@ -99,8 +99,8 @@ class CartesianImpedanceController(Node):
             zero_jacobian_array = np.array(msg.zero_jacobian_flange)    # vectorized 6x7 zero jacobian matrix in flange frame, column-major
 
             o_t_f = o_t_f_array.reshape(4, 4, order='F')                    # 4x4 pose matrix in flange frame, column-major
-            mass = mass_matrix_array.reshape(7, 7, order='F')               # 7x7
-            coriolis = np.diag(coriolis_matrix_array)                       # 7x7
+            mass_matrix = mass_matrix_array.reshape(7, 7, order='F')               # 7x7
+            coriolis_matrix = np.diag(coriolis_matrix_array)                       # 7x7
             zero_jacobian = zero_jacobian_array.reshape(6, 7, order='F')    # 6x7
             zero_jacobian_transpose = zero_jacobian.T                       # 7x6
             zero_jacobian_pseudoinverse = np.linalg.pinv(zero_jacobian)     # 7x6, pseudoinverse obtained by SVD
@@ -117,15 +117,15 @@ class CartesianImpedanceController(Node):
             self.get_logger().info(f"x: {x.tolist()}, dx: {dx.tolist()}")
 
             # get K_gains and D_gains
-            lambda_matrix = np.linalg.inv(zero_jacobian @ np.linalg.inv(mass) @ zero_jacobian.T)
+            lambda_matrix = np.linalg.inv(zero_jacobian @ np.linalg.inv(mass_matrix) @ zero_jacobian.T)
             eigvals, _ = np.linalg.eig(lambda_matrix)
             d_gains = 2 * self.eta * np.sqrt(eigvals @ self.K_gains)
             D_gains = np.diag(d_gains)
             
             # calculate tau
             tau = (
-                mass @ zero_jacobian_pseudoinverse[:, :3] @ self.ddx_des[:3]
-                + (coriolis - mass @ zero_jacobian_pseudoinverse[:, :3] @ dzero_jacobian[:3, :])
+                mass_matrix @ zero_jacobian_pseudoinverse[:, :3] @ self.ddx_des[:3]
+                + (coriolis_matrix - mass_matrix @ zero_jacobian_pseudoinverse[:, :3] @ dzero_jacobian[:3, :])
                     @ zero_jacobian_pseudoinverse[:, :3] @ dx[:3]
                 - zero_jacobian_transpose[:, :3]
                     @ (self.K_gains[:3, :3] @ (x - self.x_des[:3])

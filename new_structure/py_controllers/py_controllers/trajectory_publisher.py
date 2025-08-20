@@ -21,24 +21,40 @@ class TrajectoryPublisher(Node):
         self.timer = self.create_timer(0.001, self.timer_callback)  # 0.001 second = 1000 Hz
         
         # circle trajectory parameters
-        self.declare_parameter('circle_radius', 0.05)    # circle radius (meter)
+        self.declare_parameter('circle_radius', 0.05)   # circle radius (meter)
         self.declare_parameter('circle_frequency', 0.1) # circle motion frequency (Hz)
         self.declare_parameter('circle_center_x', 0.6)  # circle center x coordinate
         self.declare_parameter('circle_center_y', 0.0)  # circle center y coordinate
-        self.declare_parameter('circle_center_z', 0.45)  # circle center z coordinate
+        self.declare_parameter('circle_center_z', 0.45) # circle center z coordinate
         
         self.radius = self.get_parameter('circle_radius').value
         self.frequency = self.get_parameter('circle_frequency').value
         self.center_x = self.get_parameter('circle_center_x').value
         self.center_y = self.get_parameter('circle_center_y').value
         self.center_z = self.get_parameter('circle_center_z').value
+
+        # transition parameters to reach the start point of trajectory smoothly
+        self.declare_parameter('transition_duration', 3.0)  # seconds to reach start point
+        self.declare_parameter('use_transition', True)      
+        self.transition_duration = self.get_parameter('transition_duration').value
+        self.use_transition = self.get_parameter('use_transition').value
         
         self.start_time = self.get_clock().now()
+        self.transition_start_time = None
+        self.transition_complete = False
+        
+        # Calculate trajectory start point
+        self.trajectory_start_x = self.center_x + self.radius
+        self.trajectory_start_y = self.center_y
+        self.trajectory_start_z = self.center_z
         
         self.get_logger().info('Trajectory publisher node started')
         self.get_logger().info(f'Publishing circular trajectory at 1000 Hz')
         self.get_logger().info(f'Circle radius: {self.radius} m, frequency: {self.frequency} Hz')
         self.get_logger().info(f'Circle center: ({self.center_x}, {self.center_y}, {self.center_z})')
+        self.get_logger().info(f'Trajectory start point: ({self.trajectory_start_x:.3f}, {self.trajectory_start_y:.3f}, {self.trajectory_start_z:.3f})')
+        if self.use_transition:
+            self.get_logger().info(f'Transition duration: {self.transition_duration} s')
     
     def timer_callback(self):
         """timer callback function, period: 1ms"""
@@ -47,25 +63,64 @@ class TrajectoryPublisher(Node):
             current_time = self.get_clock().now()
             elapsed_time = (current_time - self.start_time).nanoseconds / 1e9
             
-            # calculate circle trajectory
-            omega = 2.0 * np.pi * self.frequency  # angular velocity
+            if self.use_transition and not self.transition_complete:
+                # Transition phase: move to trajectory start point
+                if self.transition_start_time is None:
+                    self.transition_start_time = current_time
+                
+                transition_elapsed = (current_time - self.transition_start_time).nanoseconds / 1e9
+                
+                if transition_elapsed >= self.transition_duration:
+                    # Transition complete, start circular trajectory
+                    self.transition_complete = True
+                    self.get_logger().info('Transition complete, starting circular trajectory')
+                    # Reset start time for circular trajectory
+                    self.start_time = current_time
+                    elapsed_time = 0.0
+                else:
+                    # Generate smooth transition trajectory
+                    # Use 5th order polynomial for smooth motion
+                    t = transition_elapsed / self.transition_duration
+                    s = 10*t**3 - 15*t**4 + 6*t**5  # smooth s-curve
+                    
+                    # Interpolate from current position (assume 0,0,0 for now) to start point
+                    # In practice, you might want to get the actual current position from state feedback
+                    x = s * self.trajectory_start_x
+                    y = s * self.trajectory_start_y
+                    z = s * self.trajectory_start_z
+                    
+                    # Smooth velocity and acceleration
+                    ds_dt = (30*t**2 - 60*t**3 + 30*t**4) / self.transition_duration
+                    d2s_dt2 = (60*t - 180*t**2 + 120*t**3) / (self.transition_duration**2)
+                    
+                    dx = ds_dt * self.trajectory_start_x
+                    dy = ds_dt * self.trajectory_start_y
+                    dz = ds_dt * self.trajectory_start_z
+                    
+                    ddx = d2s_dt2 * self.trajectory_start_x
+                    ddy = d2s_dt2 * self.trajectory_start_y
+                    ddz = d2s_dt2 * self.trajectory_start_z
+                    
+            else:
+                # Circular trajectory phase
+                omega = 2.0 * np.pi * self.frequency  # angular velocity
+                
+                # position: x_des[:3] corresponds to (x, y, z)
+                x = self.center_x + self.radius * np.cos(omega * elapsed_time)
+                y = self.center_y + self.radius * np.sin(omega * elapsed_time)
+                z = self.center_z
+                
+                # velocity: dx_des[:3] corresponds to (dx, dy, dz)
+                dx = -self.radius * omega * np.sin(omega * elapsed_time)
+                dy = self.radius * omega * np.cos(omega * elapsed_time)
+                dz = 0.0
+                
+                # acceleration: ddx_des[:3] corresponds to (ddx, ddy, ddz)
+                ddx = -self.radius * omega**2 * np.cos(omega * elapsed_time)
+                ddy = -self.radius * omega**2 * np.sin(omega * elapsed_time)
+                ddz = 0.0
             
-            # position: x_des[:3] corresponds to (x, y, z)
-            x = self.center_x + self.radius * np.cos(omega * elapsed_time)
-            y = self.center_y + self.radius * np.sin(omega * elapsed_time)
-            z = self.center_z
-            
-            # velocity: dx_des[:3] corresponds to (dx, dy, dz)
-            dx = -self.radius * omega * np.sin(omega * elapsed_time)
-            dy = self.radius * omega * np.cos(omega * elapsed_time)
-            dz = 0.0
-            
-            # acceleration: ddx_des[:3] corresponds to (ddx, ddy, ddz)
-            ddx = -self.radius * omega**2 * np.cos(omega * elapsed_time)
-            ddy = -self.radius * omega**2 * np.sin(omega * elapsed_time)
-            ddz = 0.0
-            
-            # publish message
+            # publish on /task_space_command
             trajectory_msg = TaskSpaceCommand()
             trajectory_msg.header = Header()
             trajectory_msg.header.stamp = current_time.to_msg()
@@ -77,7 +132,10 @@ class TrajectoryPublisher(Node):
             self.trajectory_publisher.publish(trajectory_msg)
             
             if int(elapsed_time * 1000) % 1000 == 0:
-                self.get_logger().debug(f'Published trajectory at t={elapsed_time:.3f}s: pos=({x:.3f}, {y:.3f}, {z:.3f})')
+                if self.use_transition and not self.transition_complete:
+                    self.get_logger().debug(f'Transition phase: t={transition_elapsed:.3f}s, pos=({x:.3f}, {y:.3f}, {z:.3f})')
+                else:
+                    self.get_logger().debug(f'Circular trajectory: t={elapsed_time:.3f}s, pos=({x:.3f}, {y:.3f}, {z:.3f})')
                 
         except Exception as e:
             self.get_logger().error(f'Error in trajectory publisher: {str(e)}')
@@ -97,4 +155,4 @@ def main(args=None):
 
 
 if __name__ == '__main__':
-    main() 
+    main()
