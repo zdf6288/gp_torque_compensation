@@ -106,8 +106,8 @@ class CartesianModelFreeController(Node):
             mass_matrix = mass_matrix_array.reshape(7, 7, order='F')               # 7x7
             coriolis_matrix = np.diag(coriolis_matrix_array)                       # 7x7
             zero_jacobian = zero_jacobian_array.reshape(6, 7, order='F')    # 6x7
-            zero_jacobian_transpose = zero_jacobian.T                       # 7x6
-            zero_jacobian_pseudoinverse = np.linalg.pinv(zero_jacobian)     # 7x6, pseudoinverse obtained by SVD
+            zero_jacobian_t = zero_jacobian.T                       # 7x6
+            zero_jacobian_pinv = np.linalg.pinv(zero_jacobian)     # 7x6, pseudoinverse obtained by SVD
             if self.zero_jacobian_buffer is None:  
                 dzero_jacobian = np.zeros_like(zero_jacobian)
             else:
@@ -143,8 +143,8 @@ class CartesianModelFreeController(Node):
             # calculate tau
             F = -self.K_gains[:3, :3] @ \
                 (x[:3] - self.x_des[:3]) - D_gains[:3, :3] @ (dx[:3] - self.dx_des[:3])
-            tau = zero_jacobian_transpose[:, :3] @ F
-            # tau = zero_jacobian_transpose[:, :3] @ (-self.K_gains[:3, :3] @ \
+            tau = zero_jacobian_t[:, :3] @ F
+            # tau = zero_jacobian_t[:, :3] @ (-self.K_gains[:3, :3] @ \
             #     (x[:3] - self.x_des[:3]) - D_gains[:3, :3] @ (dx[:3] - self.dx_des[:3]))
 
 

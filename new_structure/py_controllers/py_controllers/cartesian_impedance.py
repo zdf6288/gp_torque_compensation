@@ -50,8 +50,8 @@ class CartesianImpedanceController(Node):
         self.time_history = []
         self.x_history = []
         self.x_des_history = []
-        self.dx_history = []           # 新增：实际速度记录
-        self.dx_des_history = []       # 新增：期望速度记录
+        self.dx_history = []           
+        self.dx_des_history = []  
 
         # 设置信号处理器
         signal.signal(signal.SIGINT, self.signal_handler)
@@ -101,11 +101,11 @@ class CartesianImpedanceController(Node):
             zero_jacobian_array = np.array(msg.zero_jacobian_flange)    # vectorized 6x7 zero jacobian matrix in flange frame, column-major
 
             o_t_f = o_t_f_array.reshape(4, 4, order='F')                    # 4x4 pose matrix in flange frame, column-major
-            mass_matrix = mass_matrix_array.reshape(7, 7, order='F')               # 7x7
-            coriolis_matrix = np.diag(coriolis_matrix_array)                       # 7x7
+            mass_matrix = mass_matrix_array.reshape(7, 7, order='F')        # 7x7
+            coriolis_matrix = np.diag(coriolis_matrix_array)                # 7x7
             zero_jacobian = zero_jacobian_array.reshape(6, 7, order='F')    # 6x7
-            zero_jacobian_transpose = zero_jacobian.T                       # 7x6
-            zero_jacobian_pseudoinverse = np.linalg.pinv(zero_jacobian)     # 7x6, pseudoinverse obtained by SVD
+            zero_jacobian_t = zero_jacobian.T                               # 7x6, transpose of zero_jacobian
+            zero_jacobian_pinv = np.linalg.pinv(zero_jacobian)              # 7x6, pseudoinverse obtained by SVD
             if self.zero_jacobian_buffer is None:  
                 dzero_jacobian = np.zeros_like(zero_jacobian)
             else:
@@ -126,10 +126,10 @@ class CartesianImpedanceController(Node):
             
             # calculate tau
             tau = (
-                mass_matrix @ zero_jacobian_pseudoinverse[:, :3] @ self.ddx_des[:3]
-                + (coriolis_matrix - mass_matrix @ zero_jacobian_pseudoinverse[:, :3] @ dzero_jacobian[:3, :])
-                    @ zero_jacobian_pseudoinverse[:, :3] @ dx[:3]
-                - zero_jacobian_transpose[:, :3]
+                mass_matrix @ zero_jacobian_pinv[:, :3] @ self.ddx_des[:3]
+                + (coriolis_matrix - mass_matrix @ zero_jacobian_pinv[:, :3] @ dzero_jacobian[:3, :])
+                    @ zero_jacobian_pinv[:, :3] @ dx[:3]
+                - zero_jacobian_t[:, :3]
                     @ (self.K_gains[:3, :3] @ (x - self.x_des[:3])
                     + D_gains[:3, :3] @ (dx[:3] - self.dx_des[:3]))
             )
@@ -149,8 +149,8 @@ class CartesianImpedanceController(Node):
             self.time_history.append(t_elapsed)
             self.x_history.append(x.tolist())
             self.x_des_history.append(self.x_des.tolist())
-            self.dx_history.append(dx[:3].tolist())      # 新增：记录实际速度 (x, y, z)
-            self.dx_des_history.append(self.dx_des[:3].tolist())  # 新增：记录期望速度 (x, y, z)
+            self.dx_history.append(dx[:3].tolist())      
+            self.dx_des_history.append(self.dx_des[:3].tolist()) 
 
         except Exception as e:
             self.get_logger().error(f'Parameter error: {str(e)}')
