@@ -29,6 +29,7 @@ CPPRelayer::state_interface_configuration() const {
   for (int i = 1; i <= num_joints; ++i) {
     config.names.push_back(arm_id_ + "_joint" + std::to_string(i) + "/position");
     config.names.push_back(arm_id_ + "_joint" + std::to_string(i) + "/velocity");
+    config.names.push_back(arm_id_ + "_joint" + std::to_string(i) + "/effort");
   }
   for (const auto& franka_robot_model_name : franka_robot_model_->get_state_interface_names()) {
     config.names.push_back(franka_robot_model_name);
@@ -52,11 +53,12 @@ controller_interface::return_type CPPRelayer::update(
   state_param.header.stamp = get_node()->now();
   Eigen::Map<Eigen::VectorXd>(state_param.position.data(), num_joints) = q_;
   Eigen::Map<Eigen::VectorXd>(state_param.velocity.data(), num_joints) = dq_;
+  Eigen::Map<Eigen::VectorXd>(state_param.effort_measured.data(), num_joints) = tau_measured_;
   std::copy(o_t_f_.begin(), o_t_f_.end(), state_param.o_t_f.begin());
   std::copy(mass_.begin(), mass_.end(), state_param.mass.begin());
   std::copy(coriolis_.begin(), coriolis_.end(), state_param.coriolis.begin());
   std::copy(zero_jacobian_flange_.begin(), zero_jacobian_flange_.end(), state_param.zero_jacobian_flange.begin());
-  
+  std::copy(gravity_.begin(), gravity_.end(), state_param.gravity.begin());
   state_param_pub_->publish(state_param);
 
   return controller_interface::return_type::OK;
@@ -111,14 +113,15 @@ CallbackReturn CPPRelayer::on_activate(
     const rclcpp_lifecycle::State& /*previous_state*/) {
   q_ = Vector7d::Zero();
   dq_ = Vector7d::Zero();
+  tau_measured_ = Vector7d::Zero();
   tau_d_received_ = Vector7d::Zero();
   o_t_f_.fill(0.0);
   mass_.fill(0.0);
   coriolis_.fill(0.0);
   zero_jacobian_flange_.fill(0.0);
-
-  franka_robot_model_->assign_loaned_state_interfaces(state_interfaces_);
+  gravity_.fill(0.0);
   
+  franka_robot_model_->assign_loaned_state_interfaces(state_interfaces_);
   updateStateParam();
 
   return CallbackReturn::SUCCESS;
@@ -129,16 +132,17 @@ void CPPRelayer::effortCommandCallback(const custom_msgs::msg::EffortCommand::Sh
 }
 
 void CPPRelayer::updateStateParam() {
-  // joint position and velocity
+  // joint position, velocity, and effort
   for (auto i = 0; i < num_joints; ++i) {
-    const auto& position_interface = state_interfaces_.at(2 * i);
-    const auto& velocity_interface = state_interfaces_.at(2 * i + 1);
-
+    const auto& position_interface = state_interfaces_.at(3 * i);
+    const auto& velocity_interface = state_interfaces_.at(3 * i + 1);
+    const auto& effort_interface = state_interfaces_.at(3 * i + 2);
     assert(position_interface.get_interface_name() == "position");
     assert(velocity_interface.get_interface_name() == "velocity");
-
+    assert(effort_interface.get_interface_name() == "effort");
     q_(i) = position_interface.get_value();
     dq_(i) = velocity_interface.get_value();
+    tau_measured_(i) = effort_interface.get_value();
   }
 
   // get kinematics and dynamics parameters from franka_robot_model_(franka_semantic_components)
@@ -148,7 +152,7 @@ void CPPRelayer::updateStateParam() {
       mass_ = franka_robot_model_->getMassMatrix();
       coriolis_ = franka_robot_model_->getCoriolisForceVector();
       zero_jacobian_flange_ = franka_robot_model_->getZeroJacobian(franka::Frame::kFlange);
-      
+      gravity_ = franka_robot_model_->getGravityForceVector();
     } 
     catch (const std::exception& e) {
       RCLCPP_WARN(get_node()->get_logger(), "Failed to compute dynamics: %s", e.what());

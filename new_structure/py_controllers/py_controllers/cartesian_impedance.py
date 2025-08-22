@@ -25,7 +25,7 @@ class CartesianImpedanceController(Node):
         self.effort_publisher = self.create_publisher(
             EffortCommand, '/effort_command', 10)
         
-        self.declare_parameter('k_gains', [1200, 500, 1000, 200, 200, 200])
+        self.declare_parameter('k_gains', [1500, 500, 1500, 200, 200, 200])
         self.k_gains = np.array(self.get_parameter('k_gains').value, dtype=float)
         self.K_gains = np.diag(self.k_gains)
         self.eta = 1.0
@@ -46,12 +46,16 @@ class CartesianImpedanceController(Node):
     
         # 数据记录列表
         self.tau_history = []
-        self.F_history = []
         self.time_history = []
         self.x_history = []
         self.x_des_history = []
         self.dx_history = []           
         self.dx_des_history = []  
+        self.tau_measured_history = []
+        self.gravity_history = []
+        
+        # 添加标志位，避免重复绘图
+        self._signal_handled = False
 
         # 设置信号处理器
         signal.signal(signal.SIGINT, self.signal_handler)
@@ -116,7 +120,8 @@ class CartesianImpedanceController(Node):
             x = o_t_f[:3, 3]            # 3x1 position, only x-y-z
             dx = zero_jacobian @ dq     # 6x1 velocity
             # ddx = zero_jacobian @ ddq + dzero_jacobian @ dq
-            self.get_logger().info(f"x: {x.tolist()}, dx: {dx.tolist()}")
+
+            # self.get_logger().info(f"x: {x.tolist()}, dx: {dx.tolist()}")
 
             # get K_gains and D_gains
             lambda_matrix = np.linalg.inv(zero_jacobian @ np.linalg.inv(mass_matrix) @ zero_jacobian.T)
@@ -138,39 +143,41 @@ class CartesianImpedanceController(Node):
             
             # Publish on topic /effort_command
             self.effort_msg.efforts = tau.tolist()
-            print(f'published on topic /effort_command: {tau}')
-            print(f'self.effort_msg: {self.effort_msg}')
             self.effort_publisher.publish(self.effort_msg)
             self.get_logger().debug(f'published on topic /effort_command: {tau}')
             
             # Record Data
             self.tau_history.append(tau.tolist())
-            # self.F_history.append(F.tolist())
             self.time_history.append(t_elapsed)
             self.x_history.append(x.tolist())
             self.x_des_history.append(self.x_des.tolist())
             self.dx_history.append(dx[:3].tolist())      
             self.dx_des_history.append(self.dx_des[:3].tolist()) 
+            self.tau_measured_history.append(np.array(msg.effort_measured).tolist())
+            self.gravity_history.append(np.array(msg.gravity).tolist())
 
         except Exception as e:
             self.get_logger().error(f'Parameter error: {str(e)}')
 
     def signal_handler(self, signum, frame):
         """信号处理器，在程序被中断时调用绘图函数"""
+        if self._signal_handled:
+            return
+        self._signal_handled = True
         self.get_logger().info(f'收到信号 {signum}，正在绘制数据...')
         self.plot_data()
         sys.exit(0)
     
     def plot_data(self):
-        """绘制记录的6个子图数据"""
+        """绘制记录的9个子图数据"""
         if not self.tau_history:
             self.get_logger().info('没有数据可绘制')
             return
             
         try:
-            # 创建2行3列的子图
-            fig, axes = plt.subplots(2, 3, figsize=(18, 12))
-            fig.suptitle('Cartesian Impedance Controller Data', fontsize=16)
+            # 创建3行3列的子图，优化尺寸和性能
+            fig, axes = plt.subplots(3, 3, figsize=(18, 14))
+            fig.suptitle('Cartesian Impedance Controller Data', fontsize=14)
             
             # 第一行：关节力矩、速度对比、位置误差
             # 1. 关节力矩图
@@ -249,14 +256,76 @@ class CartesianImpedanceController(Node):
             axes[1, 2].legend()
             axes[1, 2].grid(True)
             
+            # 第三行：新增的tau_measured和gravity子图
+            # 7. 测量的关节力矩 (tau_measured)
+            if self.tau_measured_history and len(self.tau_measured_history) > 0:
+                tau_measured_array = np.array(self.tau_measured_history)
+                for i in range(tau_measured_array.shape[1]):
+                    axes[2, 0].plot(self.time_history, tau_measured_array[:, i], label=f'Joint {i+1}', linewidth=2)
+                
+                axes[2, 0].set_title('Measured Joint Torques (tau_measured)')
+                axes[2, 0].set_xlabel('Time (s)')
+                axes[2, 0].set_ylabel('Torque (Nm)')
+                axes[2, 0].legend()
+                axes[2, 0].grid(True)
+            
+            # 8. 重力补偿
+            if self.gravity_history and len(self.gravity_history) > 0:
+                gravity_history_array = np.array(self.gravity_history)
+                for i in range(gravity_history_array.shape[1]):
+                    axes[2, 1].plot(self.time_history, gravity_history_array[:, i], label=f'Joint {i+1}', linewidth=2)
+                
+                axes[2, 1].set_title('Gravity Compensation')
+                axes[2, 1].set_xlabel('Time (s)')
+                axes[2, 1].set_ylabel('Torque (Nm)')
+                axes[2, 1].legend()
+                axes[2, 1].grid(True)
+            
+            # 9. 控制器输出与测量力矩减去重力的误差 (所有7个关节)
+            if (self.tau_history and self.tau_measured_history and self.gravity_history and
+                len(self.tau_history) > 0 and len(self.tau_measured_history) > 0 and len(self.gravity_history) > 0):
+                
+                min_len = min(len(self.tau_history), len(self.tau_measured_history), len(self.gravity_history))
+                if min_len > 0:
+                    tau_controller_array = np.array(self.tau_history[:min_len])
+                    tau_measured_array = np.array(self.tau_measured_history[:min_len])
+                    gravity_array = np.array(self.gravity_history[:min_len])
+                    
+                    # 计算误差：(computed tau - (measured tau - gravity))
+                    tau_measured_minus_gravity = tau_measured_array - gravity_array
+                    error_array = tau_controller_array - tau_measured_minus_gravity
+                    
+                    # 绘制所有7个关节的误差
+                    for i in range(error_array.shape[1]):
+                        axes[2, 2].plot(self.time_history[:min_len], error_array[:, i], 
+                                        label=f'Joint {i+1}', linewidth=2)
+                    
+                    axes[2, 2].set_title('Error: Computed tau - (Measured tau - Gravity) - All 7 Joints')
+                    axes[2, 2].set_xlabel('Time (s)')
+                    axes[2, 2].set_ylabel('Torque Error (Nm)')
+                    axes[2, 2].legend()
+                    axes[2, 2].grid(True)
+                    
+                    # 在日志中输出误差统计信息
+                    mean_errors = np.mean(np.abs(error_array), axis=0)
+                    max_errors = np.max(np.abs(error_array), axis=0)
+                    self.get_logger().info(f'Torque Error Statistics (Mean, Max):')
+                    for i in range(len(mean_errors)):
+                        self.get_logger().info(f'Joint {i+1}: Mean={mean_errors[i]:.4f} Nm, Max={max_errors[i]:.4f} Nm')
+            
+            # 自动调整Y轴范围，避免数据被截断
+            for ax in axes.flat:
+                ax.autoscale_view()
+                ax.relim()
+            
             plt.tight_layout()
             
-            # 保存图片
+            # 优化保存设置：降低DPI，提高保存速度
             plt.savefig('cartesian_impedance_controller_data.png', dpi=300, bbox_inches='tight')
             self.get_logger().info('数据图已保存为 cartesian_impedance_controller_data.png')
             
-            # 显示图片
-            plt.show()
+            # 可选：不显示图片，只保存，进一步减少时间
+            # plt.show()  # 注释掉这行以提高性能
             
         except Exception as e:
             self.get_logger().error(f'绘图时发生错误: {str(e)}')
@@ -300,6 +369,7 @@ class CartesianImpedanceController(Node):
 def main(args=None):
     rclpy.init(args=args)
     cartesian_impedance_node = CartesianImpedanceController()
+    
     try:
         rclpy.spin(cartesian_impedance_node)
     except KeyboardInterrupt:
@@ -310,8 +380,14 @@ def main(args=None):
         try:
             # 保存数据到文件
             cartesian_impedance_node.save_data_to_file()
-            # 绘制数据
-            cartesian_impedance_node.plot_data()
+            
+            # 只有在信号处理器没有执行时才绘图，避免重复绘图
+            if not cartesian_impedance_node._signal_handled:
+                cartesian_impedance_node.get_logger().info('信号处理器未执行，在主函数中绘图...')
+                cartesian_impedance_node.plot_data()
+            else:
+                cartesian_impedance_node.get_logger().info('信号处理器已执行绘图，跳过主函数绘图')
+                
         except Exception as e:
             cartesian_impedance_node.get_logger().error(f'保存数据或绘图时发生错误: {str(e)}')
         

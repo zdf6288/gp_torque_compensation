@@ -100,6 +100,11 @@ class TrajectoryPublisher(Node):
             current_time = self.get_clock().now()
             elapsed_time = (current_time - self.start_time).nanoseconds / 1e9
             
+            # Initialize variables
+            x, y, z = 0.0, 0.0, 0.0
+            dx, dy, dz = 0.0, 0.0, 0.0
+            ddx, ddy, ddz = 0.0, 0.0, 0.0
+            
             if self.use_transition and not self.transition_complete:
                 # Transition phase: move from current robot position to trajectory start point
                 if self.transition_start_time is None:
@@ -114,6 +119,13 @@ class TrajectoryPublisher(Node):
                     # Reset start time for circular trajectory
                     self.start_time = current_time
                     elapsed_time = 0.0
+                    
+                    # Set initial position to trajectory start point
+                    x = self.trajectory_start_x
+                    y = self.trajectory_start_y
+                    z = self.trajectory_start_z
+                    dx, dy, dz = 0.0, 0.0, 0.0
+                    ddx, ddy, ddz = 0.0, 0.0, 0.0
                 else:
                     # Generate smooth transition trajectory from robot initial position to start point
                     # Use 5th order polynomial for smooth motion
@@ -136,25 +148,26 @@ class TrajectoryPublisher(Node):
                     ddx = d2s_dt2 * (self.trajectory_start_x - self.robot_initial_x)
                     ddy = d2s_dt2 * (self.trajectory_start_y - self.robot_initial_y)
                     ddz = d2s_dt2 * (self.trajectory_start_z - self.robot_initial_z)
+            
+            # Circular trajectory phase (either after transition or if no transition)
+            if self.transition_complete or not self.use_transition:
+                if elapsed_time > 0.0:  # Only calculate circular trajectory if time has passed
+                    omega = 2.0 * np.pi * self.frequency  # angular velocity
                     
-            else:
-                # Circular trajectory phase
-                omega = 2.0 * np.pi * self.frequency  # angular velocity
-                
-                # position: x_des[:3] corresponds to (x, y, z)
-                x = self.center_x + self.radius * np.cos(omega * elapsed_time)
-                y = self.center_y + self.radius * np.sin(omega * elapsed_time)
-                z = self.center_z
-                
-                # velocity: dx_des[:3] corresponds to (dx, dy, dz)
-                dx = -self.radius * omega * np.sin(omega * elapsed_time)
-                dy = self.radius * omega * np.cos(omega * elapsed_time)
-                dz = 0.0
-                
-                # acceleration: ddx_des[:3] corresponds to (ddx, ddy, ddz)
-                ddx = -self.radius * omega**2 * np.cos(omega * elapsed_time)
-                ddy = -self.radius * omega**2 * np.sin(omega * elapsed_time)
-                ddz = 0.0
+                    # position: x_des[:3] corresponds to (x, y, z)
+                    x = self.center_x + self.radius * np.cos(omega * elapsed_time)
+                    y = self.center_y + self.radius * np.sin(omega * elapsed_time)
+                    z = self.center_z
+                    
+                    # velocity: dx_des[:3] corresponds to (dx, dy, dz)
+                    dx = -self.radius * omega * np.sin(omega * elapsed_time)
+                    dy = self.radius * omega * np.cos(omega * elapsed_time)
+                    dz = 0.0
+                    
+                    # acceleration: ddx_des[:3] corresponds to (ddx, ddy, ddz)
+                    ddx = -self.radius * omega**2 * np.cos(omega * elapsed_time)
+                    ddy = -self.radius * omega**2 * np.sin(omega * elapsed_time)
+                    ddz = 0.0
             
             # publish on /task_space_command
             trajectory_msg = TaskSpaceCommand()
@@ -169,12 +182,14 @@ class TrajectoryPublisher(Node):
             
             if int(elapsed_time * 1000) % 1000 == 0:
                 if self.use_transition and not self.transition_complete:
+                    transition_elapsed = (current_time - self.transition_start_time).nanoseconds / 1e9
                     self.get_logger().debug(f'Transition phase: t={transition_elapsed:.3f}s, pos=({x:.3f}, {y:.3f}, {z:.3f})')
                 else:
                     self.get_logger().debug(f'Circular trajectory: t={elapsed_time:.3f}s, pos=({x:.3f}, {y:.3f}, {z:.3f})')
                 
         except Exception as e:
             self.get_logger().error(f'Error in trajectory publisher: {str(e)}')
+            self.get_logger().error(f'Current state: transition_complete={self.transition_complete}, elapsed_time={elapsed_time}')
 
 
 def main(args=None):

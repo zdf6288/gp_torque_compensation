@@ -32,11 +32,13 @@ class CPPRelayer : public controller_interface::ControllerInterface {
   const int num_joints = 7;
   Vector7d q_;               // from state interface
   Vector7d dq_;              // from state interface
+  Vector7d tau_measured_;    // from state interface
   Vector7d tau_d_received_;  // from effort command, to be sent via command interface
   std::array<double, 16> o_t_f_;
   std::array<double, 49> mass_;
   std::array<double, 7> coriolis_;
   std::array<double, 42> zero_jacobian_flange_;
+  std::array<double, 7> gravity_;
 
   // Franka robot model for kinematics and dynamics
   std::unique_ptr<franka_semantic_components::FrankaRobotModel> franka_robot_model_;
