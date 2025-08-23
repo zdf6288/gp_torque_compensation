@@ -110,21 +110,28 @@ def generate_launch_description():
             arguments=['joint_state_broadcaster'],
             output='screen',
         ),
-        Node(
-            package='controller_manager',
-            executable='spawner',
-            arguments=['franka_robot_state_broadcaster'],
-            output='screen',
-            condition=UnlessCondition(use_fake_hardware),
-        ),
-        # IncludeLaunchDescription(
-        #     PythonLaunchDescriptionSource([PathJoinSubstitution(
-        #         [FindPackageShare('franka_gripper'), 'launch', 'gripper.launch.py'])]),
-        #     launch_arguments={robot_ip_parameter_name: robot_ip,
-        #                       use_fake_hardware_parameter_name: use_fake_hardware}.items(),
-        #     condition=IfCondition(load_gripper)
+        
+        # The franka_robot_state_broadcaster is closed to save resource for controller_manager.
+        # If it is opened, there will be an error in the log like 
+        # [ros2_control_node-3] [ERROR] [XXX.XXX] [controller_manager]: The update call of the following controller 
+        # returned an error: 'franka_robot_state_broadcaster'
+        # As far as we know this error won't affect robot operation.
 
+        # Node(
+        #     package='controller_manager',
+        #     executable='spawner',
+        #     arguments=['franka_robot_state_broadcaster'],
+        #     output='screen',
+        #     condition=UnlessCondition(use_fake_hardware),
         # ),
+
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource([PathJoinSubstitution(
+                [FindPackageShare('franka_gripper'), 'launch', 'gripper.launch.py'])]),
+            launch_arguments={robot_ip_parameter_name: robot_ip,
+                              use_fake_hardware_parameter_name: use_fake_hardware}.items(),
+            condition=IfCondition(load_gripper)
+        ),
 
         Node(package='rviz2',
              executable='rviz2',

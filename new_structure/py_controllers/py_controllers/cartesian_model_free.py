@@ -45,14 +45,14 @@ class CartesianModelFreeController(Node):
         self.effort_msg = EffortCommand()
         self.get_logger().info('Cartesian Model Free controller node started')
         
-        # 数据记录列表
+        # lists for data recording
         self.tau_history = []
         self.F_history = []
         self.time_history = []
         self.x_history = []
         self.x_des_history = []
 
-        # 设置信号处理器
+        # set signal handler
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
     
@@ -103,11 +103,11 @@ class CartesianModelFreeController(Node):
             zero_jacobian_array = np.array(msg.zero_jacobian_flange)    # vectorized 6x7 zero jacobian matrix in flange frame, column-major
 
             o_t_f = o_t_f_array.reshape(4, 4, order='F')                    # 4x4 pose matrix in flange frame, column-major
-            mass_matrix = mass_matrix_array.reshape(7, 7, order='F')               # 7x7
-            coriolis_matrix = np.diag(coriolis_matrix_array)                       # 7x7
+            mass_matrix = mass_matrix_array.reshape(7, 7, order='F')        # 7x7
+            coriolis_matrix = np.diag(coriolis_matrix_array)                # 7x7
             zero_jacobian = zero_jacobian_array.reshape(6, 7, order='F')    # 6x7
-            zero_jacobian_t = zero_jacobian.T                       # 7x6
-            zero_jacobian_pinv = np.linalg.pinv(zero_jacobian)     # 7x6, pseudoinverse obtained by SVD
+            zero_jacobian_t = zero_jacobian.T                               # 7x6
+            zero_jacobian_pinv = np.linalg.pinv(zero_jacobian)              # 7x6, pseudoinverse obtained by SVD
             if self.zero_jacobian_buffer is None:  
                 dzero_jacobian = np.zeros_like(zero_jacobian)
             else:
@@ -118,7 +118,6 @@ class CartesianModelFreeController(Node):
             x = o_t_f[:3, 3]            # 3x1 position, only x-y-z
             dx = zero_jacobian @ dq     # 6x1 velocity
             # ddx = zero_jacobian @ ddq + dzero_jacobian @ dq
-            # self.get_logger().info(f"x: {x.tolist()}, dx: {dx.tolist()}")
 
             if self.x_init is None:
                 self.x_init = x.copy()
@@ -126,39 +125,25 @@ class CartesianModelFreeController(Node):
                 self.x_des = self.x_init.copy()
                 self.x_des[1] = self.x_init[1] + 0.1 * np.sin(2 * np.pi / 5 * t_elapsed)
 
-            # self.get_logger().info(f"zero_jacobian_transpose: {zero_jacobian_transpose[:, :3].tolist()}")
-            # self.get_logger().info(f"self.K_gains: {self.K_gains[:3, :3].tolist()}")
             self.get_logger().info(f"x: {x[:3].tolist()}, self.x_des: {self.x_des[:3].tolist()}")
-            # self.get_logger().info(f"dx: {dx[:3].tolist()}, self.dx_des: {self.dx_des[:3].tolist()}")
 
             # get K_gains and D_gains
             lambda_matrix = np.linalg.inv(zero_jacobian @ np.linalg.inv(mass_matrix) @ zero_jacobian.T)
             eigvals, _ = np.linalg.eig(lambda_matrix)
             d_gains = 2 * self.eta * np.sqrt(eigvals @ self.K_gains)
             D_gains = np.diag(d_gains)
-
-            # self.get_logger().info(f"D_gains: {D_gains.tolist()}")
-
             
             # calculate tau
             F = -self.K_gains[:3, :3] @ \
                 (x[:3] - self.x_des[:3]) - D_gains[:3, :3] @ (dx[:3] - self.dx_des[:3])
             tau = zero_jacobian_t[:, :3] @ F
-            # tau = zero_jacobian_t[:, :3] @ (-self.K_gains[:3, :3] @ \
-            #     (x[:3] - self.x_des[:3]) - D_gains[:3, :3] @ (dx[:3] - self.dx_des[:3]))
-
-
             tau = np.clip(tau, -50.0, 50.0)
-
-            self.get_logger().info(f'tau: {tau.tolist()}, F: {F.tolist()}')
             
             # Publish on topic /effort_command
             self.effort_msg.efforts = tau.tolist()
-            # print(f'published on topic /effort_command: {tau}')
-            # print(f'self.effort_msg: {self.effort_msg}')
             self.effort_publisher.publish(self.effort_msg)
             
-            # 记录数据
+            # record data
             self.tau_history.append(tau.tolist())
             self.F_history.append(F.tolist())
             self.time_history.append(t_elapsed)
@@ -169,23 +154,22 @@ class CartesianModelFreeController(Node):
             self.get_logger().error(f'Parameter error: {str(e)}')
 
     def signal_handler(self, signum, frame):
-        """信号处理器，在程序被中断时调用绘图函数"""
-        self.get_logger().info(f'收到信号 {signum}，正在绘制数据...')
+        """signal handler, call plot function when program is interrupted"""
+        self.get_logger().info(f'Received signal {signum}, plotting data...')
         self.plot_data()
         sys.exit(0)
     
     def plot_data(self):
-        """绘制记录的tau和F数据"""
+        """plot recorded tau and F data"""
         if not self.tau_history:
-            self.get_logger().info('没有数据可绘制')
+            self.get_logger().info('No data to plot')
             return
             
         try:
-            # 创建子图
             fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 10))
             fig.suptitle('Cartesian Model Free Controller Data', fontsize=16)
             
-            # 绘制tau数据
+            # plot tau for 7 joints
             ax1.plot(self.time_history, self.tau_history)
             ax1.set_title('Joint Torques (tau)')
             ax1.set_xlabel('Time (s)')
@@ -193,7 +177,7 @@ class CartesianModelFreeController(Node):
             ax1.legend([f'Joint {i+1}' for i in range(len(self.tau_history[0]))])
             ax1.grid(True)
             
-            # 绘制F数据
+            # plot F for x, y, z in task space
             ax2.plot(self.time_history, self.F_history)
             ax2.set_title('Cartesian Forces (F)')
             ax2.set_xlabel('Time (s)')
@@ -201,7 +185,7 @@ class CartesianModelFreeController(Node):
             ax2.legend(['Fx', 'Fy', 'Fz'])
             ax2.grid(True)
             
-            # 绘制位置轨迹
+            # plot position trajectory on x axis in task space
             x_history_array = np.array(self.x_history)
             x_des_history_array = np.array(self.x_des_history)
             ax3.plot(self.time_history, x_history_array[:, 0], 'b-', label='Actual X')
@@ -212,7 +196,7 @@ class CartesianModelFreeController(Node):
             ax3.legend()
             ax3.grid(True)
             
-            # 绘制Y位置轨迹
+            # plot position trajectory on y axis in task space
             ax4.plot(self.time_history, x_history_array[:, 1], 'b-', label='Actual Y')
             ax4.plot(self.time_history, x_des_history_array[:, 1], 'r--', label='Desired Y')
             ax4.set_title('Y Position Trajectory')
@@ -223,18 +207,18 @@ class CartesianModelFreeController(Node):
             
             plt.tight_layout()
             
-            # 保存图片
+            # save figure
             plt.savefig('cartesian_controller_data.png', dpi=300, bbox_inches='tight')
-            self.get_logger().info('数据图已保存为 cartesian_controller_data.png')
+            self.get_logger().info('Figure saved as cartesian_controller_data.png')
             
-            # 显示图片
+            # show figure
             plt.show()
             
         except Exception as e:
-            self.get_logger().error(f'绘图时发生错误: {str(e)}')
+            self.get_logger().error(f'Error when plotting data: {str(e)}')
     
     def save_data_to_file(self):
-        """将数据保存到CSV文件"""
+        """save data to CSV file"""
         if not self.tau_history:
             return
             
@@ -244,8 +228,7 @@ class CartesianModelFreeController(Node):
             
             with open(filename, 'w', newline='') as csvfile:
                 writer = csv.writer(csvfile)
-                
-                # 写入表头
+
                 header = ['Time(s)']
                 header.extend([f'tau_{i+1}' for i in range(len(self.tau_history[0]))])
                 header.extend(['Fx', 'Fy', 'Fz'])
@@ -253,7 +236,6 @@ class CartesianModelFreeController(Node):
                 header.extend(['x_desired', 'y_desired', 'z_desired'])
                 writer.writerow(header)
                 
-                # 写入数据
                 for i, t in enumerate(self.time_history):
                     row = [t]
                     row.extend(self.tau_history[i])
@@ -262,10 +244,10 @@ class CartesianModelFreeController(Node):
                     row.extend(self.x_des_history[i][:3])
                     writer.writerow(row)
                     
-            self.get_logger().info(f'数据已保存到 {filename}')
+            self.get_logger().info(f'Data saved to {filename}')
             
         except Exception as e:
-            self.get_logger().error(f'保存数据时发生错误: {str(e)}')
+            self.get_logger().error(f'Error when saving data: {str(e)}')
 
 
 def main(args=None):
@@ -274,17 +256,17 @@ def main(args=None):
     try:
         rclpy.spin(cartesian_model_free_node)
     except KeyboardInterrupt:
-        cartesian_model_free_node.get_logger().info('收到键盘中断信号，正在保存数据...')
+        cartesian_model_free_node.get_logger().info('Received keyboard interrupt, saving data...')
     except Exception as e:
-        cartesian_model_free_node.get_logger().error(f'程序运行时发生错误: {str(e)}')
+        cartesian_model_free_node.get_logger().error(f'Error when running program: {str(e)}')
     finally:
         try:
-            # 保存数据到文件
+            # save data to file
             cartesian_model_free_node.save_data_to_file()
-            # 绘制数据
+            # plot data
             cartesian_model_free_node.plot_data()
         except Exception as e:
-            cartesian_model_free_node.get_logger().error(f'保存数据或绘图时发生错误: {str(e)}')
+            cartesian_model_free_node.get_logger().error(f'Error when saving data or plotting: {str(e)}')
         
         cartesian_model_free_node.destroy_node()
         rclpy.shutdown()

@@ -21,13 +21,14 @@ setup(
     description='TODO: Package description',
     license='Apache-2.0',
     tests_require=['pytest'],
-    entry_points={
-        'console_scripts': [
-            'effort_pd = py_controllers.effort_pd:main',
-            'cartesian_impedance = py_controllers.cartesian_impedance:main',
-            'cartesian_model_free = py_controllers.cartesian_model_free:main',
-            'trajectory_publisher = py_controllers.trajectory_publisher:main',
-            'trajectory_eclipse = py_controllers.trajectory_eclipse:main',
-        ],
-    },
+            entry_points={
+            'console_scripts': [
+                'effort_pd = py_controllers.effort_pd:main',
+                'cartesian_impedance = py_controllers.cartesian_impedance:main',
+                'cartesian_model_free = py_controllers.cartesian_model_free:main',
+                'trajectory_publisher = py_controllers.trajectory_publisher:main',
+                'trajectory_eclipse_publisher = py_controllers.trajectory_eclipse_publisher:main',
+                'plot_data = py_controllers.plot_data:main',
+            ],
+        },
 )

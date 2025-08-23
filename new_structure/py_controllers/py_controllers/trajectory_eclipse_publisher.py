@@ -8,32 +8,37 @@ import numpy as np
 import time
 
 
-class TrajectoryPublisher(Node):
+class TrajectoryEclipsePublisher(Node):
     
     def __init__(self):
-        super().__init__('trajectory_publisher')
+        super().__init__('trajectory_eclipse_publisher')
         
         # publish on /task_space_command
         self.trajectory_publisher = self.create_publisher(
             TaskSpaceCommand, '/task_space_command', 10)
-        self.timer = self.create_timer(0.001, self.timer_callback)  # publish at 1000 Hz
-
+        
         # subscribe to /state_parameter to get robot current state
         self.state_subscription = self.create_subscription(
             StateParameter, '/state_parameter', self.stateCallback, 10)
         
-        # circle trajectory parameters
-        self.declare_parameter('circle_radius', 0.05)   # circle radius (meter)
-        self.declare_parameter('circle_frequency', 0.1) # circle motion frequency (Hz)
-        self.declare_parameter('circle_center_x', 0.6)  # circle center x coordinate
-        self.declare_parameter('circle_center_y', 0.0)  # circle center y coordinate
-        self.declare_parameter('circle_center_z', 0.45) # circle center z coordinate       
+        # publish frequency: 1000 Hz
+        self.timer = self.create_timer(0.001, self.timer_callback)  # 0.001 second = 1000 Hz
+        
+        # circular trajectory parameters
+        self.declare_parameter('circle_radius', 0.1)        # circle radius (meter)
+        self.declare_parameter('circle_frequency', 0.1)     # circle motion frequency (Hz)
+        self.declare_parameter('circle_center_x', 0.6)      # circle center x coordinate
+        self.declare_parameter('circle_center_y', 0.0)      # circle center y coordinate
+        self.declare_parameter('circle_center_z', 0.45)     # circle center z coordinate
+        self.declare_parameter('bank_angle', 10.0)          # bank angle in degrees (tilt of the circle plane relative to xOy)
+        
         self.radius = self.get_parameter('circle_radius').value
         self.frequency = self.get_parameter('circle_frequency').value
         self.center_x = self.get_parameter('circle_center_x').value
         self.center_y = self.get_parameter('circle_center_y').value
         self.center_z = self.get_parameter('circle_center_z').value
-
+        self.bank_angle = np.radians(self.get_parameter('bank_angle').value)  # convert to radians
+        
         # transition parameters to reach the start point of trajectory smoothly
         self.robot_initial_x = None
         self.robot_initial_y = None
@@ -48,15 +53,17 @@ class TrajectoryPublisher(Node):
         self.transition_start_time = None
         self.transition_complete = False
         
-        # get start point of trajectory
+        # get start point of trajectory (on the tilted circle)
+        # The circle is tilted around x-axis, so the start point will be at (center_x + radius, center_y, center_z + radius*sin(bank_angle))
         self.trajectory_start_x = self.center_x + self.radius
         self.trajectory_start_y = self.center_y
-        self.trajectory_start_z = self.center_z
+        self.trajectory_start_z = self.center_z 
         
-        self.get_logger().info('Trajectory publisher node started')
+        self.get_logger().info('Trajectory Circle Publisher node started')
         self.get_logger().info(f'Publishing circular trajectory at 1000 Hz')
         self.get_logger().info(f'Circle radius: {self.radius} m, frequency: {self.frequency} Hz')
         self.get_logger().info(f'Circle center: ({self.center_x}, {self.center_y}, {self.center_z})')
+        self.get_logger().info(f'Bank angle: {np.degrees(self.bank_angle):.1f} degrees')
         self.get_logger().info(f'Trajectory start point: ({self.trajectory_start_x:.3f}, {self.trajectory_start_y:.3f}, {self.trajectory_start_z:.3f})')
         if self.use_transition:
             self.get_logger().info(f'Transition duration: {self.transition_duration} s')
@@ -90,7 +97,7 @@ class TrajectoryPublisher(Node):
             if not self.robot_initial_received:
                 return
             
-            # get time, initialize varaibles
+            # get time, initialize variables
             current_time = self.get_clock().now()
             elapsed_time = (current_time - self.start_time).nanoseconds / 1e9
             x, y, z = 0.0, 0.0, 0.0
@@ -135,27 +142,52 @@ class TrajectoryPublisher(Node):
                     ddy = d2s_dt2 * (self.trajectory_start_y - self.robot_initial_y)
                     ddz = d2s_dt2 * (self.trajectory_start_z - self.robot_initial_z)
             
-            # trajectory for uniform circular trajectory
+            # circular trajectory on tilted plane
             if self.transition_complete or not self.use_transition:
                 if elapsed_time > 0.0:
+                    # calculate circular trajectory parameters
                     omega = 2.0 * np.pi * self.frequency  # angular velocity
                     
-                    # position: (x, y, z) for x_des[:3]
-                    x = self.center_x + self.radius * np.cos(omega * elapsed_time)
-                    y = self.center_y + self.radius * np.sin(omega * elapsed_time)
-                    z = self.center_z
+                    # Generate a perfect circle in the tilted plane
+                    # The circle is tilted around x-axis by bank_angle
+                    # In the tilted plane, we use standard circle equations
+                    angle = omega * elapsed_time
                     
-                    # velocity: (dx, dy, dz) for dx_des[:3]
-                    dx = -self.radius * omega * np.sin(omega * elapsed_time)
-                    dy = self.radius * omega * np.cos(omega * elapsed_time)
-                    dz = 0.0
+                    # Base circle coordinates (in the tilted plane)
+                    x_base = self.center_x + self.radius * np.cos(angle)
+                    y_base = self.center_y + self.radius * np.sin(angle)
                     
-                    # acceleration: (ddx, ddy, ddz) for ddx_des[:3]
-                    ddx = -self.radius * omega**2 * np.cos(omega * elapsed_time)
-                    ddy = -self.radius * omega**2 * np.sin(omega * elapsed_time)
-                    ddz = 0.0
+                    # Apply rotation matrix around x-axis to tilt the circle
+                    # This creates a tilted circle where the z-coordinate varies with the bank angle
+                    cos_bank = np.cos(self.bank_angle)
+                    sin_bank = np.sin(self.bank_angle)
+                    
+                    # Apply rotation matrix around x-axis
+                    x = x_base
+                    y = y_base * cos_bank
+                    z = self.center_z + y_base * sin_bank
+                    
+                    # Calculate velocities
+                    # Base velocities (in the tilted plane)
+                    dx_base = -self.radius * omega * np.sin(angle)
+                    dy_base = self.radius * omega * np.cos(angle)
+                    
+                    # Apply bank angle to velocities
+                    dx = dx_base
+                    dy = dy_base * cos_bank
+                    dz = dy_base * sin_bank
+                    
+                    # Calculate accelerations
+                    # Base accelerations (in the tilted plane)
+                    ddx_base = -self.radius * omega**2 * np.cos(angle)
+                    ddy_base = -self.radius * omega**2 * np.sin(angle)
+                    
+                    # Apply bank angle to accelerations
+                    ddx = ddx_base
+                    ddy = ddy_base * cos_bank
+                    ddz = ddy_base * sin_bank
             
-            # publish on /task_space_command
+            # publish message
             trajectory_msg = TaskSpaceCommand()
             trajectory_msg.header = Header()
             trajectory_msg.header.stamp = current_time.to_msg()
@@ -174,22 +206,24 @@ class TrajectoryPublisher(Node):
                     self.get_logger().debug(f'Circular trajectory: t={elapsed_time:.3f}s, pos=({x:.3f}, {y:.3f}, {z:.3f})')
                 
         except Exception as e:
-            self.get_logger().error(f'Error in trajectory publisher: {str(e)}')
+            self.get_logger().error(f'Error in trajectory circle publisher: {str(e)}')
             self.get_logger().error(f'Current state: transition_complete={self.transition_complete}, elapsed_time={elapsed_time}')
 
 
 def main(args=None):
     rclpy.init(args=args)
-    trajectory_publisher_node = TrajectoryPublisher()
+    trajectory_eclipse_node = TrajectoryEclipsePublisher()
     
     try:
-        rclpy.spin(trajectory_publisher_node)
+        rclpy.spin(trajectory_eclipse_node)
     except KeyboardInterrupt:
-        pass
+        trajectory_eclipse_node.get_logger().info('Received keyboard interrupt, stopping trajectory publishing...')
+    except Exception as e:
+        trajectory_eclipse_node.get_logger().error(f'Error when running program: {str(e)}')
     finally:
-        trajectory_publisher_node.destroy_node()
+        trajectory_eclipse_node.destroy_node()
         rclpy.shutdown()
 
 
 if __name__ == '__main__':
-    main()
+    main() 
