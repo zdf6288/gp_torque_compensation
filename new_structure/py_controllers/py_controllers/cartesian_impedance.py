@@ -31,12 +31,10 @@ class CartesianImpedanceController(Node):
         self.joint_position_client = self.create_client(
             JointPositionAdjust, '/joint_position_adjust')
         
-        self.declare_parameter('k_pd', [24.0, 24.0, 24.0, 24.0, 10.0, 6.0, 2.0])  # k_gains in PD control (joint space)
-        self.declare_parameter('d_pd', [2.0, 2.0, 2.0, 1.0, 1.0, 1.0, 0.5])       # d_gains in PD control (joint space)
+        self.declare_parameter('k_pd', [48.0, 48.0, 48.0, 48.0, 20.0, 12.0, 4.0])   # k_gains in PD control (joint space)
+        self.declare_parameter('d_pd', [16.0, 16.0, 16.0, 16.0, 10.0, 6.0, 2.0])  # d_gains in PD control (joint space)
         self.k_pd = np.array(self.get_parameter('k_pd').value, dtype=float)
         self.d_pd = np.array(self.get_parameter('d_pd').value, dtype=float)
-        self.K_pd = np.diag(self.k_pd)
-        self.D_pd = np.diag(self.d_pd)
 
         self.declare_parameter('k_gains', [2000, 500, 2000, 200, 200, 200])       # k_gains in impedance control (task space)
         self.k_gains = np.array(self.get_parameter('k_gains').value, dtype=float)
@@ -44,9 +42,9 @@ class CartesianImpedanceController(Node):
         self.eta = 1.0
         
         # Joint position control parameters
-        self.declare_parameter('q_des', [0.0, 0.0, 0.0, -1.5708, 0.0, 1.5708, 0.7854])  # desired joint positions
+        self.declare_parameter('q_des', [0.0, -0.7854, 0.0, -2.3562, 0.0, 1.5708, 1.5708])  # desired joint positions
         self.declare_parameter('dq_des', [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])            # desired joint velocities
-        self.declare_parameter('joint_position_threshold', 0.01)                            # threshold for joint position convergence
+        self.declare_parameter('joint_position_threshold', 0.25)                            # threshold for joint position convergence
         self.q_des = np.array(self.get_parameter('q_des').value, dtype=float)
         self.dq_des = np.array(self.get_parameter('dq_des').value, dtype=float)
         self.joint_position_threshold = self.get_parameter('joint_position_threshold').value
@@ -133,7 +131,7 @@ class CartesianImpedanceController(Node):
                         self.start_trajectory()
                 else:
                     # PD control for joint positions
-                    tau = self.K_pd @ (self.q_des - q) + self.D_pd @ (self.dq_des - dq)
+                    tau = self.k_pd * (self.q_des - q) + self.d_pd * (self.dq_des - dq)
                     tau = np.clip(tau, -50.0, 50.0)
                     
                     # Publish effort command
