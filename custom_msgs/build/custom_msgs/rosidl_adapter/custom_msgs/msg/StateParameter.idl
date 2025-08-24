@@ -1,0 +1,33 @@
+// generated from rosidl_adapter/resource/msg.idl.em
+// with input from custom_msgs/msg/StateParameter.msg
+// generated code does not contain a copyright notice
+
+#include "std_msgs/msg/Header.idl"
+
+module custom_msgs {
+  module msg {
+    typedef double double__7[7];
+    typedef double double__16[16];
+    typedef double double__49[49];
+    typedef double double__42[42];
+    struct StateParameter {
+      std_msgs::msg::Header header;
+
+      double__7 position;
+
+      double__7 velocity;
+
+      double__7 effort_measured;
+
+      double__7 gravity;
+
+      double__16 o_t_f;
+
+      double__49 mass;
+
+      double__7 coriolis;
+
+      double__42 zero_jacobian_flange;
+    };
+  };
+};

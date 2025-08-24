@@ -3,6 +3,7 @@
 import rclpy
 from rclpy.node import Node
 from custom_msgs.msg import TaskSpaceCommand, StateParameter
+from custom_msgs.srv import JointPositionAdjust
 from std_msgs.msg import Header
 import numpy as np
 import time
@@ -21,6 +22,10 @@ class TrajectoryPublisher(Node):
         # subscribe to /state_parameter to get robot current state
         self.state_subscription = self.create_subscription(
             StateParameter, '/state_parameter', self.stateCallback, 10)
+        
+        # Create service server for joint position adjustment
+        self.joint_position_service = self.create_service(
+            JointPositionAdjust, '/joint_position_adjust', self.joint_position_callback)
         
         # circle trajectory parameters
         self.declare_parameter('circle_radius', 0.05)   # circle radius (meter)
@@ -44,6 +49,10 @@ class TrajectoryPublisher(Node):
         self.transition_duration = self.get_parameter('transition_duration').value
         self.use_transition = self.get_parameter('use_transition').value
         
+        # Control flags
+        self.trajectory_enabled = False  # flag controlled by service
+        self.joint_positions_received = False  # flag for joint positions from service
+        
         self.start_time = self.get_clock().now()
         self.transition_start_time = None
         self.transition_complete = False
@@ -60,9 +69,41 @@ class TrajectoryPublisher(Node):
         self.get_logger().info(f'Trajectory start point: ({self.trajectory_start_x:.3f}, {self.trajectory_start_y:.3f}, {self.trajectory_start_z:.3f})')
         if self.use_transition:
             self.get_logger().info(f'Transition duration: {self.transition_duration} s')
+        self.get_logger().info('Waiting for joint position adjustment service call to enable trajectory...')
+    
+    def joint_position_callback(self, request, response):
+        """Service callback for joint position adjustment"""
+        try:
+            self.get_logger().info(f'Received joint position adjustment request')
+            self.get_logger().info(f'q_des: {request.q_des}')
+            self.get_logger().info(f'dq_des: {request.dq_des}')
+            
+            # Enable trajectory
+            self.trajectory_enabled = True
+            self.joint_positions_received = True
+            
+            # Reset timing for trajectory
+            self.start_time = self.get_clock().now()
+            self.transition_start_time = None
+            self.transition_complete = False
+            self.robot_initial_received = False
+            
+            response.success = True
+            response.message = "Trajectory enabled successfully"
+            self.get_logger().info('Trajectory enabled via service call')
+            
+        except Exception as e:
+            self.get_logger().error(f'Error in joint position callback: {str(e)}')
+            response.success = False
+            response.message = f"Error: {str(e)}"
+            
+        return response
     
     def stateCallback(self, msg):
         """callback function of /state_parameter subscriber"""
+        if not self.trajectory_enabled:
+            return
+            
         if not self.robot_initial_received:
             try:
                 # get initial position of robot arm (x, y, z) before transition
@@ -86,6 +127,10 @@ class TrajectoryPublisher(Node):
     def timer_callback(self):
         """timer callback function, period: 1ms"""
         try:
+            # Check if trajectory is enabled
+            if not self.trajectory_enabled:
+                return
+                
             # wait for initialization of robot position
             if not self.robot_initial_received:
                 return
