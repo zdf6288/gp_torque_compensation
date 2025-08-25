@@ -1,8 +1,0 @@
-/home/ziyang/franka_ros2_endowrist_ws/src/custom_msgs/build/custom_msgs/rosidl_adapter/custom_msgs:msg/MotorCommand.idl
-/home/ziyang/franka_ros2_endowrist_ws/src/custom_msgs/build/custom_msgs/rosidl_adapter/custom_msgs:msg/LambdaCommand.idl
-/home/ziyang/franka_ros2_endowrist_ws/src/custom_msgs/build/custom_msgs/rosidl_adapter/custom_msgs:msg/MotorMeasurement.idl
-/home/ziyang/franka_ros2_endowrist_ws/src/custom_msgs/build/custom_msgs/rosidl_adapter/custom_msgs:msg/CustomVar.idl
-/home/ziyang/franka_ros2_endowrist_ws/src/custom_msgs/build/custom_msgs/rosidl_adapter/custom_msgs:msg/EffortCommand.idl
-/home/ziyang/franka_ros2_endowrist_ws/src/custom_msgs/build/custom_msgs/rosidl_adapter/custom_msgs:msg/StateParameter.idl
-/home/ziyang/franka_ros2_endowrist_ws/src/custom_msgs/build/custom_msgs/rosidl_adapter/custom_msgs:msg/TaskSpaceCommand.idl
-/home/ziyang/franka_ros2_endowrist_ws/src/custom_msgs/build/custom_msgs/rosidl_adapter/custom_msgs:srv/JointPositionAdjust.idl

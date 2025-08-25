@@ -1,8 +1,0 @@
-# Custom message for two variables
-std_msgs/Float64MultiArray q_des
-std_msgs/Float64MultiArray dq_des
-std_msgs/Float64MultiArray q_meas
-std_msgs/Float64MultiArray dq_meas
-std_msgs/Float64MultiArray ddq_computed
-std_msgs/Float64MultiArray error_endo
-std_msgs/Float64MultiArray error_rcm
