@@ -2,17 +2,17 @@
 
 import rclpy
 from rclpy.node import Node
-from custom_msgs.msg import TaskSpaceCommand, StateParameter
+from custom_msgs.msg import TaskSpaceCommand, StateParameter, LambdaCommand
 from custom_msgs.srv import JointPositionAdjust
 from std_msgs.msg import Header
 import numpy as np
 import time
 
 
-class TrajectoryPublisher(Node):
+class TrajectoryPublisherLambda(Node):
     
     def __init__(self):
-        super().__init__('trajectory_publisher')
+        super().__init__('trajectory_publisher_lambda')
         
         # publish on /task_space_command
         self.trajectory_publisher = self.create_publisher(
@@ -23,21 +23,22 @@ class TrajectoryPublisher(Node):
         self.state_subscription = self.create_subscription(
             StateParameter, '/state_parameter', self.stateCallback, 10)
         
+        # subscribe to /TwistLeft or /TwistRight according to arm parameter
+        self.declare_parameter('arm', 'left')
+        self.arm = self.get_parameter('arm').value
+        if self.arm == "left":
+            self.twist_subscription = self.create_subscription(
+                LambdaCommand, '/TwistLeft', self.lambdaCallback, 10)
+        elif self.arm == "right":
+            self.twist_subscription = self.create_subscription(
+                LambdaCommand, '/TwistRight', self.lambdaCallback, 10)
+        else:
+            self.get_logger().error(f'Invalid arm parameter: {self.arm}. Must be "left" or "right"')
+            self.twist_subscription = None
+        
         # Create service server for joint position adjustment
         self.joint_position_service = self.create_service(
             JointPositionAdjust, '/joint_position_adjust', self.joint_position_callback)
-        
-        # circle trajectory parameters
-        self.declare_parameter('circle_radius', 0.05)   # circle radius (meter)
-        self.declare_parameter('circle_frequency', 0.1) # circle motion frequency (Hz)
-        self.declare_parameter('circle_center_x', 0.6)  # circle center x coordinate
-        self.declare_parameter('circle_center_y', 0.0)  # circle center y coordinate
-        self.declare_parameter('circle_center_z', 0.45) # circle center z coordinate       
-        self.radius = self.get_parameter('circle_radius').value
-        self.frequency = self.get_parameter('circle_frequency').value
-        self.center_x = self.get_parameter('circle_center_x').value
-        self.center_y = self.get_parameter('circle_center_y').value
-        self.center_z = self.get_parameter('circle_center_z').value
 
         # transition parameters to reach the start point of trajectory smoothly
         # 'initial' means after the robot joint position is adjusted
@@ -56,15 +57,23 @@ class TrajectoryPublisher(Node):
         self.transition_start_time = None
         self.transition_complete = False        # flag indicating the completion of moving to the start point of trajectory
         
-        # get start point of trajectory
-        self.trajectory_start_x = self.center_x + self.radius
-        self.trajectory_start_y = self.center_y
-        self.trajectory_start_z = self.center_z
+        # start point of trajectory
+        self.trajectory_start_x = 0.5
+        self.trajectory_start_y = 0.0
+        self.trajectory_start_z = 0.5
+
+        # for convertion from lambda command to trajectory
+        self.t_buffer = None
+        self.x_buffer = self.trajectory_start_x
+        self.y_buffer = self.trajectory_start_y
+        self.z_buffer = self.trajectory_start_z
+        self.lambda_linear_x_buffer = 0.0
+        self.lambda_linear_y_buffer = 0.0
+        self.lambda_linear_z_buffer = 0.0
         
         self.get_logger().info('Trajectory publisher node started')
-        self.get_logger().info(f'Publishing circular trajectory at 1000 Hz')
-        self.get_logger().info(f'Circle radius: {self.radius} m, frequency: {self.frequency} Hz')
-        self.get_logger().info(f'Circle center: ({self.center_x}, {self.center_y}, {self.center_z})')
+        self.get_logger().info(f'Publishing trajectory at 1000 Hz')
+        self.get_logger().info(f'Arm parameter: {self.arm}')
         self.get_logger().info(f'Trajectory start point: ({self.trajectory_start_x:.3f}, {self.trajectory_start_y:.3f}, {self.trajectory_start_z:.3f})')
         if self.use_transition:
             self.get_logger().info(f'Transition duration: {self.transition_duration} s')
@@ -120,6 +129,15 @@ class TrajectoryPublisher(Node):
                 
             except Exception as e:
                 self.get_logger().error(f'Error extracting robot initial position: {str(e)}')
+    
+    def lambdaCallback(self, msg):
+        """callback function of /TwistLeft or /TwistRight subscriber"""
+        try:
+            self.lambda_linear_x = msg.linear.x
+            self.lambda_linear_y = msg.linear.y
+            self.lambda_linear_z = msg.linear.z
+        except Exception as e:
+            self.get_logger().error(f'Error in lambda callback: {str(e)}')
     
     def timer_callback(self):
         """timer callback function, period: 1ms"""
@@ -177,25 +195,29 @@ class TrajectoryPublisher(Node):
                     ddy = d2s_dt2 * (self.trajectory_start_y - self.robot_initial_y)
                     ddz = d2s_dt2 * (self.trajectory_start_z - self.robot_initial_z)
             
-            # trajectory for uniform circular trajectory
+            # trajectory determined by lambda command
             if self.transition_complete or not self.use_transition:
                 if elapsed_time > 0.0:
-                    omega = 2.0 * np.pi * self.frequency  # angular velocity
-                    
+                    if self.t_buffer is None:
+                        dt = 1e-3
+                    else:
+                        dt = elapsed_time - self.t_buffer
+                    self.t_buffer = elapsed_time
+
                     # position: (x, y, z) for x_des[:3]
-                    x = self.center_x + self.radius * np.cos(omega * elapsed_time)
-                    y = self.center_y + self.radius * np.sin(omega * elapsed_time)
-                    z = self.center_z
+                    x = self.x_buffer + self.lambda_linear_x * dt
+                    y = self.y_buffer + self.lambda_linear_y * dt
+                    z = self.z_buffer + self.lambda_linear_z * dt
                     
                     # velocity: (dx, dy, dz) for dx_des[:3]
-                    dx = -self.radius * omega * np.sin(omega * elapsed_time)
-                    dy = self.radius * omega * np.cos(omega * elapsed_time)
-                    dz = 0.0
-                    
+                    dx = self.lambda_linear_x
+                    dy = self.lambda_linear_y
+                    dz = self.lambda_linear_z
+
                     # acceleration: (ddx, ddy, ddz) for ddx_des[:3]
-                    ddx = -self.radius * omega**2 * np.cos(omega * elapsed_time)
-                    ddy = -self.radius * omega**2 * np.sin(omega * elapsed_time)
-                    ddz = 0.0
+                    ddx = 0
+                    ddy = 0
+                    ddz = 0
             
             # publish on /task_space_command
             trajectory_msg = TaskSpaceCommand()
@@ -222,14 +244,13 @@ class TrajectoryPublisher(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    trajectory_publisher_node = TrajectoryPublisher()
+    trajectory_publisher_lambda_node = TrajectoryPublisherLambda()
     
     try:
-        rclpy.spin(trajectory_publisher_node)
-    except KeyboardInterrupt:
+        rclpy.spin(trajectory_publisher_lambda_node)
         pass
     finally:
-        trajectory_publisher_node.destroy_node()
+        trajectory_publisher_lambda_node.destroy_node()
         rclpy.shutdown()
 
 
