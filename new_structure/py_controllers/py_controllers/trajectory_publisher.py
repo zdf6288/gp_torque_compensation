@@ -49,13 +49,11 @@ class TrajectoryPublisher(Node):
         self.transition_duration = self.get_parameter('transition_duration').value
         self.use_transition = self.get_parameter('use_transition').value
         
-        # Control flags
-        self.trajectory_enabled = False  # flag controlled by service
-        self.joint_positions_received = False  # flag for joint positions from service
+        self.trajectory_enabled = False         # flag controlled by service, indicating the start of trajectory publishment
         
         self.start_time = self.get_clock().now()
         self.transition_start_time = None
-        self.transition_complete = False
+        self.transition_complete = False        # flag indicating the completion of moving to the start point of trajectory
         
         # get start point of trajectory
         self.trajectory_start_x = self.center_x + self.radius
@@ -78,11 +76,9 @@ class TrajectoryPublisher(Node):
             self.get_logger().info(f'q_des: {request.q_des}')
             self.get_logger().info(f'dq_des: {request.dq_des}')
             
-            # Enable trajectory
             self.trajectory_enabled = True
-            self.joint_positions_received = True
             
-            # Reset timing for trajectory
+            # reset timing for trajectory
             self.start_time = self.get_clock().now()
             self.transition_start_time = None
             self.transition_complete = False
@@ -127,7 +123,7 @@ class TrajectoryPublisher(Node):
     def timer_callback(self):
         """timer callback function, period: 1ms"""
         try:
-            # Check if trajectory is enabled
+            # check if joint position adjustment is completed
             if not self.trajectory_enabled:
                 return
                 

@@ -32,18 +32,18 @@ class CartesianImpedanceController(Node):
             JointPositionAdjust, '/joint_position_adjust')
         
         self.declare_parameter('k_pd', [48.0, 48.0, 48.0, 48.0, 20.0, 12.0, 4.0])   # k_gains in PD control (joint space)
-        self.declare_parameter('d_pd', [16.0, 16.0, 16.0, 16.0, 10.0, 6.0, 2.0])  # d_gains in PD control (joint space)
+        self.declare_parameter('d_pd', [16.0, 16.0, 16.0, 16.0, 10.0, 6.0, 2.0])    # d_gains in PD control (joint space)
         self.k_pd = np.array(self.get_parameter('k_pd').value, dtype=float)
         self.d_pd = np.array(self.get_parameter('d_pd').value, dtype=float)
 
-        self.declare_parameter('k_gains', [2000, 500, 2000, 200, 200, 200])       # k_gains in impedance control (task space)
+        self.declare_parameter('k_gains', [2000, 500, 2000, 200, 200, 200])         # k_gains in impedance control (task space)
         self.k_gains = np.array(self.get_parameter('k_gains').value, dtype=float)
         self.K_gains = np.diag(self.k_gains)
         self.eta = 1.0
         
         # Joint position control parameters
         self.declare_parameter('q_des', [0.0, -0.7854, 0.0, -2.3562, 0.0, 1.5708, 1.5708])  # desired joint positions
-        self.declare_parameter('dq_des', [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])            # desired joint velocities
+        self.declare_parameter('dq_des', [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])               # desired joint velocities
         self.declare_parameter('joint_position_threshold', 0.25)                            # threshold for joint position convergence
         self.q_des = np.array(self.get_parameter('q_des').value, dtype=float)
         self.dq_des = np.array(self.get_parameter('dq_des').value, dtype=float)
@@ -61,9 +61,9 @@ class CartesianImpedanceController(Node):
         self.ddx_des = None                 # desired acceleration from task space command
         
         # Joint position control state
-        self.joint_position_control_active = True  # start with joint position control
-        self.joint_position_converged = False      # flag for joint position convergence
-        self.trajectory_started = False            # flag for trajectory start
+        self.joint_position_control_active = True   # start with joint position control
+        self.joint_position_adjusted = False        # flag for joint position adjustment
+        self.trajectory_started = False             # flag for trajectory start, indicating the start of trajectory publishment (after joint position adjustment
 
         self.effort_msg = EffortCommand()
         self.get_logger().info('Cartesian Impedance controller node started')
@@ -83,7 +83,7 @@ class CartesianImpedanceController(Node):
         # set signal handler
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
-        self._signal_handled = False                        # flag to avoid repeated data saving
+        self._signal_handled = False                # flag to avoid repeated data saving
 
     def taskCommandCallback(self, msg):
         """callback function for /task_space_command subscriber"""
@@ -118,15 +118,15 @@ class CartesianImpedanceController(Node):
                 ddq = (dq - self.dq_buffer) / dt
                 self.dq_buffer = dq.copy()
 
-            # Joint position control mode
-            if self.joint_position_control_active and not self.joint_position_converged:
-                # Check if joint positions are close enough to desired positions
+            # joint position control (for joint position adjustment before trajectory_publisher starts to work)
+            if self.joint_position_control_active and not self.joint_position_adjusted:
+                # check if joint positions are close enough to desired positions
                 joint_error = np.linalg.norm(q - self.q_des)
                 if joint_error < self.joint_position_threshold:
-                    self.joint_position_converged = True
-                    self.get_logger().info(f'Joint positions converged! Error: {joint_error:.6f}')
+                    self.joint_position_adjusted = True
+                    self.get_logger().info(f'Joint positions adjusted! Error: {joint_error:.6f}')
                     
-                    # Start trajectory by calling service
+                    # start trajectory by calling service
                     if not self.trajectory_started:
                         self.start_trajectory()
                 else:
@@ -134,15 +134,13 @@ class CartesianImpedanceController(Node):
                     tau = self.k_pd * (self.q_des - q) + self.d_pd * (self.dq_des - dq)
                     tau = np.clip(tau, -50.0, 50.0)
                     
-                    # Publish effort command
+                    # publish effort command
                     self.effort_msg.efforts = tau.tolist()
                     self.effort_publisher.publish(self.effort_msg)
-                    
-                    if int(t_elapsed * 1000) % 1000 == 0:  # Log every second
-                        self.get_logger().debug(f'Joint position control: error={joint_error:.6f}, target={self.q_des}, current={q}')
+
                     return
             
-            # Cartesian impedance control mode
+            # cartesian impedance control (after joint position adjustment)
             if not self.task_command_received:
                 return
             
@@ -186,11 +184,11 @@ class CartesianImpedanceController(Node):
             )
             tau = np.clip(tau, -50.0, 50.0)
             
-            # Publish on topic /effort_command
+            # publish on topic /effort_command
             self.effort_msg.efforts = tau.tolist()
             self.effort_publisher.publish(self.effort_msg)
             
-            # Record Data
+            # record data
             self.tau_history.append(tau.tolist())
             self.time_history.append(t_elapsed)
             self.x_history.append(x.tolist())
@@ -228,13 +226,15 @@ class CartesianImpedanceController(Node):
             response = future.result()
             if response.success:
                 self.get_logger().info(f'Trajectory started successfully: {response.message}')
-                self.joint_position_control_active = False  # Switch to cartesian impedance control
+                self.joint_position_control_active = False  # joint position adjestment completed
+                # switch to cartesian impedance control, receiving task space command from trajectory_publisher
+                # to move the robot to the start point of trajectory, then follow the trajectory
             else:
                 self.get_logger().warn(f'Trajectory start failed: {response.message}')
-                self.trajectory_started = False  # Reset flag to retry
+                self.trajectory_started = False         # reset flag to retry
         except Exception as e:
             self.get_logger().error(f'Error in trajectory start callback: {str(e)}')
-            self.trajectory_started = False  # Reset flag to retry
+            self.trajectory_started = False             # reset flag to retry
 
     def signal_handler(self, signum, frame):
         """signal handler, call save data function when program is interrupted"""

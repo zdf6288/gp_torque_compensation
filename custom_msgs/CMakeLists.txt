@@ -13,10 +13,7 @@ find_package(geometry_msgs REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 
 set(msg_files
-  "msg/MotorCommand.msg"
   "msg/LambdaCommand.msg"
-  "msg/MotorMeasurement.msg"
-  "msg/CustomVar.msg"
   "msg/EffortCommand.msg"
   "msg/StateParameter.msg"
   "msg/TaskSpaceCommand.msg"
