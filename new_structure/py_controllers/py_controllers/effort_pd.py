@@ -46,8 +46,7 @@ class EffortPDController(Node):
             q = np.array(msg.position)
             dq = np.array(msg.velocity)
             if self.q_initial is None:
-                self.q_initial = q.copy()
-                self.get_logger().info(f'Captured initial position q0: {self.q_initial.tolist()}')      
+                self.q_initial = q.copy()     
             
             # test trajectory, joint 4 and 5 move periodically
             q_delta = np.pi / 8.0 * (1 - np.cos(np.pi / 2.5 * t_elapsed))
@@ -65,8 +64,6 @@ class EffortPDController(Node):
             
             # Publish on topic /effort_command
             self.effort_msg.efforts = tau.tolist()
-            print(f'published on topic /effort_command: {tau}')
-            print(f'self.effort_msg: {self.effort_msg}')
             self.effort_publisher.publish(self.effort_msg)
             self.get_logger().debug(f'published on topic /effort_command: {tau}')
             

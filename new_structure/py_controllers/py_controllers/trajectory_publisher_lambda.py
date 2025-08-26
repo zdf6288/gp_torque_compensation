@@ -167,10 +167,10 @@ class TrajectoryPublisherLambda(Node):
                 transition_elapsed = (current_time - self.transition_start_time).nanoseconds / 1e9
                 
                 if transition_elapsed >= self.transition_duration:
-                    # transition complete, start circular trajectory
+                    # transition complete, start lambda trajectory
                     self.transition_complete = True
-                    self.get_logger().info('Transition complete, starting circular trajectory')
-                    # reset start time for circular trajectory
+                    self.get_logger().info('Transition complete, starting lambda trajectory')
+                    # reset start time for lambda trajectory
                     self.start_time = current_time
                     elapsed_time = 0.0
                     
@@ -246,7 +246,7 @@ class TrajectoryPublisherLambda(Node):
                     transition_elapsed = (current_time - self.transition_start_time).nanoseconds / 1e9
                     self.get_logger().debug(f'Transition phase: t={transition_elapsed:.3f}s, pos=({x:.3f}, {y:.3f}, {z:.3f})')
                 else:
-                    self.get_logger().debug(f'Circular trajectory: t={elapsed_time:.3f}s, pos=({x:.3f}, {y:.3f}, {z:.3f})')
+                    self.get_logger().debug(f'Lambda trajectory: t={elapsed_time:.3f}s, pos=({x:.3f}, {y:.3f}, {z:.3f})')
                 
         except Exception as e:
             self.get_logger().error(f'Error in trajectory publisher: {str(e)}')

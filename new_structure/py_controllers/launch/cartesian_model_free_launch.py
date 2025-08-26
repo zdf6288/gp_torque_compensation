@@ -70,5 +70,18 @@ def generate_launch_description():
             #     'k_gains': [20, 20, 20, 10, 10, 10],
             #     'eta': 0.707,
             # }]
+        ),
+        Node(
+            package='py_controllers',
+            executable='trajectory_publisher',
+            name='trajectory_publisher',
+            output='screen',
+            # parameters=[{
+            #     'circle_radius': 0.2,
+            #     'circle_frequency': 0.5,
+            #     'circle_center_x': 0.5,
+            #     'circle_center_y': 0.0,
+            #     'circle_center_z': 0.3,
+            # }]
         )
     ])

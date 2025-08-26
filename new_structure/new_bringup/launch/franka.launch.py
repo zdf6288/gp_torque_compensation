@@ -117,13 +117,13 @@ def generate_launch_description():
         # returned an error: 'franka_robot_state_broadcaster'
         # As far as we know this error won't affect robot operation.
 
-        # Node(
-        #     package='controller_manager',
-        #     executable='spawner',
-        #     arguments=['franka_robot_state_broadcaster'],
-        #     output='screen',
-        #     condition=UnlessCondition(use_fake_hardware),
-        # ),
+        Node(
+            package='controller_manager',
+            executable='spawner',
+            arguments=['franka_robot_state_broadcaster'],
+            output='screen',
+            condition=UnlessCondition(use_fake_hardware),
+        ),
 
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource([PathJoinSubstitution(
