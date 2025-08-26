@@ -69,6 +69,11 @@ class CartesianImpedanceController(Node):
         self.get_logger().info('Cartesian Impedance controller node started')
         self.get_logger().info(f'Desired joint positions: {self.q_des}')
         self.get_logger().info(f'Joint position threshold: {self.joint_position_threshold}')
+
+        # filter parameters
+        self.filter_freq = 5.0              # filter frequency for tau
+        self.filter_beta = 2 * np.pi * self.filter_freq / 1000.0
+        self.tau_buffer = np.zeros_like(self.effort_msg.efforts)    # buffer for tau
     
         # list for data recording
         self.tau_history = []
@@ -175,13 +180,16 @@ class CartesianImpedanceController(Node):
             
             # calculate tau
             tau = (
-                mass_matrix @ zero_jacobian_pinv[:, :3] @ self.ddx_des[:3]
-                + (coriolis_matrix - mass_matrix @ zero_jacobian_pinv[:, :3] @ dzero_jacobian[:3, :])
-                    @ zero_jacobian_pinv[:, :3] @ dx[:3]
+                # mass_matrix @ zero_jacobian_pinv[:, :3] @ self.ddx_des[:3]
+                # + (coriolis_matrix - mass_matrix @ zero_jacobian_pinv[:, :3] @ dzero_jacobian[:3, :])
+                #     @ zero_jacobian_pinv[:, :3] @ dx[:3]
                 - zero_jacobian_t[:, :3]
                     @ (self.K_gains[:3, :3] @ (x - self.x_des[:3])
                     + D_gains[:3, :3] @ (dx[:3] - self.dx_des[:3]))
             )
+
+            tau = self.filter_beta * tau + (1 - self.filter_beta) * self.tau_buffer
+            self.tau_buffer = tau.copy()
             tau = np.clip(tau, -50.0, 50.0)
             
             # publish on topic /effort_command
