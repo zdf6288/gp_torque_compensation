@@ -53,7 +53,7 @@ class CartesianImpedanceController(Node):
         self.t_initial = None               # initial time
         self.t_last = None                  # last time
         self.dq_buffer = None               # buffer for joint velocity dq
-        self.zero_jacobian_buffer = None    # buffer for zero jacobian matrix in flange frame
+        self.zero_jacobian_buffer = np.zeros((6, 7))   # buffer for zero jacobian matrix in flange frame
 
         self.task_command_received = False  # flag for task space command received
         self.x_des = None                   # desired position from task space command
@@ -74,6 +74,7 @@ class CartesianImpedanceController(Node):
         self.filter_freq = 5.0              # filter frequency for tau
         self.filter_beta = 2 * np.pi * self.filter_freq / 1000.0
         self.tau_buffer = np.zeros_like(self.effort_msg.efforts)    # buffer for tau
+
     
         # list for data recording
         self.tau_history = []
@@ -159,13 +160,14 @@ class CartesianImpedanceController(Node):
             mass_matrix = mass_matrix_array.reshape(7, 7, order='F')        # 7x7
             coriolis_matrix = np.diag(coriolis_matrix_array)                # 7x7
             zero_jacobian = zero_jacobian_array.reshape(6, 7, order='F')    # 6x7
+
+            zero_jacobian = (1 - self.filter_beta) * zero_jacobian + self.filter_beta * self.zero_jacobian_buffer
             zero_jacobian_t = zero_jacobian.T                               # 7x6, transpose of zero_jacobian
+
+            self.zero_jacobian_buffer = zero_jacobian.copy()
             zero_jacobian_pinv = np.linalg.pinv(zero_jacobian)              # 7x6, pseudoinverse obtained by SVD
-            if self.zero_jacobian_buffer is None:  
-                dzero_jacobian = np.zeros_like(zero_jacobian)
-            else:
-                dzero_jacobian = (zero_jacobian - self.zero_jacobian_buffer) / dt
-                self.zero_jacobian_buffer = zero_jacobian.copy()
+            # dzero_jacobian = (zero_jacobian - self.zero_jacobian_buffer) / dt
+            # self.zero_jacobian_buffer = zero_jacobian.copy()
 
             # get x and dx
             x = o_t_f[:3, 3]            # 3x1 position, only x-y-z
