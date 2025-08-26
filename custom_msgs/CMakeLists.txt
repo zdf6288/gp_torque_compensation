@@ -17,6 +17,7 @@ set(msg_files
   "msg/EffortCommand.msg"
   "msg/StateParameter.msg"
   "msg/TaskSpaceCommand.msg"
+  "msg/RobotTransformation.msg"
 )
 
 set(srv_files

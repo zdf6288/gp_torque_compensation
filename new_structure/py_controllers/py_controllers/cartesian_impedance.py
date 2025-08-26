@@ -31,7 +31,7 @@ class CartesianImpedanceController(Node):
         self.joint_position_client = self.create_client(
             JointPositionAdjust, '/joint_position_adjust')
         
-        self.declare_parameter('k_pd', [48.0, 48.0, 48.0, 48.0, 20.0, 12.0, 4.0])   # k_gains in PD control (joint space)
+        self.declare_parameter('k_pd', [24.0, 24.0, 24.0, 24.0, 10.0, 6.0, 2.0])   # k_gains in PD control (joint space)
         self.declare_parameter('d_pd', [16.0, 16.0, 16.0, 16.0, 10.0, 6.0, 2.0])    # d_gains in PD control (joint space)
         self.k_pd = np.array(self.get_parameter('k_pd').value, dtype=float)
         self.d_pd = np.array(self.get_parameter('d_pd').value, dtype=float)

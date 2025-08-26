@@ -58,7 +58,7 @@ class TrajectoryPublisherLambda(Node):
         self.transition_complete = False        # flag indicating the completion of moving to the start point of trajectory
         
         # start point of trajectory
-        self.trajectory_start_x = 0.5
+        self.trajectory_start_x = 0.6
         self.trajectory_start_y = 0.0
         self.trajectory_start_z = 0.5
 
@@ -70,6 +70,11 @@ class TrajectoryPublisherLambda(Node):
         self.lambda_linear_x = 0.0
         self.lambda_linear_y = 0.0
         self.lambda_linear_z = 0.0
+        self.filter_freq = 5                    # for the velocity filter
+        self.filter_beta = 2 * np.pi * self.filter_freq / 1000.0
+        self.dx_buffer = 0.0
+        self.dy_buffer = 0.0
+        self.dz_buffer = 0.0
         
         self.get_logger().info('Trajectory publisher node started')
         self.get_logger().info(f'Publishing trajectory at 1000 Hz')
@@ -208,11 +213,17 @@ class TrajectoryPublisherLambda(Node):
                     x = self.x_buffer + self.lambda_linear_x * dt
                     y = self.y_buffer + self.lambda_linear_y * dt
                     z = self.z_buffer + self.lambda_linear_z * dt
+                    self.x_buffer = x
+                    self.y_buffer = y
+                    self.z_buffer = z
                     
                     # velocity: (dx, dy, dz) for dx_des[:3]
-                    dx = self.lambda_linear_x
-                    dy = self.lambda_linear_y
-                    dz = self.lambda_linear_z
+                    dx = self.filter_beta * (self.lambda_linear_x - self.dx_buffer) + (1 - self.filter_beta) * self.dx_buffer
+                    dy = self.filter_beta * (self.lambda_linear_y - self.dy_buffer) + (1 - self.filter_beta) * self.dy_buffer
+                    dz = self.filter_beta * (self.lambda_linear_z - self.dz_buffer) + (1 - self.filter_beta) * self.dz_buffer
+                    self.dx_buffer = dx
+                    self.dy_buffer = dy
+                    self.dz_buffer = dz
 
                     # acceleration: (ddx, ddy, ddz) for ddx_des[:3]
                     ddx = 0.0
