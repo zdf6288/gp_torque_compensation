@@ -67,9 +67,9 @@ class TrajectoryPublisherLambda(Node):
         self.x_buffer = self.trajectory_start_x
         self.y_buffer = self.trajectory_start_y
         self.z_buffer = self.trajectory_start_z
-        self.lambda_linear_x_buffer = 0.0
-        self.lambda_linear_y_buffer = 0.0
-        self.lambda_linear_z_buffer = 0.0
+        self.lambda_linear_x = 0.0
+        self.lambda_linear_y = 0.0
+        self.lambda_linear_z = 0.0
         
         self.get_logger().info('Trajectory publisher node started')
         self.get_logger().info(f'Publishing trajectory at 1000 Hz')
@@ -215,9 +215,9 @@ class TrajectoryPublisherLambda(Node):
                     dz = self.lambda_linear_z
 
                     # acceleration: (ddx, ddy, ddz) for ddx_des[:3]
-                    ddx = 0
-                    ddy = 0
-                    ddz = 0
+                    ddx = 0.0
+                    ddy = 0.0
+                    ddz = 0.0
             
             # publish on /task_space_command
             trajectory_msg = TaskSpaceCommand()
