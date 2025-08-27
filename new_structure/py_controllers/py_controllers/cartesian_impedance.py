@@ -4,6 +4,7 @@ import rclpy
 from rclpy.node import Node
 from custom_msgs.msg import StateParameter, EffortCommand, TaskSpaceCommand
 from custom_msgs.srv import JointPositionAdjust
+from std_msgs.msg import Bool
 import numpy as np
 import signal
 import csv
@@ -15,31 +16,39 @@ class CartesianImpedanceController(Node):
     def __init__(self):
         super().__init__('cartesian_impedance')
         
-        # Subscribe to /state_parameter
+        # subscribe to /state_parameter
         self.param_subscription = self.create_subscription(
             StateParameter, '/state_parameter', self.stateParameterCallback, 10)
         
-        # Subscribe to /task_space_command
+        # subscribe to /task_space_command
         self.task_command_subscription = self.create_subscription(
             TaskSpaceCommand, '/task_space_command', self.taskCommandCallback, 10)
         
-        # Publish on /effort_command
+        # subscribe to /data_recording_enabled to know when to start recording data
+        self.data_recording_subscription = self.create_subscription(
+            Bool, '/data_recording_enabled', self.dataRecordingCallback, 10)
+        
+        # publish on /effort_command
         self.effort_publisher = self.create_publisher(
             EffortCommand, '/effort_command', 10)
         
-        # Create service client for joint position adjustment
+        # create service client for joint position adjustment
         self.joint_position_client = self.create_client(
             JointPositionAdjust, '/joint_position_adjust')
         
-        self.declare_parameter('k_pd', [24.0, 24.0, 24.0, 24.0, 10.0, 6.0, 2.0])   # k_gains in PD control (joint space)
+        self.declare_parameter('k_pd', [24.0, 24.0, 24.0, 24.0, 10.0, 6.0, 2.0])    # k_gains in PD control (joint space)
         self.declare_parameter('d_pd', [16.0, 16.0, 16.0, 16.0, 10.0, 6.0, 2.0])    # d_gains in PD control (joint space)
         self.k_pd = np.array(self.get_parameter('k_pd').value, dtype=float)
         self.d_pd = np.array(self.get_parameter('d_pd').value, dtype=float)
 
-        self.declare_parameter('k_gains', [2000, 500, 2000, 200, 200, 200])         # k_gains in impedance control (task space)
+        self.declare_parameter('k_gains', [2000, 2000, 2000, 200, 200, 200])         # k_gains in impedance control (task space)
         self.k_gains = np.array(self.get_parameter('k_gains').value, dtype=float)
         self.K_gains = np.diag(self.k_gains)
-        self.eta = 1.0
+        self.eta = 1.0                                                              # for calculating d_gains
+
+        self.declare_parameter('kpn_gains', [20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0])     # kpn_gains for nullspace 
+        self.kpn_gains = np.array(self.get_parameter('kpn_gains').value, dtype=float)
+        self.dpn_gains = 2 * np.sqrt(np.array(self.kpn_gains))                      # dpn_gains for nullspace
         
         # Joint position control parameters
         self.declare_parameter('q_des', [0.0, -0.7854, 0.0, -2.3562, 0.0, 1.5708, 1.5708])  # desired joint positions
@@ -60,10 +69,13 @@ class CartesianImpedanceController(Node):
         self.dx_des = None                  # desired velocity from task space command
         self.ddx_des = None                 # desired acceleration from task space command
         
-        # Joint position control state
+        # joint position control state
         self.joint_position_control_active = True   # start with joint position control
         self.joint_position_adjusted = False        # flag for joint position adjustment
         self.trajectory_started = False             # flag for trajectory start, indicating the start of trajectory publishment (after joint position adjustment
+
+        # data recording control
+        self.data_recording_enabled = False         # flag indicating whether to record data (controlled by trajectory_publisher)
 
         self.effort_msg = EffortCommand()
         self.get_logger().info('Cartesian Impedance controller node started')
@@ -82,7 +94,7 @@ class CartesianImpedanceController(Node):
         self.x_history = []
         self.x_des_history = []
         self.dx_history = []           
-        self.dx_des_history = []  
+        self.dx_des_history = []
         self.tau_measured_history = []
         self.gravity_history = []
 
@@ -98,6 +110,10 @@ class CartesianImpedanceController(Node):
         self.dx_des = np.array(msg.dx_des)
         self.ddx_des = np.array(msg.ddx_des)
         self.get_logger().debug('Received task space command, enabling control execution')
+        
+    def dataRecordingCallback(self, msg):
+        """callback function for /data_recording_enabled subscriber"""
+        self.data_recording_enabled = msg.data
         
     def stateParameterCallback(self, msg):
         """callback function for /state_parameter subscriber"""
@@ -189,7 +205,10 @@ class CartesianImpedanceController(Node):
                     @ (self.K_gains[:3, :3] @ (x - self.x_des[:3])
                     + D_gains[:3, :3] @ (dx[:3] - self.dx_des[:3]))
             )
-            
+
+            tau_nullspace = ((np.eye(7) - zero_jacobian_pinv[:, :3] @ zero_jacobian[:3, :]) 
+                @ (self.kpn_gains * (self.q_des - q) + self.dpn_gains * (self.dq_des - dq)))
+            tau = tau + tau_nullspace
 
             tau = self.filter_beta * tau + (1 - self.filter_beta) * self.tau_buffer
             self.tau_buffer = tau.copy()
@@ -199,15 +218,16 @@ class CartesianImpedanceController(Node):
             self.effort_msg.efforts = tau.tolist()
             self.effort_publisher.publish(self.effort_msg)
             
-            # record data
-            self.tau_history.append(tau.tolist())
-            self.time_history.append(t_elapsed)
-            self.x_history.append(x.tolist())
-            self.x_des_history.append(self.x_des.tolist())
-            self.dx_history.append(dx[:3].tolist())      
-            self.dx_des_history.append(self.dx_des[:3].tolist()) 
-            self.tau_measured_history.append(np.array(msg.effort_measured).tolist())
-            self.gravity_history.append(np.array(msg.gravity).tolist())
+            # record data only when data recording is enabled
+            if self.data_recording_enabled:
+                self.tau_history.append(tau.tolist())
+                self.time_history.append(t_elapsed)
+                self.x_history.append(x.tolist())
+                self.x_des_history.append(self.x_des.tolist())
+                self.dx_history.append(dx[:3].tolist())      
+                self.dx_des_history.append(self.dx_des[:3].tolist()) 
+                self.tau_measured_history.append(np.array(msg.effort_measured).tolist())
+                self.gravity_history.append(np.array(msg.gravity).tolist())
 
         except Exception as e:
             self.get_logger().error(f'Parameter error: {str(e)}')

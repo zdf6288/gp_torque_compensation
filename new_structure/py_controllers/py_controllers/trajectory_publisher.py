@@ -4,7 +4,7 @@ import rclpy
 from rclpy.node import Node
 from custom_msgs.msg import TaskSpaceCommand, StateParameter
 from custom_msgs.srv import JointPositionAdjust
-from std_msgs.msg import Header
+from std_msgs.msg import Header, Bool
 import numpy as np
 import time
 
@@ -17,22 +17,27 @@ class TrajectoryPublisher(Node):
         # publish on /task_space_command
         self.trajectory_publisher = self.create_publisher(
             TaskSpaceCommand, '/task_space_command', 10)
+        
+        # publish on /data_recording_enabled to inform other nodes when to start recording
+        self.data_recording_publisher = self.create_publisher(
+            Bool, '/data_recording_enabled', 10)
+        
         self.timer = self.create_timer(0.001, self.timer_callback)  # publish at 1000 Hz
 
         # subscribe to /state_parameter to get robot current state
         self.state_subscription = self.create_subscription(
             StateParameter, '/state_parameter', self.stateCallback, 10)
         
-        # Create service server for joint position adjustment
+        # service server for joint position adjustment
         self.joint_position_service = self.create_service(
             JointPositionAdjust, '/joint_position_adjust', self.joint_position_callback)
         
         # circle trajectory parameters
         self.declare_parameter('circle_radius', 0.05)   # circle radius (meter)
         self.declare_parameter('circle_frequency', 0.1) # circle motion frequency (Hz)
-        self.declare_parameter('circle_center_x', 0.6)  # circle center x coordinate
+        self.declare_parameter('circle_center_x', 0.3)  # circle center x coordinate
         self.declare_parameter('circle_center_y', 0.0)  # circle center y coordinate
-        self.declare_parameter('circle_center_z', 0.45) # circle center z coordinate       
+        self.declare_parameter('circle_center_z', 0.65) # circle center z coordinate       
         self.radius = self.get_parameter('circle_radius').value
         self.frequency = self.get_parameter('circle_frequency').value
         self.center_x = self.get_parameter('circle_center_x').value
@@ -207,6 +212,11 @@ class TrajectoryPublisher(Node):
             trajectory_msg.ddx_des = [ddx, ddy, ddz, 0.0, 0.0, 0.0] # acceleration
             
             self.trajectory_publisher.publish(trajectory_msg)
+            
+            # publish data recording status
+            data_recording_msg = Bool()
+            data_recording_msg.data = self.transition_complete or not self.use_transition
+            self.data_recording_publisher.publish(data_recording_msg)
             
             if int(elapsed_time * 1000) % 1000 == 0:
                 if self.use_transition and not self.transition_complete:

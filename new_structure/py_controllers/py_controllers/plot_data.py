@@ -2,6 +2,7 @@
 
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
 import pandas as pd
 import argparse
 import sys
@@ -59,18 +60,24 @@ def plot_data_from_csv(csv_filename):
         axes[0, 1].legend()
         axes[0, 1].grid(True)
         
-        # plot position error
-        position_errors = []
+        # plot position error on x, y, z axes separately
+        x_errors = []
+        y_errors = []
+        z_errors = []
         for i in range(len(x_history)):
             actual_pos = x_history[i][:3]
             desired_pos = x_des_history[i][:3]
-            error = np.linalg.norm(actual_pos - desired_pos)
-            position_errors.append(error)
+            x_errors.append(actual_pos[0] - desired_pos[0])
+            y_errors.append(actual_pos[1] - desired_pos[1])
+            z_errors.append(actual_pos[2] - desired_pos[2])
         
-        axes[0, 2].plot(time_history, position_errors, 'r-', linewidth=2)
-        axes[0, 2].set_title('Position Error (Euclidean Distance)')
+        axes[0, 2].plot(time_history, x_errors, 'r-', label='X Error', linewidth=2)
+        axes[0, 2].plot(time_history, y_errors, 'g-', label='Y Error', linewidth=2)
+        axes[0, 2].plot(time_history, z_errors, 'b-', label='Z Error', linewidth=2)
+        axes[0, 2].set_title('Position Error on X, Y, Z Axes')
         axes[0, 2].set_xlabel('Time (s)')
         axes[0, 2].set_ylabel('Error (m)')
+        axes[0, 2].legend()
         axes[0, 2].grid(True)
         
         # plot position trajectory on x axis in task space
@@ -81,6 +88,7 @@ def plot_data_from_csv(csv_filename):
         axes[1, 0].set_ylabel('Position (m)')
         axes[1, 0].legend()
         axes[1, 0].grid(True)
+        axes[1, 0].yaxis.set_major_locator(ticker.MultipleLocator(0.02))
         
         # plot position trajectory on y axis in task space
         axes[1, 1].plot(time_history, x_history[:, 1], 'b-', label='Actual Y', linewidth=2)
@@ -90,6 +98,7 @@ def plot_data_from_csv(csv_filename):
         axes[1, 1].set_ylabel('Position (m)')
         axes[1, 1].legend()
         axes[1, 1].grid(True)
+        axes[1, 1].yaxis.set_major_locator(ticker.MultipleLocator(0.02))
         
         # plot position trajectory on z axis in task space
         axes[1, 2].plot(time_history, x_history[:, 2], 'b-', label='Actual Z', linewidth=2)
@@ -99,6 +108,16 @@ def plot_data_from_csv(csv_filename):
         axes[1, 2].set_ylabel('Position (m)')
         axes[1, 2].legend()
         axes[1, 2].grid(True)
+        axes[1, 2].yaxis.set_major_locator(ticker.MultipleLocator(0.02))
+        
+        # adjust Z plot y-axis range to match the scale of X and Y plots
+        z_data = np.concatenate([x_history[:, 2], x_des_history[:, 2]])
+        z_range = np.max(z_data) - np.min(z_data)
+        z_center = (np.max(z_data) + np.min(z_data)) / 2
+        target_range = 0.1  # similar to X and Y plots range (0.1m)
+        z_min = z_center - target_range / 2
+        z_max = z_center + target_range / 2
+        axes[1, 2].set_ylim(z_min, z_max)
         
         # plot measured joint torques (tau_measured)
         if tau_measured_history_array.size > 0:
