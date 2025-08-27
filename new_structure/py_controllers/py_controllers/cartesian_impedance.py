@@ -39,6 +39,9 @@ class CartesianImpedanceController(Node):
         self.declare_parameter('k_gains', [2000, 500, 2000, 200, 200, 200])         # k_gains in impedance control (task space)
         self.k_gains = np.array(self.get_parameter('k_gains').value, dtype=float)
         self.K_gains = np.diag(self.k_gains)
+        self.declare_parameter('d_gains', [100.0, 50.0, 50.0, 5.0, 2.0, 0.5])                # d_gains in impedance control (task space)
+        self.d_gains = 2 * np.array(self.get_parameter('d_gains').value, dtype=float)
+        self.D_gains = np.diag(self.d_gains)
         self.eta = 1.0
         
         # Joint position control parameters
@@ -166,8 +169,8 @@ class CartesianImpedanceController(Node):
 
             self.zero_jacobian_buffer = zero_jacobian.copy()
             zero_jacobian_pinv = np.linalg.pinv(zero_jacobian)              # 7x6, pseudoinverse obtained by SVD
-            # dzero_jacobian = (zero_jacobian - self.zero_jacobian_buffer) / dt
-            # self.zero_jacobian_buffer = zero_jacobian.copy()
+            dzero_jacobian = (zero_jacobian - self.zero_jacobian_buffer) / dt
+            self.zero_jacobian_buffer = zero_jacobian.copy()
 
             # get x and dx
             x = o_t_f[:3, 3]            # 3x1 position, only x-y-z
@@ -177,18 +180,27 @@ class CartesianImpedanceController(Node):
             # get K_gains and D_gains
             lambda_matrix = np.linalg.inv(zero_jacobian @ np.linalg.inv(mass_matrix) @ zero_jacobian.T)
             eigvals, _ = np.linalg.eig(lambda_matrix)
-            d_gains = 2 * self.eta * np.sqrt(eigvals @ self.K_gains)
-            D_gains = np.diag(d_gains)
+            # d_gains = 2 * self.eta * np.sqrt(eigvals @ self.K_gains)
+            # D_gains = np.diag(d_gains)
             
             # calculate tau
+            # tau = (
+            #     mass_matrix @ zero_jacobian_pinv[:, :3] @ self.ddx_des[:3]
+            #     + (coriolis_matrix - mass_matrix @ zero_jacobian_pinv[:, :3] @ dzero_jacobian[:3, :])
+            #         @ zero_jacobian_pinv[:, :3] @ dx[:3]
+            #     - zero_jacobian_t[:, :3]
+            #         @ (self.K_gains[:3, :3] @ (x - self.x_des[:3])
+            #         + D_gains[:3, :3] @ (dx[:3] - self.dx_des[:3]))
+            # )
             tau = (
-                # mass_matrix @ zero_jacobian_pinv[:, :3] @ self.ddx_des[:3]
-                # + (coriolis_matrix - mass_matrix @ zero_jacobian_pinv[:, :3] @ dzero_jacobian[:3, :])
-                #     @ zero_jacobian_pinv[:, :3] @ dx[:3]
+                mass_matrix @ zero_jacobian_pinv[:, :3] @ self.ddx_des[:3]
+                + (coriolis_matrix - mass_matrix @ zero_jacobian_pinv[:, :3] @ dzero_jacobian[:3, :])
+                    @ zero_jacobian_pinv[:, :3] @ dx[:3]
                 - zero_jacobian_t[:, :3]
                     @ (self.K_gains[:3, :3] @ (x - self.x_des[:3])
-                    + D_gains[:3, :3] @ (dx[:3] - self.dx_des[:3]))
+                    + self.D_gains[:3, :3] @ (dx[:3] - self.dx_des[:3]))
             )
+            
 
             tau = self.filter_beta * tau + (1 - self.filter_beta) * self.tau_buffer
             self.tau_buffer = tau.copy()
