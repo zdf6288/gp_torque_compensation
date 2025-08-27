@@ -4,7 +4,7 @@ import rclpy
 from rclpy.node import Node
 from custom_msgs.msg import TaskSpaceCommand, StateParameter, LambdaCommand
 from custom_msgs.srv import JointPositionAdjust
-from std_msgs.msg import Header
+from std_msgs.msg import Header, Bool
 import numpy as np
 import time
 
@@ -18,6 +18,10 @@ class TrajectoryPublisherLambda(Node):
         self.trajectory_publisher = self.create_publisher(
             TaskSpaceCommand, '/task_space_command', 10)
         self.timer = self.create_timer(0.001, self.timer_callback)  # publish at 1000 Hz
+
+        # publish on /data_recording_enabled to inform other nodes when to start recording
+        self.data_recording_publisher = self.create_publisher(
+            Bool, '/data_recording_enabled', 10)
 
         # subscribe to /state_parameter to get robot current state
         self.state_subscription = self.create_subscription(
@@ -58,9 +62,9 @@ class TrajectoryPublisherLambda(Node):
         self.transition_complete = False        # flag indicating the completion of moving to the start point of trajectory
         
         # start point of trajectory
-        self.trajectory_start_x = 0.6
+        self.trajectory_start_x = 0.3
         self.trajectory_start_y = 0.0
-        self.trajectory_start_z = 0.5
+        self.trajectory_start_z = 0.65
 
         # for convertion from lambda command to trajectory
         self.t_buffer = None
@@ -241,6 +245,11 @@ class TrajectoryPublisherLambda(Node):
             
             self.trajectory_publisher.publish(trajectory_msg)
             
+            # publish data recording status
+            data_recording_msg = Bool()
+            data_recording_msg.data = self.transition_complete or not self.use_transition
+            self.data_recording_publisher.publish(data_recording_msg)
+
             if int(elapsed_time * 1000) % 1000 == 0:
                 if self.use_transition and not self.transition_complete:
                     transition_elapsed = (current_time - self.transition_start_time).nanoseconds / 1e9

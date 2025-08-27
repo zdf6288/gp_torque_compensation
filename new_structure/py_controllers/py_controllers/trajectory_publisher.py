@@ -22,7 +22,7 @@ class TrajectoryPublisher(Node):
         self.data_recording_publisher = self.create_publisher(
             Bool, '/data_recording_enabled', 10)
         
-        self.timer = self.create_timer(0.001, self.timer_callback)  # publish at 1000 Hz
+        self.timer = self.create_timer(0.0005, self.timer_callback)  # publish at 1000 Hz
 
         # subscribe to /state_parameter to get robot current state
         self.state_subscription = self.create_subscription(

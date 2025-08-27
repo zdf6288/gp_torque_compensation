@@ -66,10 +66,6 @@ def generate_launch_description():
             executable='cartesian_impedance',
             name='cartesian_impedance',
             output='screen',
-            # parameters=[{
-            #     'k_gains': [20, 20, 20, 10, 10, 10],
-            #     'eta': 0.707,
-            # }]
         ),
         Node(
             package='py_controllers',
