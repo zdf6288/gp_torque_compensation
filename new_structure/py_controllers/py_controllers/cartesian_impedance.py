@@ -39,9 +39,6 @@ class CartesianImpedanceController(Node):
         self.declare_parameter('k_gains', [2000, 500, 2000, 200, 200, 200])         # k_gains in impedance control (task space)
         self.k_gains = np.array(self.get_parameter('k_gains').value, dtype=float)
         self.K_gains = np.diag(self.k_gains)
-        self.declare_parameter('d_gains', [100.0, 50.0, 50.0, 5.0, 2.0, 0.5])                # d_gains in impedance control (task space)
-        self.d_gains = 2 * np.array(self.get_parameter('d_gains').value, dtype=float)
-        self.D_gains = np.diag(self.d_gains)
         self.eta = 1.0
         
         # Joint position control parameters
@@ -56,7 +53,7 @@ class CartesianImpedanceController(Node):
         self.t_initial = None               # initial time
         self.t_last = None                  # last time
         self.dq_buffer = None               # buffer for joint velocity dq
-        self.zero_jacobian_buffer = np.zeros((6, 7))   # buffer for zero jacobian matrix in flange frame
+        self.zero_jacobian_buffer = None    # buffer for zero jacobian matrix in flange frame
 
         self.task_command_received = False  # flag for task space command received
         self.x_des = None                   # desired position from task space command
@@ -163,14 +160,14 @@ class CartesianImpedanceController(Node):
             mass_matrix = mass_matrix_array.reshape(7, 7, order='F')        # 7x7
             coriolis_matrix = np.diag(coriolis_matrix_array)                # 7x7
             zero_jacobian = zero_jacobian_array.reshape(6, 7, order='F')    # 6x7
-
-            zero_jacobian = (1 - self.filter_beta) * zero_jacobian + self.filter_beta * self.zero_jacobian_buffer
             zero_jacobian_t = zero_jacobian.T                               # 7x6, transpose of zero_jacobian
-
-            self.zero_jacobian_buffer = zero_jacobian.copy()
             zero_jacobian_pinv = np.linalg.pinv(zero_jacobian)              # 7x6, pseudoinverse obtained by SVD
-            dzero_jacobian = (zero_jacobian - self.zero_jacobian_buffer) / dt
+            if self.zero_jacobian_buffer is None:  
+                dzero_jacobian = np.zeros_like(zero_jacobian)
+            else:
+                dzero_jacobian = (zero_jacobian - self.zero_jacobian_buffer) / dt
             self.zero_jacobian_buffer = zero_jacobian.copy()
+  
 
             # get x and dx
             x = o_t_f[:3, 3]            # 3x1 position, only x-y-z
@@ -180,25 +177,17 @@ class CartesianImpedanceController(Node):
             # get K_gains and D_gains
             lambda_matrix = np.linalg.inv(zero_jacobian @ np.linalg.inv(mass_matrix) @ zero_jacobian.T)
             eigvals, _ = np.linalg.eig(lambda_matrix)
-            # d_gains = 2 * self.eta * np.sqrt(eigvals @ self.K_gains)
-            # D_gains = np.diag(d_gains)
+            d_gains = 2 * self.eta * np.sqrt(eigvals @ self.K_gains)
+            D_gains = np.diag(d_gains)
             
             # calculate tau
-            # tau = (
-            #     mass_matrix @ zero_jacobian_pinv[:, :3] @ self.ddx_des[:3]
-            #     + (coriolis_matrix - mass_matrix @ zero_jacobian_pinv[:, :3] @ dzero_jacobian[:3, :])
-            #         @ zero_jacobian_pinv[:, :3] @ dx[:3]
-            #     - zero_jacobian_t[:, :3]
-            #         @ (self.K_gains[:3, :3] @ (x - self.x_des[:3])
-            #         + D_gains[:3, :3] @ (dx[:3] - self.dx_des[:3]))
-            # )
             tau = (
                 mass_matrix @ zero_jacobian_pinv[:, :3] @ self.ddx_des[:3]
                 + (coriolis_matrix - mass_matrix @ zero_jacobian_pinv[:, :3] @ dzero_jacobian[:3, :])
                     @ zero_jacobian_pinv[:, :3] @ dx[:3]
                 - zero_jacobian_t[:, :3]
                     @ (self.K_gains[:3, :3] @ (x - self.x_des[:3])
-                    + self.D_gains[:3, :3] @ (dx[:3] - self.dx_des[:3]))
+                    + D_gains[:3, :3] @ (dx[:3] - self.dx_des[:3]))
             )
             
 
