@@ -44,12 +44,12 @@ class CartesianImpedanceController(Node):
         self.i_pid = np.array(self.get_parameter('i_pid').value, dtype=float)
         self.i_error = np.zeros(7)
 
-        self.declare_parameter('k_gains', [2000, 2000, 2000, 200, 200, 200])        # k_gains in impedance control (task space)
+        self.declare_parameter('k_gains', [2000, 2000, 2000, 200, 100, 100])        # k_gains in impedance control (task space)
         self.k_gains = np.array(self.get_parameter('k_gains').value, dtype=float)
         self.K_gains = np.diag(self.k_gains)
         self.eta = 1.0                                                              # for calculating d_gains
 
-        self.declare_parameter('kpn_gains', [20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0])     # kpn_gains for nullspace 
+        self.declare_parameter('kpn_gains', [10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 7.5])      # kpn_gains for nullspace 
         self.kpn_gains = np.array(self.get_parameter('kpn_gains').value, dtype=float)
         self.dpn_gains = 2 * np.sqrt(np.array(self.kpn_gains))                      # dpn_gains for nullspace
         
@@ -208,7 +208,7 @@ class CartesianImpedanceController(Node):
                     + D_gains[:3, :3] @ (dx[:3] - self.dx_des[:3]))
             )
 
-            tau_nullspace = ((np.eye(7) - zero_jacobian_pinv @ zero_jacobian) 
+            tau_nullspace = ((np.eye(7) - zero_jacobian_pinv[:, :3] @ zero_jacobian[:3, :]) 
                 @ (self.kpn_gains * (self.q_des - q) + self.dpn_gains * (self.dq_des - dq)))
             tau = tau + tau_nullspace
 
