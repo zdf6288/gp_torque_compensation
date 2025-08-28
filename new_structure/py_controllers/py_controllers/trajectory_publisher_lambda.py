@@ -212,27 +212,28 @@ class TrajectoryPublisherLambda(Node):
                     else:
                         dt = elapsed_time - self.t_buffer
                     self.t_buffer = elapsed_time
-
-                    # position: (x, y, z) for x_des[:3]
-                    x = self.x_buffer + self.lambda_linear_x * dt
-                    y = self.y_buffer + self.lambda_linear_y * dt
-                    z = self.z_buffer + self.lambda_linear_z * dt
-                    self.x_buffer = x
-                    self.y_buffer = y
-                    self.z_buffer = z
                     
                     # velocity: (dx, dy, dz) for dx_des[:3]
                     dx = self.filter_beta * (self.lambda_linear_x - self.dx_buffer) + (1 - self.filter_beta) * self.dx_buffer
                     dy = self.filter_beta * (self.lambda_linear_y - self.dy_buffer) + (1 - self.filter_beta) * self.dy_buffer
                     dz = self.filter_beta * (self.lambda_linear_z - self.dz_buffer) + (1 - self.filter_beta) * self.dz_buffer
+
+                    # acceleration: (ddx, ddy, ddz) for ddx_des[:3]
+                    ddx = (dx - self.dx_buffer) / dt
+                    ddy = (dy - self.dy_buffer) / dt
+                    ddz = (dz - self.dz_buffer) / dt
+
+                    # position: (x, y, z) for x_des[:3]
+                    x = self.x_buffer + dx * dt
+                    y = self.y_buffer + dy * dt
+                    z = self.z_buffer + dz * dt
+                    self.x_buffer = x
+                    self.y_buffer = y
+                    self.z_buffer = z
+
                     self.dx_buffer = dx
                     self.dy_buffer = dy
                     self.dz_buffer = dz
-
-                    # acceleration: (ddx, ddy, ddz) for ddx_des[:3]
-                    ddx = 0.0
-                    ddy = 0.0
-                    ddz = 0.0
             
             # publish on /task_space_command
             trajectory_msg = TaskSpaceCommand()
