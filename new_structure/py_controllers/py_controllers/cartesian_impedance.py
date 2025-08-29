@@ -78,7 +78,7 @@ class CartesianImpedanceController(Node):
         # joint position control state
         self.joint_position_control_active = True   # start with joint position control
         self.joint_position_adjusted = False        # flag for joint position adjustment
-        self.trajectory_started = False             # flag for trajectory start, indicating the start of trajectory publishment (after joint position adjustment
+        self.trajectory_started = False             # flag for trajectory start, indicating the start of trajectory publishment
 
         # data recording control
         self.data_recording_enabled = False         # flag indicating whether to record data (controlled by trajectory_publisher)
@@ -191,7 +191,7 @@ class CartesianImpedanceController(Node):
             # self.zero_jacobian_buffer = zero_jacobian.copy()
 
             # to control the z axis perpendicular to ground, use 4*7 jacobian matrix
-            jacobian = zero_jacobian[[0, 1, 2, 5], :]                        # 4x7
+            jacobian = zero_jacobian[:, :]                        # 4x7
             jacobian_t = jacobian.T                                          # 7x4
             jacobian_pinv = np.linalg.pinv(jacobian)                         # 4x7, pseudoinverse obtained by SVD
             if self.jacobian_buffer is None:
@@ -207,7 +207,9 @@ class CartesianImpedanceController(Node):
             # ddx = zero_jacobian @ ddq + dzero_jacobian @ dq
 
             rotation_matrix = o_t_f[:3, :3]     # 3x3 rotation matrix
-            r_error = -0.5 * np.cross(rotation_matrix[:, 2], self.rotation_matrix_des[:, 2])
+            r_error = 0.5 * (np.cross(rotation_matrix[:, 0], self.rotation_matrix_des[:, 0])
+                + np.cross(rotation_matrix[:, 1], self.rotation_matrix_des[:, 1])
+                + np.cross(rotation_matrix[:, 2], self.rotation_matrix_des[:, 2]))
             x_error = np.concatenate([x[:3] - self.x_des[:3], r_error])
             dx_error = np.concatenate([dx[:3] - self.dx_des[:3], [0.0, 0.0, 0.0]])
 
@@ -234,7 +236,7 @@ class CartesianImpedanceController(Node):
                 mass_matrix @ jacobian_pinv @ self.ddx_des
                 + (coriolis_matrix - mass_matrix @ jacobian_pinv@ djacobian)
                     @ jacobian_pinv @ dx
-                + jacobian_t @ (self.K_gains@ x_error + D_gains @ dx_error)
+                - jacobian_t @ (self.K_gains@ x_error + D_gains @ dx_error)
             )
             tau_nullspace = ((np.eye(7) - jacobian_pinv @ zero_jacobian) 
                 @ (self.kpn_gains * (self.q_des - q) + self.dpn_gains * (self.dq_des - dq)))
