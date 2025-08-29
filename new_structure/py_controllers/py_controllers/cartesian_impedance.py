@@ -6,10 +6,14 @@ from custom_msgs.msg import StateParameter, EffortCommand, TaskSpaceCommand
 from custom_msgs.srv import JointPositionAdjust
 from std_msgs.msg import Bool
 import numpy as np
+from scipy.spatial.transform import Rotation
 import signal
 import csv
 import traceback
 import sys
+
+def vee(mat):
+    return np.array([mat[2, 1], mat[0, 2], mat[1, 0]])
 
 class CartesianImpedanceController(Node):
     
@@ -44,17 +48,18 @@ class CartesianImpedanceController(Node):
         self.i_pid = np.array(self.get_parameter('i_pid').value, dtype=float)
         self.i_error = np.zeros(7)
 
-        self.declare_parameter('k_gains', [2000, 2000, 2000, 0.1, 0.1, 0.1])        # k_gains in impedance control (task space)
+        self.declare_parameter('k_gains', [300.0, 300.0, 300.0, 100.0, 100.0, 0.0]) # k_gains in impedance control (task space)
+        # self.declare_parameter('k_gains', [0.0, 0.0, 0.0, 0.1, 0.1, 0.1])  # k_gains in impedance control (task space)
         self.k_gains = np.array(self.get_parameter('k_gains').value, dtype=float)
         self.K_gains = np.diag(self.k_gains)
         self.eta = 1.0                                                              # for calculating d_gains
 
-        self.declare_parameter('kpn_gains', [10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 7.5])      # kpn_gains for nullspace 
+        self.declare_parameter('kpn_gains', [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0])    # kpn_gains for nullspace 
         self.kpn_gains = np.array(self.get_parameter('kpn_gains').value, dtype=float)
         self.dpn_gains = 2 * np.sqrt(np.array(self.kpn_gains))                      # dpn_gains for nullspace
         
         # Joint position control parameters
-        self.declare_parameter('q_des', [0.0, -0.7854, 0.0, -2.3562, 0.0, 1.5708, 1.5708])  # desired joint positions
+        self.declare_parameter('q_des', [0.0, -0.7854, 0.0, -2.3562, 0.0, 1.5708, 0.0])     # desired joint positions
         self.declare_parameter('dq_des', [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])               # desired joint velocities
         self.declare_parameter('joint_position_threshold', 0.2)                             # threshold for joint position convergence
         self.q_des = np.array(self.get_parameter('q_des').value, dtype=float)
@@ -65,7 +70,7 @@ class CartesianImpedanceController(Node):
         self.t_initial = None               # initial time
         self.t_last = None                  # last time
         self.dq_buffer = None               # buffer for joint velocity dq
-        # self.zero_jacobian_buffer = None    # buffer for zero jacobian matrix in flange frame
+        self.zero_jacobian_buffer = None    # buffer for zero jacobian matrix in flange frame
         self.jacobian_buffer = None         # buffer for jacobian matrix in flange frame
 
         self.task_command_received = False  # flag for task space command received
@@ -74,7 +79,6 @@ class CartesianImpedanceController(Node):
         self.ddx_des = None                 # desired acceleration from task space command
         self.rotation_matrix_des = np.array(
             [[1, 0, 0], [0, -1, 0], [0, 0, -1]], dtype=float)   # desired rotation matrix, z axis perpendicular to ground
-        
         # joint position control state
         self.joint_position_control_active = True   # start with joint position control
         self.joint_position_adjusted = False        # flag for joint position adjustment
@@ -89,7 +93,7 @@ class CartesianImpedanceController(Node):
         self.get_logger().info(f'Joint position threshold: {self.joint_position_threshold}')
 
         # filter parameters
-        self.filter_freq = 5.0                                      # filter frequency for tau
+        self.filter_freq = 20.0                                      # filter frequency for tau
         self.filter_beta = 2 * np.pi * self.filter_freq / 1000.0
         self.tau_buffer = np.zeros_like(self.effort_msg.efforts)    # buffer for tau
     
@@ -124,26 +128,23 @@ class CartesianImpedanceController(Node):
         """callback function for /state_parameter subscriber"""
         try:
             # initialize t_initial, get t_elapsed, t_last and dt
+            # initialize q_initial, get q, dq and ddq
             t_now = self.get_clock().now()
+            q = np.array(msg.position)
+            dq = np.array(msg.velocity)
             if self.t_initial is None:
                 self.t_initial = t_now
                 self.t_last = t_now
                 t_elapsed = 0.0
                 dt = 1e-3
+                ddq = np.zeros_like(dq)
+                self.dq_buffer = dq.copy()
             else:
                 t_elapsed = (t_now - self.t_initial).nanoseconds / 1e9
                 dt = (t_now - self.t_last).nanoseconds / 1e9
                 self.t_last = t_now
-
-            # initialize q_initial, get q, dq and ddq
-            q = np.array(msg.position)
-            dq = np.array(msg.velocity)
-            if self.dq_buffer is None:
-                ddq = np.zeros_like(dq)
-                self.dq_buffer = dq.copy()
-            else:                
                 ddq = (dq - self.dq_buffer) / dt
-                self.dq_buffer = dq.copy()
+                self.dq_buffer = dq.copy()                         
 
             # joint position control (for joint position adjustment before trajectory_publisher starts to work)
             if self.joint_position_control_active and not self.joint_position_adjusted:
@@ -182,18 +183,13 @@ class CartesianImpedanceController(Node):
             mass_matrix = mass_matrix_array.reshape(7, 7, order='F')        # 7x7
             coriolis_matrix = np.diag(coriolis_matrix_array)                # 7x7
             zero_jacobian = zero_jacobian_array.reshape(6, 7, order='F')    # 6x7
-            # zero_jacobian_t = zero_jacobian.T                               # 7x6, transpose of zero_jacobian
-            # zero_jacobian_pinv = np.linalg.pinv(zero_jacobian)              # 7x6, pseudoinverse obtained by SVD
-            # if self.zero_jacobian_buffer is None:  
-            #     dzero_jacobian = np.zeros_like(zero_jacobian)
-            # else:
-            #     dzero_jacobian = (zero_jacobian - self.zero_jacobian_buffer) / dt
-            # self.zero_jacobian_buffer = zero_jacobian.copy()
+            zero_jacobian_t = zero_jacobian.T                               # 7x6, transpose of zero_jacobian
+            zero_jacobian_pinv = np.linalg.pinv(zero_jacobian)              # 7x6, pseudoinverse obtained by SVD
 
             # to control the z axis perpendicular to ground, use 4*7 jacobian matrix
-            jacobian = zero_jacobian[:, :]                        # 4x7
-            jacobian_t = jacobian.T                                          # 7x4
-            jacobian_pinv = np.linalg.pinv(jacobian)                         # 4x7, pseudoinverse obtained by SVD
+            jacobian = zero_jacobian[:5, :]                                 # 5x7
+            jacobian_t = jacobian.T                                         # 7x5
+            jacobian_pinv = np.linalg.pinv(jacobian)                        # 5x7, pseudoinverse obtained by SVD
             if self.jacobian_buffer is None:
                 djacobian = np.zeros_like(jacobian)
             else:
@@ -202,19 +198,17 @@ class CartesianImpedanceController(Node):
 
   
             # get x and dx
-            x = o_t_f[:3, 3]                    # 3x1 position, only x-y-z
+            x = o_t_f[:3, 3]            # 3x1 position, only x-y-z
             dx = zero_jacobian @ dq     # 6x1 velocity
             # ddx = zero_jacobian @ ddq + dzero_jacobian @ dq
 
             rotation_matrix = o_t_f[:3, :3]     # 3x3 rotation matrix
-            # r_error = 0.5 * (np.cross(rotation_matrix[:, 0], self.rotation_matrix_des[:, 0])
-            #     + np.cross(rotation_matrix[:, 1], self.rotation_matrix_des[:, 1])
-            #     + np.cross(rotation_matrix[:, 2], self.rotation_matrix_des[:, 2]))
-            rotation_error = self.rotation_matrix_des.T @ rotation_matrix
-            rotation_error_skew = 0.5 * (rotation_error - rotation_error.T)
-            r_error = np.array([rotation_error_skew[2, 1], rotation_error_skew[0, 2], rotation_error_skew[1, 0]])
+            r_error = - 0.5 * (np.cross(rotation_matrix[:, 2], self.rotation_matrix_des[:, 2])
+                + np.cross(rotation_matrix[:, 1], self.rotation_matrix_des[:, 1])
+                + np.cross(rotation_matrix[:, 0], self.rotation_matrix_des[:, 0]))
+
             x_error = np.concatenate([x[:3] - self.x_des[:3], r_error])
-            dx_error = np.concatenate([dx[:3] - self.dx_des[:3], [0.0, 0.0, 0.0]])
+            dx_error = np.concatenate([dx[:5] - self.dx_des[:5], [0.0]])
 
             # get K_gains and D_gains
             lambda_matrix = np.linalg.inv(zero_jacobian @ np.linalg.inv(mass_matrix) @ zero_jacobian.T)
@@ -222,28 +216,16 @@ class CartesianImpedanceController(Node):
             d_gains = 2 * self.eta * np.sqrt(eigvals @ self.K_gains)
             D_gains = np.diag(d_gains)
             
-            # calculate tau
-            # tau = (
-            #     mass_matrix @ zero_jacobian_pinv[:, :3] @ self.ddx_des[:3]
-            #     + (coriolis_matrix - mass_matrix @ zero_jacobian_pinv[:, :3] @ dzero_jacobian[:3, :])
-            #         @ zero_jacobian_pinv[:, :3] @ dx[:3]
-            #     - zero_jacobian_t[:, :3]
-            #         @ (self.K_gains[:3, :3] @ (x - self.x_des[:3])
-            #         + D_gains[:3, :3] @ (dx[:3] - self.dx_des[:3]))
-            # )
-
-            # tau_nullspace = ((np.eye(7) - zero_jacobian_pinv[:, :3] @ zero_jacobian[:3, :]) 
-            #     @ (self.kpn_gains * (self.q_des - q) + self.dpn_gains * (self.dq_des - dq)))
-            
+            pd_term = self.K_gains @ x_error + D_gains @ dx_error
             tau = (
-                mass_matrix @ jacobian_pinv @ self.ddx_des
+                mass_matrix @ jacobian_pinv @ self.ddx_des[:5]
                 + (coriolis_matrix - mass_matrix @ jacobian_pinv@ djacobian)
-                    @ jacobian_pinv @ dx
-                - jacobian_t @ (self.K_gains@ x_error + D_gains @ dx_error)
+                    @ jacobian_pinv @ dx[:5]
+                - jacobian_t @ pd_term[:5]
             )
-            tau_nullspace = ((np.eye(7) - jacobian_pinv @ zero_jacobian) 
+
+            tau_nullspace = ((np.eye(7) - zero_jacobian_pinv @ zero_jacobian) 
                 @ (self.kpn_gains * (self.q_des - q) + self.dpn_gains * (self.dq_des - dq)))
-            
             tau = tau + tau_nullspace
 
             tau = self.filter_beta * tau + (1 - self.filter_beta) * self.tau_buffer
