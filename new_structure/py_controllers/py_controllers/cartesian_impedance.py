@@ -44,7 +44,7 @@ class CartesianImpedanceController(Node):
         self.i_pid = np.array(self.get_parameter('i_pid').value, dtype=float)
         self.i_error = np.zeros(7)
 
-        self.declare_parameter('k_gains', [2000, 2000, 2000, 0, 0, 0])              # k_gains in impedance control (task space)
+        self.declare_parameter('k_gains', [2000, 2000, 2000, 0.1, 0.1, 0.1])        # k_gains in impedance control (task space)
         self.k_gains = np.array(self.get_parameter('k_gains').value, dtype=float)
         self.K_gains = np.diag(self.k_gains)
         self.eta = 1.0                                                              # for calculating d_gains
@@ -207,9 +207,12 @@ class CartesianImpedanceController(Node):
             # ddx = zero_jacobian @ ddq + dzero_jacobian @ dq
 
             rotation_matrix = o_t_f[:3, :3]     # 3x3 rotation matrix
-            r_error = 0.5 * (np.cross(rotation_matrix[:, 0], self.rotation_matrix_des[:, 0])
-                + np.cross(rotation_matrix[:, 1], self.rotation_matrix_des[:, 1])
-                + np.cross(rotation_matrix[:, 2], self.rotation_matrix_des[:, 2]))
+            # r_error = 0.5 * (np.cross(rotation_matrix[:, 0], self.rotation_matrix_des[:, 0])
+            #     + np.cross(rotation_matrix[:, 1], self.rotation_matrix_des[:, 1])
+            #     + np.cross(rotation_matrix[:, 2], self.rotation_matrix_des[:, 2]))
+            rotation_error = self.rotation_matrix_des.T @ rotation_matrix
+            rotation_error_skew = 0.5 * (rotation_error - rotation_error.T)
+            r_error = np.array([rotation_error_skew[2, 1], rotation_error_skew[0, 2], rotation_error_skew[1, 0]])
             x_error = np.concatenate([x[:3] - self.x_des[:3], r_error])
             dx_error = np.concatenate([dx[:3] - self.dx_des[:3], [0.0, 0.0, 0.0]])
 
