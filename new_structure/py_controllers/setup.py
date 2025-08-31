@@ -32,7 +32,6 @@ setup(
                 'trajectory_eclipse_publisher = py_controllers.trajectory_eclipse_publisher:main',
                 'trajectory_publisher_lambda = py_controllers.trajectory_publisher_lambda:main',
                 'trajectory_publisher_icra = py_controllers.trajectory_publisher_icra:main',
-                'plot_data = py_controllers.plot_data:main',
             ],
         },
 )
