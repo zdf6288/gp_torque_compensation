@@ -34,7 +34,7 @@ class CartesianImpedanceICRAValidation(Node):
         
         # subscribe to /lambda_command to know when lambda is stopped
         self.lambda_command_subscription = self.create_subscription(
-            LambdaCommand, '/lambda_command', self.lambdaCommandCallback, 10)
+            LambdaCommand, '/TwistLeft', self.lambdaCommandCallback, 10)
         
         # publish on /effort_command
         self.effort_publisher = self.create_publisher(

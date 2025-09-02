@@ -19,9 +19,9 @@ class GPTrajectory(Node):
         self.data_subscription = self.create_subscription(
             DataForGP, '/data_for_gp', self.data_callback, 10)
 
-        # subscribe to /gp_predict_finished topic
-        self.gp_predict_finished_subscription = self.create_subscription(
-            GPPredict, '/gp_predict', self.gp_predict_callback, 10)
+        # create a server for GP prediction
+        self.gp_predict_server = self.create_service(
+            GPPredict, '/gp_predict', self.gp_predict_callback)
         
         # publish on /task_space_command topic
         self.task_space_command_publisher = self.create_publisher(
@@ -91,7 +91,7 @@ class GPTrajectory(Node):
             # TODO: Implement actual GP algorithm here
             # For now, just copy the real data as prediction (placeholder)
             # self.x_pred = x_real_array.tolist()
-            self.x_pred = [[0.3, 0.0, 0.6] for _ in range(1000)]  # Test data: 1000 points of [0.3, 0.0, 0.6]
+            self.x_pred = [[0.3, 0.0, 0.65] for _ in range(1000)]  # Test data: 1000 points of [0.3, 0.0, 0.6]
             self.gp_finished = True
 
             # predicted trajectory publishing control variables
