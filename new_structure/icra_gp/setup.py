@@ -25,6 +25,7 @@ setup(
             'cartesian_impedance_icra_validation = icra_gp.cartesian_impedance_icra_validation:main',
             'trajectory_publisher_icra_data = icra_gp.trajectory_publisher_icra_data:main',
             'trajectory_publisher_icra_validation = icra_gp.trajectory_publisher_icra_validation:main',
+            'gp_trajectory = icra_gp.gp_trajectory:main',
         ],
     },
 )
