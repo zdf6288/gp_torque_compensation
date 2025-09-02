@@ -18,10 +18,12 @@ set(msg_files
   "msg/StateParameter.msg"
   "msg/TaskSpaceCommand.msg"
   "msg/RobotTransformation.msg"
+  "msg/DataForGP.msg"
 )
 
 set(srv_files
   "srv/JointPositionAdjust.srv"
+  "srv/GPPredict.srv"
 )
 
 rosidl_generate_interfaces(${PROJECT_NAME}

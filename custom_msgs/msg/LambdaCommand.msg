@@ -3,3 +3,4 @@ geometry_msgs/Vector3 linear
 geometry_msgs/Vector3 angular
 float64 v_gripper
 bool enable_backlash_compensation
+bool lambda_stopped

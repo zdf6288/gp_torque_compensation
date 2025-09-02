@@ -2,7 +2,7 @@
 
 import rclpy
 from rclpy.node import Node
-from custom_msgs.msg import StateParameter, EffortCommand, TaskSpaceCommand
+from custom_msgs.msg import StateParameter, EffortCommand, TaskSpaceCommand, LambdaCommand
 from custom_msgs.srv import JointPositionAdjust
 from std_msgs.msg import Bool
 import numpy as np
@@ -31,6 +31,10 @@ class CartesianImpedanceController(Node):
         # subscribe to /data_recording_enabled to know when to start recording data
         self.data_recording_subscription = self.create_subscription(
             Bool, '/data_recording_enabled', self.dataRecordingCallback, 10)
+
+        # subscribe to /lambda_command
+        self.lambda_command_subscription = self.create_subscription(
+            LambdaCommand, '/lambda_command', self.lambdaCommandCallback, 10)
         
         # publish on /effort_command
         self.effort_publisher = self.create_publisher(
@@ -77,6 +81,7 @@ class CartesianImpedanceController(Node):
         self.x_des = None                   # desired position from task space command
         self.dx_des = None                  # desired velocity from task space command
         self.ddx_des = None                 # desired acceleration from task space command
+        self.lambda_stopped = False         # flag indication work state of lambda
         self.rotation_matrix_des = np.array(
             [[1, 0, 0], [0, -1, 0], [0, 0, -1]], dtype=float)   # desired rotation matrix, z axis perpendicular to ground
         # joint position control state
@@ -98,6 +103,7 @@ class CartesianImpedanceController(Node):
         self.tau_buffer = np.zeros_like(self.effort_msg.efforts)    # buffer for tau
     
         # list for data recording
+        # lists for recording data when lambda is working
         self.tau_history = []
         self.time_history = []
         self.x_history = []
@@ -111,7 +117,7 @@ class CartesianImpedanceController(Node):
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
         self._signal_handled = False                # flag to avoid repeated data saving
-
+        
     def taskCommandCallback(self, msg):
         """callback function for /task_space_command subscriber"""
         self.task_command_received = True
@@ -305,7 +311,7 @@ class CartesianImpedanceController(Node):
             return
             
         try:
-            filename = 'cartesian_impedance_controller_data.csv'
+            filename = 'training_data.csv'
             
             with open(filename, 'w', newline='') as csvfile:
                 writer = csv.writer(csvfile)

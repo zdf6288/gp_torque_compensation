@@ -75,7 +75,6 @@ class EffortPDController(Node):
             # Publish on topic /effort_command
             self.effort_msg.efforts = tau.tolist()
             self.effort_publisher.publish(self.effort_msg)
-            self.get_logger().debug(f'published on topic /effort_command: {tau}')
             
         except Exception as e:
             self.get_logger().error(f'Parameter error: {str(e)}')

@@ -9,10 +9,10 @@ import numpy as np
 import time
 
 
-class TrajectoryPublisherICRA(Node):
+class TrajectoryPublisherICRAValidation(Node):
     
     def __init__(self):
-        super().__init__('trajectory_publisher_icra')
+        super().__init__('trajectory_publisher_icra_validation')
         
         # publish on /task_space_command
         self.trajectory_publisher = self.create_publisher(
@@ -79,7 +79,8 @@ class TrajectoryPublisherICRA(Node):
         self.dx_buffer = 0.0
         self.dy_buffer = 0.0
         self.dz_buffer = 0.0
-        
+        self.lambda_stopped = False
+
         self.get_logger().info('Trajectory publisher node started')
         self.get_logger().info(f'Publishing trajectory at 1000 Hz')
         self.get_logger().info(f'Arm parameter: {self.arm}')
@@ -121,7 +122,7 @@ class TrajectoryPublisherICRA(Node):
             
         if not self.robot_initial_received:
             try:
-                # get initial position of robot arm (x, y, z) before transition
+                # get initial position ofgp_finished robot arm (x, y, z) before transition
                 o_t_f_array = np.array(msg.o_t_f, dtype=float)
                 o_t_f = o_t_f_array.reshape(4, 4, order='F')       
                 self.robot_initial_x = o_t_f[0, 3]
@@ -145,6 +146,7 @@ class TrajectoryPublisherICRA(Node):
             self.lambda_linear_x = msg.linear.x
             self.lambda_linear_y = msg.linear.y
             self.lambda_linear_z = msg.linear.z
+            self.lambda_stopped = msg.lambda_stopped
         except Exception as e:
             self.get_logger().error(f'Error in lambda callback: {str(e)}')
     
@@ -206,34 +208,37 @@ class TrajectoryPublisherICRA(Node):
             
             # trajectory determined by lambda command
             if self.transition_complete or not self.use_transition:
-                if elapsed_time > 0.0:
-                    if self.t_buffer is None:
-                        dt = 1e-3
-                    else:
-                        dt = elapsed_time - self.t_buffer
-                    self.t_buffer = elapsed_time
-                    
-                    # velocity: (dx, dy, dz) for dx_des[:3]
-                    dx = self.filter_beta * (self.lambda_linear_x - self.dx_buffer) + (1 - self.filter_beta) * self.dx_buffer
-                    dy = self.filter_beta * (self.lambda_linear_y - self.dy_buffer) + (1 - self.filter_beta) * self.dy_buffer
-                    dz = 0
-
-                    # acceleration: (ddx, ddy, ddz) for ddx_des[:3]
-                    ddx = (dx - self.dx_buffer) / dt
-                    ddy = (dy - self.dy_buffer) / dt
-                    ddz = 0
-
-                    # position: (x, y, z) for x_des[:3]
-                    x = self.x_buffer + dx * dt
-                    y = self.y_buffer + dy * dt
-                    z = self.z_buffer
-                    self.x_buffer = x
-                    self.y_buffer = y
-                    self.z_buffer = z
-
-                    self.dx_buffer = dx
-                    self.dy_buffer = dy
-                    self.dz_buffer = 0
+                if self.lambda_stopped:
+                    return
+                else:
+                    if elapsed_time > 0.0:
+                        if self.t_buffer is None:
+                            dt = 1e-3
+                        else:
+                            dt = elapsed_time - self.t_buffer
+                        self.t_buffer = elapsed_time
+                        
+                        # velocity: (dx, dy, dz) for dx_des[:3]
+                        dx = self.filter_beta * (self.lambda_linear_x - self.dx_buffer) + (1 - self.filter_beta) * self.dx_buffer
+                        dy = self.filter_beta * (self.lambda_linear_y - self.dy_buffer) + (1 - self.filter_beta) * self.dy_buffer
+                        dz = 0
+    
+                        # acceleration: (ddx, ddy, ddz) for ddx_des[:3]
+                        ddx = (dx - self.dx_buffer) / dt
+                        ddy = (dy - self.dy_buffer) / dt
+                        ddz = 0
+    
+                        # position: (x, y, z) for x_des[:3]
+                        x = self.x_buffer + dx * dt
+                        y = self.y_buffer + dy * dt
+                        z = self.z_buffer
+                        self.x_buffer = x
+                        self.y_buffer = y
+                        self.z_buffer = z
+    
+                        self.dx_buffer = dx
+                        self.dy_buffer = dy
+                        self.dz_buffer = 0
             
             # publish on /task_space_command
             trajectory_msg = TaskSpaceCommand()
@@ -241,7 +246,7 @@ class TrajectoryPublisherICRA(Node):
             trajectory_msg.header.stamp = current_time.to_msg()
             trajectory_msg.header.frame_id = "base_link"
             trajectory_msg.x_des = [x, y, z, 0.0, 0.0, 0.0]         # position (x, y, z, roll, pitch, yaw)
-            trajectory_msg.dx_des = [dx, dy, 0.0, 0.0, 0.0, 0.0]     # velocity
+            trajectory_msg.dx_des = [dx, dy, 0.0, 0.0, 0.0, 0.0]    # velocity
             trajectory_msg.ddx_des = [ddx, ddy, 0.0, 0.0, 0.0, 0.0] # acceleration
             
             self.trajectory_publisher.publish(trajectory_msg)
@@ -265,13 +270,13 @@ class TrajectoryPublisherICRA(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    trajectory_publisher_icra_node = TrajectoryPublisherICRA()
+    trajectory_publisher_icra_validation_node = TrajectoryPublisherICRAValidation()
     
     try:
-        rclpy.spin(trajectory_publisher_icra_node)
+        rclpy.spin(trajectory_publisher_icra_validation_node)
         pass
     finally:
-        trajectory_publisher_icra_node.destroy_node()
+        trajectory_publisher_icra_validation_node.destroy_node()
         rclpy.shutdown()
 
 

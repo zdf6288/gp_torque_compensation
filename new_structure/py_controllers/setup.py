@@ -14,7 +14,6 @@ setup(
         ('share/' + package_name + '/launch', ['launch/cartesian_impedance_launch.py']),
         ('share/' + package_name + '/launch', ['launch/cartesian_model_free_launch.py']),
         ('share/' + package_name + '/launch', ['launch/cartesian_impedance_lambda_launch.py']),
-        ('share/' + package_name + '/launch', ['launch/cartesian_impedance_icra_launch.py']),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -30,8 +29,7 @@ setup(
                 'cartesian_model_free = py_controllers.cartesian_model_free:main',
                 'trajectory_publisher = py_controllers.trajectory_publisher:main',
                 'trajectory_eclipse_publisher = py_controllers.trajectory_eclipse_publisher:main',
-                'trajectory_publisher_lambda = py_controllers.trajectory_publisher_lambda:main',
-                'trajectory_publisher_icra = py_controllers.trajectory_publisher_icra:main',
+                'trajectory_publisher_lambda = py_controllers.trajectory_publisher_lambda:main', 
             ],
         },
 )

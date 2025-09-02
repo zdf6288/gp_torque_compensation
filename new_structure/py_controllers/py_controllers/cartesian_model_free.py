@@ -63,7 +63,6 @@ class CartesianModelFreeController(Node):
         self.x_des = np.array(msg.x_des)
         self.dx_des = np.array(msg.dx_des)
         self.ddx_des = np.array(msg.ddx_des)
-        self.get_logger().debug('Received task space command, enabling control execution')
         
     def stateParameterCallback(self, msg):
         """callback function for /state_parameter subscriber"""

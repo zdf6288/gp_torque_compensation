@@ -2,8 +2,8 @@
 
 import rclpy
 from rclpy.node import Node
-from custom_msgs.msg import StateParameter, EffortCommand, TaskSpaceCommand
-from custom_msgs.srv import JointPositionAdjust
+from custom_msgs.msg import StateParameter, EffortCommand, TaskSpaceCommand, LambdaCommand, DataForGP
+from custom_msgs.srv import JointPositionAdjust, GPPredict
 from std_msgs.msg import Bool
 import numpy as np
 from scipy.spatial.transform import Rotation
@@ -15,10 +15,10 @@ import sys
 def vee(mat):
     return np.array([mat[2, 1], mat[0, 2], mat[1, 0]])
 
-class CartesianImpedanceController(Node):
+class CartesianImpedanceICRAValidation(Node):
     
     def __init__(self):
-        super().__init__('cartesian_impedance')
+        super().__init__('cartesian_impedance_icra_validation')
         
         # subscribe to /state_parameter
         self.param_subscription = self.create_subscription(
@@ -32,13 +32,25 @@ class CartesianImpedanceController(Node):
         self.data_recording_subscription = self.create_subscription(
             Bool, '/data_recording_enabled', self.dataRecordingCallback, 10)
         
+        # subscribe to /lambda_command to know when lambda is stopped
+        self.lambda_command_subscription = self.create_subscription(
+            LambdaCommand, '/lambda_command', self.lambdaCommandCallback, 10)
+        
         # publish on /effort_command
         self.effort_publisher = self.create_publisher(
             EffortCommand, '/effort_command', 10)
+
+        # publish on /data_for_gp
+        self.data_for_gp_publisher = self.create_publisher(
+            DataForGP, '/data_for_gp', 10)
         
         # create service client for joint position adjustment
         self.joint_position_client = self.create_client(
             JointPositionAdjust, '/joint_position_adjust')
+
+        # create service client for GP prediction
+        self.gp_predict_client = self.create_client(
+            GPPredict, '/gp_predict')
         
         self.declare_parameter('k_pd', [24.0, 24.0, 24.0, 24.0, 10.0, 6.0, 2.0])    # k_gains in PD control (joint space)
         self.declare_parameter('d_pd', [16.0, 16.0, 16.0, 16.0, 10.0, 6.0, 2.0])    # d_gains in PD control (joint space)
@@ -95,8 +107,12 @@ class CartesianImpedanceController(Node):
         # filter parameters
         self.filter_freq = 20.0                                      # filter frequency for tau
         self.filter_beta = 2 * np.pi * self.filter_freq / 1000.0
-        self.tau_buffer = np.zeros_like(self.effort_msg.efforts)    # buffer for tau
+        self.tau_buffer = np.zeros_like(self.effort_msg.efforts)     # buffer for tau
     
+        self.lambda_stopped = False                 # flag indicating lambda is stopped
+        self.data_for_gp_msg = DataForGP()
+        self.gp_predict_finished = False            # flag indicating the end of GP prediction
+
         # list for data recording
         self.tau_history = []
         self.time_history = []
@@ -106,6 +122,15 @@ class CartesianImpedanceController(Node):
         self.dx_des_history = []
         self.tau_measured_history = []
         self.gravity_history = []
+        # lists for recording data when lambda is not working
+        self.tau_history_new = []
+        self.time_history_new = []
+        self.x_history_new = []
+        self.x_des_history_new = []
+        self.dx_history_new = []
+        self.dx_des_history_new = []
+        self.tau_measured_history_new = []
+        self.gravity_history_new = []
 
         # set signal handler
         signal.signal(signal.SIGINT, self.signal_handler)
@@ -118,11 +143,25 @@ class CartesianImpedanceController(Node):
         self.x_des = np.array(msg.x_des)
         self.dx_des = np.array(msg.dx_des)
         self.ddx_des = np.array(msg.ddx_des)
+        self.get_logger().debug('Received task space command, enabling control execution')
         
     def dataRecordingCallback(self, msg):
         """callback function for /data_recording_enabled subscriber"""
         self.data_recording_enabled = msg.data
-        
+
+    def lambdaCommandCallback(self, msg):
+        """callback function for /lambda_command subscriber"""
+        self.lambda_stopped = msg.lambda_stopped
+        if self.lambda_stopped:
+            if not self.tau_history:
+                pass     # not in process of validation, lambda at initial state
+            elif not self.gp_predict_finished:
+                self.task_command_received = False
+                self.call_gp_service()
+                pass
+            else:
+                pass
+
     def stateParameterCallback(self, msg):
         """callback function for /state_parameter subscriber"""
         try:
@@ -236,7 +275,7 @@ class CartesianImpedanceController(Node):
             self.effort_publisher.publish(self.effort_msg)
             
             # record data only when data recording is enabled
-            if self.data_recording_enabled:
+            if self.data_recording_enabled and not self.lambda_stopped:
                 self.tau_history.append(tau.tolist())
                 self.time_history.append(t_elapsed)
                 self.x_history.append(x.tolist())
@@ -245,6 +284,20 @@ class CartesianImpedanceController(Node):
                 self.dx_des_history.append(self.dx_des[:3].tolist()) 
                 self.tau_measured_history.append(np.array(msg.effort_measured).tolist())
                 self.gravity_history.append(np.array(msg.gravity).tolist())
+
+                # publish on topic /data_for_gp
+                self.data_for_gp_msg.x_real = x[:3].tolist()
+                self.data_for_gp_publisher.publish(self.data_for_gp_msg)
+                
+            elif self.data_recording_enabled and self.lambda_stopped:   
+                self.tau_history_new.append(tau.tolist())
+                self.time_history_new.append(t_elapsed)
+                self.x_history_new.append(x.tolist())
+                self.x_des_history_new.append(self.x_des.tolist())
+                self.dx_history_new.append(dx[:3].tolist())      
+                self.dx_des_history_new.append(self.dx_des[:3].tolist()) 
+                self.tau_measured_history_new.append(np.array(msg.effort_measured).tolist())
+                self.gravity_history_new.append(np.array(msg.gravity).tolist())
 
         except Exception as e:
             self.get_logger().error(f'Parameter error: {str(e)}')
@@ -284,6 +337,33 @@ class CartesianImpedanceController(Node):
             self.get_logger().error(f'Error in trajectory start callback: {str(e)}')
             self.trajectory_started = False             # reset flag to retry
 
+    def call_gp_service(self):
+        try:
+            if not self.gp_predict_client.service_is_ready():
+                self.get_logger().warn('GP prediction service not ready, retrying...')
+                return
+
+            future = self.gp_predict_client.call_async(GPPredict.Request())
+            future.add_done_callback(self.gp_predict_callback)
+            self.gp_predict_finished = False
+            self.get_logger().info('Requested GP prediction via service call')
+        except Exception as e:
+            self.get_logger().error(f'Error calling GP prediction service: {str(e)}')
+    
+    def gp_predict_callback(self, future):
+        """Callback for GP prediction service call"""
+        try:
+            response = future.result()
+            if response.success:
+                self.get_logger().info(f'GP prediction finished successfully: {response.message}')
+                self.gp_predict_finished = True
+            else:
+                self.get_logger().warn(f'GP prediction failed: {response.message}')
+                self.gp_predict_finished = False
+        except Exception as e:
+            self.get_logger().error(f'Error in GP prediction callback: {str(e)}')
+            self.gp_predict_finished = False
+
     def signal_handler(self, signum, frame):
         """signal handler, call save data function when program is interrupted"""
         try:
@@ -305,7 +385,7 @@ class CartesianImpedanceController(Node):
             return
             
         try:
-            filename = 'cartesian_impedance_controller_data.csv'
+            filename = 'validation_data_before_gp.csv'
             
             with open(filename, 'w', newline='') as csvfile:
                 writer = csv.writer(csvfile)
@@ -333,33 +413,61 @@ class CartesianImpedanceController(Node):
                     
             self.get_logger().info(f'Successfully saved {len(self.tau_history)} data points to {filename}')
             
+            filename = 'validation_data_after_gp.csv'
+            
+            with open(filename, 'w', newline='') as csvfile:
+                writer = csv.writer(csvfile)
+                
+                header = ['Time(s)']
+                header.extend([f'tau_{i+1}' for i in range(len(self.tau_history[0]))])
+                header.extend(['x_actual', 'y_actual', 'z_actual'])
+                header.extend(['x_desired', 'y_desired', 'z_desired'])
+                header.extend(['dx_actual', 'dy_actual', 'dz_actual'])
+                header.extend(['dx_desired', 'dy_desired', 'dz_desired'])
+                header.extend([f'tau_measured_{i+1}' for i in range(len(self.tau_history[0]))])
+                header.extend([f'gravity_{i+1}' for i in range(len(self.tau_history[0]))])
+                writer.writerow(header)
+                
+                for i, t in enumerate(self.time_history_new):
+                    row = [t]
+                    row.extend(self.tau_history_new[i])
+                    row.extend(self.x_history[i][:3])
+                    row.extend(self.x_des_history_new[i][:3])
+                    row.extend(self.dx_history_new[i])
+                    row.extend(self.dx_des_history_new[i])
+                    row.extend(self.tau_measured_history_new[i])
+                    row.extend(self.gravity_history_new[i])
+                    writer.writerow(row)
+                    
+            self.get_logger().info(f'Successfully saved {len(self.tau_history_new)} data points to {filename}')
+
         except Exception as e:
             self.get_logger().error(f'Error when saving data: {str(e)}')
             self.get_logger().error(f'Traceback: {traceback.format_exc()}')
 
 def main(args=None):
     rclpy.init(args=args)
-    cartesian_impedance_node = CartesianImpedanceController()
+    cartesian_impedance_icra_validation_node = CartesianImpedanceICRAValidation()
     
     try:
-        rclpy.spin(cartesian_impedance_node)
+        rclpy.spin(cartesian_impedance_icra_validation_node)
     except KeyboardInterrupt:
-        cartesian_impedance_node.get_logger().info('Received keyboard interrupt, saving data...')
+        cartesian_impedance_icra_validation_node.get_logger().info('Received keyboard interrupt, saving data...')
     except Exception as e:
-        cartesian_impedance_node.get_logger().error(f'Error when running program: {str(e)}')
+        cartesian_impedance_icra_validation_node.get_logger().error(f'Error when running program: {str(e)}')
     finally:
         try:
             # save data to file only if signal handler has not been executed
-            if not cartesian_impedance_node._signal_handled:
-                cartesian_impedance_node.get_logger().info('Signal handler not executed, saving data to file...')
-                cartesian_impedance_node.save_data_to_file()
+            if not cartesian_impedance_icra_validation_node._signal_handled:
+                cartesian_impedance_icra_validation_node.get_logger().info('Signal handler not executed, saving data to file...')
+                cartesian_impedance_icra_validation_node.save_data_to_file()
             else:
-                cartesian_impedance_node.get_logger().info('Signal handler executed, data already saved, skipping...')
+                cartesian_impedance_icra_validation_node.get_logger().info('Signal handler executed, data already saved, skipping...')
                 
         except Exception as e:
-            cartesian_impedance_node.get_logger().error(f'Error when saving data: {str(e)}')
+            cartesian_impedance_icra_validation_node.get_logger().error(f'Error when saving data: {str(e)}')
         
-        cartesian_impedance_node.destroy_node()
+        cartesian_impedance_icra_validation_node.destroy_node()
         rclpy.shutdown()
 
 
