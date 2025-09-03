@@ -15,14 +15,14 @@ def generate_launch_description():
     use_fake_hardware_parameter_name = 'use_fake_hardware'
     fake_sensor_commands_parameter_name = 'fake_sensor_commands'
     use_rviz_parameter_name = 'use_rviz'
-    # mode_parameter_name = 'mode'
+    mode_parameter_name = 'mode'
 
     robot_ip = LaunchConfiguration(robot_ip_parameter_name)
     load_gripper = LaunchConfiguration(load_gripper_parameter_name)
     use_fake_hardware = LaunchConfiguration(use_fake_hardware_parameter_name)
     fake_sensor_commands = LaunchConfiguration(fake_sensor_commands_parameter_name)
     use_rviz = LaunchConfiguration(use_rviz_parameter_name)
-    # mode = LaunchConfiguration(mode_parameter_name)
+    mode = LaunchConfiguration(mode_parameter_name)
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -46,10 +46,10 @@ def generate_launch_description():
             default_value='true',
             description='Use Franka Gripper as an end-effector, otherwise, the robot is loaded '
                         'without an end-effector.'),
-        # DeclareLaunchArgument(
-        #     mode_parameter_name,
-        #     default_value='data',
-        #     description='Mode selection: data or validation'),
+        DeclareLaunchArgument(
+            mode_parameter_name,
+            default_value='data',
+            description='Mode selection: data or validation'),
 
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource([PathJoinSubstitution(
@@ -68,41 +68,41 @@ def generate_launch_description():
             arguments=['cpp_relayer'],
             output='screen',
         ),
-        # Node(
-        #     package='icra_gp',
-        #     executable='cartesian_impedance_icra_data',
-        #     name='cartesian_impedance_icra_data',
-        #     output='screen',
-        #     # condition=IfCondition(
-        #     #     PythonExpression([mode, '==', 'data']),
-        #     # ),
-        # ),
+        Node(
+            package='icra_gp',
+            executable='cartesian_impedance_icra_data',
+            name='cartesian_impedance_icra_data',
+            output='screen',
+                condition=IfCondition(
+                    PythonExpression(["'", mode, "' == 'data'"]),
+                ),
+        ),
         Node(
             package='icra_gp',
             executable='cartesian_impedance_icra_validation',
             name='cartesian_impedance_icra_validation',
             output='screen',
-            # condition=IfCondition(
-            #     PythonExpression([mode, '==', 'validation']),
-            # ),
+            condition=IfCondition(
+                PythonExpression(["'", mode, "' == 'validation'"]),
+            ),
         ),
-        # Node(
-        #     package='icra_gp',
-        #     executable='trajectory_publisher_icra_data',
-        #     name='trajectory_publisher_icra_data',
-        #     output='screen',
-        #     # condition=IfCondition(
-        #     #     PythonExpression([mode, '==', 'data']),
-        #     # ),
-        # ),
+        Node(
+            package='icra_gp',
+            executable='trajectory_publisher_icra_data',
+            name='trajectory_publisher_icra_data',
+            output='screen',
+            condition=IfCondition(
+                PythonExpression(["'", mode, "' == 'data'"]),
+            ),
+        ),
         Node(
             package='icra_gp',
             executable='trajectory_publisher_icra_validation',
             name='trajectory_publisher_icra_validation',
             output='screen',
-            # condition=IfCondition(
-            #     PythonExpression([mode, '==', 'validation']),
-            # ),
+            condition=IfCondition(
+                PythonExpression(["'", mode, "' == 'validation'"]),
+            ),
         ),
         Node(
             package='icra_gp',

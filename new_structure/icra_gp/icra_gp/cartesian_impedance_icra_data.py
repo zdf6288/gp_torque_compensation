@@ -2,7 +2,7 @@
 
 import rclpy
 from rclpy.node import Node
-from custom_msgs.msg import StateParameter, EffortCommand, TaskSpaceCommand, LambdaCommand
+from custom_msgs.msg import StateParameter, EffortCommand, TaskSpaceCommand
 from custom_msgs.srv import JointPositionAdjust
 from std_msgs.msg import Bool
 import numpy as np
@@ -15,7 +15,7 @@ import sys
 def vee(mat):
     return np.array([mat[2, 1], mat[0, 2], mat[1, 0]])
 
-class CartesianImpedanceController(Node):
+class CartesianImpedanceICRAData(Node):
     
     def __init__(self):
         super().__init__('cartesian_impedance')
@@ -31,10 +31,6 @@ class CartesianImpedanceController(Node):
         # subscribe to /data_recording_enabled to know when to start recording data
         self.data_recording_subscription = self.create_subscription(
             Bool, '/data_recording_enabled', self.dataRecordingCallback, 10)
-
-        # subscribe to /lambda_command
-        self.lambda_command_subscription = self.create_subscription(
-            LambdaCommand, '/lambda_command', self.lambdaCommandCallback, 10)
         
         # publish on /effort_command
         self.effort_publisher = self.create_publisher(
@@ -81,7 +77,6 @@ class CartesianImpedanceController(Node):
         self.x_des = None                   # desired position from task space command
         self.dx_des = None                  # desired velocity from task space command
         self.ddx_des = None                 # desired acceleration from task space command
-        self.lambda_stopped = False         # flag indication work state of lambda
         self.rotation_matrix_des = np.array(
             [[1, 0, 0], [0, -1, 0], [0, 0, -1]], dtype=float)   # desired rotation matrix, z axis perpendicular to ground
         # joint position control state
@@ -103,7 +98,6 @@ class CartesianImpedanceController(Node):
         self.tau_buffer = np.zeros_like(self.effort_msg.efforts)    # buffer for tau
     
         # list for data recording
-        # lists for recording data when lambda is working
         self.tau_history = []
         self.time_history = []
         self.x_history = []
@@ -117,7 +111,7 @@ class CartesianImpedanceController(Node):
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
         self._signal_handled = False                # flag to avoid repeated data saving
-        
+
     def taskCommandCallback(self, msg):
         """callback function for /task_space_command subscriber"""
         self.task_command_received = True
@@ -345,27 +339,27 @@ class CartesianImpedanceController(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    cartesian_impedance_node = CartesianImpedanceController()
-    
+    cartesian_impedance_icra_data_node = CartesianImpedanceICRAData()
+
     try:
-        rclpy.spin(cartesian_impedance_node)
+        rclpy.spin(cartesian_impedance_icra_data_node)
     except KeyboardInterrupt:
-        cartesian_impedance_node.get_logger().info('Received keyboard interrupt, saving data...')
+        cartesian_impedance_icra_data_node.get_logger().info('Received keyboard interrupt, saving data...')
     except Exception as e:
-        cartesian_impedance_node.get_logger().error(f'Error when running program: {str(e)}')
+        cartesian_impedance_icra_data_node.get_logger().error(f'Error when running program: {str(e)}')
     finally:
         try:
             # save data to file only if signal handler has not been executed
-            if not cartesian_impedance_node._signal_handled:
-                cartesian_impedance_node.get_logger().info('Signal handler not executed, saving data to file...')
-                cartesian_impedance_node.save_data_to_file()
+            if not cartesian_impedance_icra_data_node._signal_handled:
+                cartesian_impedance_icra_data_node.get_logger().info('Signal handler not executed, saving data to file...')
+                cartesian_impedance_icra_data_node.save_data_to_file()
             else:
-                cartesian_impedance_node.get_logger().info('Signal handler executed, data already saved, skipping...')
+                cartesian_impedance_icra_data_node.get_logger().info('Signal handler executed, data already saved, skipping...')
                 
         except Exception as e:
-            cartesian_impedance_node.get_logger().error(f'Error when saving data: {str(e)}')
+            cartesian_impedance_icra_data_node.get_logger().error(f'Error when saving data: {str(e)}')
         
-        cartesian_impedance_node.destroy_node()
+        cartesian_impedance_icra_data_node.destroy_node()
         rclpy.shutdown()
 
 
