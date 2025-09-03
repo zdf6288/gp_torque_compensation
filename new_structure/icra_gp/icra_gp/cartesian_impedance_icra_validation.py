@@ -419,19 +419,19 @@ class CartesianImpedanceICRAValidation(Node):
                 writer = csv.writer(csvfile)
                 
                 header = ['Time(s)']
-                header.extend([f'tau_{i+1}' for i in range(len(self.tau_history[0]))])
+                header.extend([f'tau_{i+1}' for i in range(len(self.tau_history_new[0]))])
                 header.extend(['x_actual', 'y_actual', 'z_actual'])
                 header.extend(['x_desired', 'y_desired', 'z_desired'])
                 header.extend(['dx_actual', 'dy_actual', 'dz_actual'])
                 header.extend(['dx_desired', 'dy_desired', 'dz_desired'])
-                header.extend([f'tau_measured_{i+1}' for i in range(len(self.tau_history[0]))])
-                header.extend([f'gravity_{i+1}' for i in range(len(self.tau_history[0]))])
+                header.extend([f'tau_measured_{i+1}' for i in range(len(self.tau_history_new[0]))])
+                header.extend([f'gravity_{i+1}' for i in range(len(self.tau_history_new[0]))])
                 writer.writerow(header)
                 
                 for i, t in enumerate(self.time_history_new):
                     row = [t]
                     row.extend(self.tau_history_new[i])
-                    row.extend(self.x_history[i][:3])
+                    row.extend(self.x_history_new[i][:3])
                     row.extend(self.x_des_history_new[i][:3])
                     row.extend(self.dx_history_new[i])
                     row.extend(self.dx_des_history_new[i])

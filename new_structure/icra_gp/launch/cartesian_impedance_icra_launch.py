@@ -109,5 +109,8 @@ def generate_launch_description():
             executable='gp_trajectory',
             name='gp_trajectory',
             output='screen',
+            condition=IfCondition(
+                PythonExpression(["'", mode, "' == 'validation'"]),
+            ),
         ),
     ])

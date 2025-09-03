@@ -68,9 +68,9 @@ class TrajectoryPublisherLambda(Node):
 
         # for convertion from lambda command to trajectory
         self.t_buffer = None
-        self.x_buffer = self.trajectory_start_x
-        self.y_buffer = self.trajectory_start_y
-        self.z_buffer = self.trajectory_start_z
+        self.x_buffer = None
+        self.y_buffer = None
+        self.z_buffer = None
         self.lambda_linear_x = 0.0
         self.lambda_linear_y = 0.0
         self.lambda_linear_z = 0.0
@@ -138,6 +138,12 @@ class TrajectoryPublisherLambda(Node):
                 
             except Exception as e:
                 self.get_logger().error(f'Error extracting robot initial position: {str(e)}')
+        elif not self.transition_complete:
+            o_t_f_array = np.array(msg.o_t_f, dtype=float)
+            o_t_f = o_t_f_array.reshape(4, 4, order='F')       
+            self.robot_position_x = o_t_f[0, 3]
+            self.robot_position_y = o_t_f[1, 3]
+            self.robot_position_z = o_t_f[2, 3]
     
     def lambdaCallback(self, msg):
         """callback function of /TwistLeft or /TwistRight subscriber"""
@@ -173,15 +179,16 @@ class TrajectoryPublisherLambda(Node):
                 if transition_elapsed >= self.transition_duration:
                     # transition complete, start lambda trajectory
                     self.transition_complete = True
+                    # set initial position to current robot position
+                    self.x_buffer = self.robot_position_x
+                    self.y_buffer = self.robot_position_y
+                    self.z_buffer = self.robot_position_z
                     self.get_logger().info('Transition complete, starting lambda trajectory')
                     # reset start time for lambda trajectory
                     self.start_time = current_time
                     elapsed_time = 0.0
+                    return
                     
-                    # set initial position to trajectory start point
-                    x = self.trajectory_start_x
-                    y = self.trajectory_start_y
-                    z = self.trajectory_start_z
                 else:
                     # generate smooth transition trajectory from adjusted robot position to start point
                     # use 5th order polynomial for interpolation
@@ -224,12 +231,12 @@ class TrajectoryPublisherLambda(Node):
                     ddz = (dz - self.dz_buffer) / dt
 
                     # position: (x, y, z) for x_des[:3]
-                    x = self.x_buffer + dx * dt
-                    y = self.y_buffer + dy * dt
-                    z = self.z_buffer + dz * dt
-                    self.x_buffer = x
-                    self.y_buffer = y
-                    self.z_buffer = z
+                    x = self.x_buffer
+                    y = self.y_buffer
+                    z = self.z_buffer
+                    self.x_buffer = x + dx * dt
+                    self.y_buffer = y + dy * dt
+                    self.z_buffer = z + dz * dt
 
                     self.dx_buffer = dx
                     self.dy_buffer = dy
@@ -250,13 +257,6 @@ class TrajectoryPublisherLambda(Node):
             data_recording_msg = Bool()
             data_recording_msg.data = self.transition_complete or not self.use_transition
             self.data_recording_publisher.publish(data_recording_msg)
-
-            if int(elapsed_time * 1000) % 1000 == 0:
-                if self.use_transition and not self.transition_complete:
-                    transition_elapsed = (current_time - self.transition_start_time).nanoseconds / 1e9
-                    self.get_logger().debug(f'Transition phase: t={transition_elapsed:.3f}s, pos=({x:.3f}, {y:.3f}, {z:.3f})')
-                else:
-                    self.get_logger().debug(f'Lambda trajectory: t={elapsed_time:.3f}s, pos=({x:.3f}, {y:.3f}, {z:.3f})')
                 
         except Exception as e:
             self.get_logger().error(f'Error in trajectory publisher: {str(e)}')
