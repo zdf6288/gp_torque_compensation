@@ -6,7 +6,10 @@ from custom_msgs.msg import DataForGP, TaskSpaceCommand
 from custom_msgs.srv import GPPredict
 from std_msgs.msg import Header
 import numpy as np
+import pandas as pd
 import time
+from icra_gp.gp_predictor import train_reference_from_array
+from icra_gp.gp_predictor import predict_trajectory_from_probe
 
 
 
@@ -88,10 +91,21 @@ class GPTrajectory(Node):
             # Convert the input data to numpy array for processing
             # x_real_array = np.array(x).reshape(-1, 3)  # reshape to [N, 3] for [x, y, z]
             
-            # TODO: Implement actual GP algorithm here
-            # For now, just copy the real data as prediction (placeholder)
-            # self.x_pred = x_real_array.tolist()
-            self.x_pred = [[0.3, 0.0, 0.65] for _ in range(1000)]  # Test data: 1000 points of [0.3, 0.0, 0.6]
+            df = pd.read_csv('training_data.csv')
+            x_real = df['x_actual'].values
+            y_real = df['y_actual'].values
+            x_real = x_real[::10]
+            y_real = y_real[::10]
+            ref = list(zip(x_real.tolist(), y_real.tolist()))
+            model_bundle = train_reference_from_array(ref)
+            x_array = np.array(x)
+            probe2d = x_array[:, :2] 
+            probe = probe2d[::10]
+            predicted = predict_trajectory_from_probe(model_bundle, probe)
+            self.x_pred = []
+            for point in predicted:
+                self.x_pred.append([point[0], point[1], 0.65])     
+
             self.gp_finished = True
 
             # predicted trajectory publishing control variables

@@ -9,6 +9,8 @@
 
   <depend>rclpy</depend>
   <depend>numpy</depend>
+  <depend>pandas</depend>
+  <depend>matplotlib</depend>
 
   <exec_depend>franka_description</exec_depend>
   <exec_depend>franka_hardware</exec_depend>

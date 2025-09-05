@@ -26,6 +26,7 @@ setup(
             'trajectory_publisher_icra_data = icra_gp.trajectory_publisher_icra_data:main',
             'trajectory_publisher_icra_validation = icra_gp.trajectory_publisher_icra_validation:main',
             'gp_trajectory = icra_gp.gp_trajectory:main',
+            'gp_train = icra_gp.gp_train:main',
         ],
     },
 )
