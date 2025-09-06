@@ -14,15 +14,17 @@ def train():
     df = pd.read_csv('training_data.csv')
     x_real = df['x_actual'].values
     y_real = df['y_actual'].values
+    x_real = x_real[10000:]
+    y_real = y_real[10000:]
     x_real = x_real[::10]
     y_real = y_real[::10]
     ref = list(zip(x_real.tolist(), y_real.tolist()))
     print("Start Training")
     gp_predictor = GP_predictor()
-    model_info = gp_predictor.train_gp(ref)
+    gp_predictor.train_gp(ref)
     
     with open("gp_model.pkl", "wb") as f:
-        pickle.dump(model_info, f)
+        pickle.dump(gp_predictor, f)
 
     print("GP model saved to gp_model.pkl")
 

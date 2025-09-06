@@ -25,7 +25,7 @@ MAX_DATA_PER_EXPERT = 1000
 MIN_POINTS_OFFLINE  = 1
 WINDOW_SIZE    = None
 METHOD_ID      = 1             # 1=polar->delta; 5=polar+delta->delta
-DOMAIN = dict(xmin=-1, xmax=1, ymin=-1, ymax=1)
+DOMAIN = dict(xmin=-2, xmax=2, ymin=-2, ymax=2)
 DEFAULT_SPEED  = 0.01           # 把折线长度转时间，用于等时采样（不影响形状）
 LINE_WIDTHS    = dict(draw=2.0, sampled=1.0, gt=1.0, pred=1.0, seed=1.5, probe=2.0, pred_scaled=1.0)
 MATCH_MODE     = 'angle'  # 可在 similarity / affine / angle 之间切换（按 M 键）
@@ -125,6 +125,7 @@ def build_dataset(traj, k, input_type='polar+delta', output_type='delta'):
         else:
             raise ValueError("Unsupported output_type")
     # print(f"构建数据集: 输入维度 {Xs[0].shape[0]}, 样本数 {len(Xs)}, Xs[100]: {Xs[100]}")
+    print(f"构建数据集: 输入维度 {Xs[0].shape[0]}, 样本数 {len(Xs)}")
     return torch.stack(Xs), torch.stack(Ys)
 
 def time_split(X, Y, train_ratio):
@@ -171,11 +172,13 @@ def rollout_reference(model_info, traj, start_t, h, k, input_type, output_type, 
     
     # ✅ 保持和训练时一致：使用 global origin 和 global base_dir
     global_origin = traj[0]
+    # print(traj[0:10].numpy())
     if traj.shape[0] > 1:
         print("✅ 计算probe全局方向为前10段平均方向")
         end_idx = min(10, traj.shape[0]-1)
         dirs = traj[1:end_idx+1] - traj[0]
         global_base_dir = dirs.mean(dim=0)
+        print(f"   global_base_dir = {global_base_dir.numpy()}")
     else:
         print("⚠️ 轨迹点不足2个，无法计算全局方向，使用默认方向")
         global_base_dir = torch.tensor([1.0, 0.0])
@@ -531,6 +534,55 @@ def align_and_scale_gp_prediction(
     else:
         raise ValueError("mode must be 'angle' or 'manual'")
 
+def _crop_probe_by_threshold(probe_xy, thresh=1e-4):
+    """
+    裁剪 probe，找到第一个实际运动的点作为起点。
+    probe_xy: (N,2) ndarray
+    thresh: 两点之间的最小有效距离
+    """
+    if probe_xy.shape[0] < 2:
+        return probe_xy
+
+    diffs = np.linalg.norm(probe_xy[1:] - probe_xy[:-1], axis=1)
+    idx = np.argmax(diffs > thresh)  # 第一次超过阈值的位置
+    if diffs[idx] > thresh:
+        start = idx + 1  # 因为 diffs 是从第二个点开始的
+        print(f"✂️ Probe 裁剪: 从 idx={start} 开始 (Δ={diffs[idx]:.2e} > {thresh})")
+        return probe_xy[start:]
+    else:
+        print(f"⚠️ Probe 没有超过阈值 {thresh}，不裁剪")
+        return probe_xy
+
+def first_index_reach_threshold(angles, mask, target, *, inclusive=True, use_abs=False):
+    """
+    返回“首次达到/越过阈值”的索引：
+      - use_abs=False：按符号定阈值（target>=0 用 >=target；target<0 用 <=target）
+      - use_abs=True ：按幅值阈值（|angle| >= |target|）
+      - inclusive=True 表示“达到(=)也算越过”
+    若全程未达到阈值，则回退为“最近点”(原逻辑)，以保证总能返回一个索引。
+    """
+    idxs = np.where(mask)[0]
+    if idxs.size == 0:
+        return 0
+
+    if use_abs:
+        thr = abs(target)
+        for i in idxs:
+            if (abs(angles[i]) >= thr) if inclusive else (abs(angles[i]) > thr):
+                return int(i)
+    else:
+        if target >= 0:
+            for i in idxs:
+                if (angles[i] >= target) if inclusive else (angles[i] > target):
+                    return int(i)
+        else:
+            for i in idxs:
+                if (angles[i] <= target) if inclusive else (angles[i] < target):
+                    return int(i)
+
+    # 回退策略：找最近（避免“全程没到阈值”时返回无效）
+    return int(idxs[np.argmin(np.abs(angles[idxs] - target))])
+
 def last_window_rel_angles(points, W, min_r=1e-3):
     P = np.asarray(points, dtype=np.float64)
     if P.shape[0] < 2:
@@ -735,9 +787,14 @@ def plot_vectors_at_angle_ref_probe(
         idxs = np.where(mask)[0]
         return int(idxs[np.argmin(np.abs(angles[idxs] - target))])
 
-    i_ref = _masked_nearest_idx(ref_ang,  ref_mask,  angle_target)
-    i_pro = _masked_nearest_idx(pro_ang,  pro_mask,  angle_target)
-
+    # i_ref = _masked_nearest_idx(ref_ang,  ref_mask,  angle_target)
+    # i_pro = _masked_nearest_idx(pro_ang,  pro_mask,  angle_target)
+    
+    
+    ## use_abs:镜像？
+    i_ref = first_index_reach_threshold(ref_ang, ref_mask, angle_target, inclusive=True, use_abs=False)
+    i_pro = first_index_reach_threshold(pro_ang, pro_mask, angle_target, inclusive=True, use_abs=False)
+    print(f"🎯 目标角 {angle_target:.2f} rad | ref idx={i_ref}, angle={ref_ang[i_ref]:.2f} | probe idx={i_pro}, angle={pro_ang[i_pro]:.2f}")
     # 起点与 target 向量
     o_ref, p_ref = ref_pts[0],   ref_pts[i_ref]
     v_ref        = p_ref - o_ref
@@ -754,46 +811,92 @@ def plot_vectors_at_angle_ref_probe(
     b_ref = u_ref * L_ref
     b_pro = u_pro * L_pro
 
-    # ---- 绘图 ----
-    fig, (axL, axR) = plt.subplots(1, 2, figsize=(12, 5))
+    # # ---- 绘图 ----
+    # fig, (axL, axR) = plt.subplots(1, 2, figsize=(12, 5))
 
-    # 左：参考
-    axL.plot(ref_pts[:,0], ref_pts[:,1], '-', label='Reference traj')
-    axL.scatter(o_ref[0], o_ref[1], c='k', s=30, label='Origin')
-    axL.scatter(p_ref[0], p_ref[1], c='g', s=60, marker='x', label=f'target idx={i_ref}')
-    # target 向量
-    axL.plot([o_ref[0], o_ref[0] + v_ref[0]], [o_ref[1], o_ref[1] + v_ref[1]],
-             linewidth=2, color='g', label='Target vector')
-    # 基准向量（前10段平均方向）
-    axL.plot([o_ref[0], o_ref[0] + b_ref[0]], [o_ref[1], o_ref[1] + b_ref[1]],
-             linestyle='--', linewidth=2, color='r', label='Base tangent')
-    axL.set_aspect('equal', adjustable='box')
-    axL.grid(True, alpha=0.3)
-    axL.set_title(f"Reference | target={angle_target:.2f} rad ({np.degrees(angle_target):.1f}°)")
-    axL.legend(loc='best', fontsize=9)
+    # # 左：参考
+    # axL.plot(ref_pts[:,0], ref_pts[:,1], '-', label='Reference traj')
+    # axL.scatter(o_ref[0], o_ref[1], c='k', s=30, label='Origin')
+    # axL.scatter(p_ref[0], p_ref[1], c='g', s=60, marker='x', label=f'target idx={i_ref}')
+    # # target 向量
+    # axL.plot([o_ref[0], o_ref[0] + v_ref[0]], [o_ref[1], o_ref[1] + v_ref[1]],
+    #          linewidth=2, color='g', label='Target vector')
+    # # 基准向量（前10段平均方向）
+    # axL.plot([o_ref[0], o_ref[0] + b_ref[0]], [o_ref[1], o_ref[1] + b_ref[1]],
+    #          linestyle='--', linewidth=2, color='r', label='Base tangent')
+    # axL.set_aspect('equal', adjustable='box')
+    # axL.grid(True, alpha=0.3)
+    # axL.set_title(f"Reference | target={angle_target:.2f} rad ({np.degrees(angle_target):.1f}°)")
+    # axL.legend(loc='best', fontsize=9)
 
-    # 右：probe
-    axR.plot(probe_pts[:,0], probe_pts[:,1], '-', label='Probe traj')
-    axR.scatter(o_pro[0], o_pro[1], c='k', s=30, label='Origin')
-    axR.scatter(p_pro[0], p_pro[1], c='g', s=60, marker='x', label=f'target idx={i_pro}')
-    axR.plot([o_pro[0], o_pro[0] + v_pro[0]], [o_pro[1], o_pro[1] + v_pro[1]],
-             linewidth=2, color='g', label='Target vector')
+    # # 右：probe
+    # axR.plot(probe_pts[:,0], probe_pts[:,1], '-', label='Probe traj')
+    # axR.scatter(o_pro[0], o_pro[1], c='k', s=30, label='Origin')
+    # axR.scatter(p_pro[0], p_pro[1], c='g', s=60, marker='x', label=f'target idx={i_pro}')
+    # axR.plot([o_pro[0], o_pro[0] + v_pro[0]], [o_pro[1], o_pro[1] + v_pro[1]],
+    #          linewidth=2, color='g', label='Target vector')
     
-    axR.plot([o_pro[0], o_pro[0] + b_pro[0]], [o_pro[1], o_pro[1] + b_pro[1]],
-             linestyle='--', linewidth=2, color='r', label='Base tangent')
-    axR.set_aspect('equal', adjustable='box')
-    axR.grid(True, alpha=0.3)
-    axR.set_title("Probe (same target definition)")
-    axR.legend(loc='best', fontsize=9)
+    # axR.plot([o_pro[0], o_pro[0] + b_pro[0]], [o_pro[1], o_pro[1] + b_pro[1]],
+    #          linestyle='--', linewidth=2, color='r', label='Base tangent')
+    # axR.set_aspect('equal', adjustable='box')
+    # axR.grid(True, alpha=0.3)
+    # axR.set_title("Probe (same target definition)")
+    # axR.legend(loc='best', fontsize=9)
 
-    plt.suptitle("Target vector & Base tangent (Reference vs Probe)")
-    plt.tight_layout()
-    plt.show()
+    # plt.suptitle("Target vector & Base tangent (Reference vs Probe)")
+    # plt.tight_layout()
+    # plt.show()
 
     return {
         "ref_index": i_ref,   "ref_vector": v_ref,   "ref_point": p_ref,   "ref_base_unit": u_ref,
         "probe_index": i_pro, "probe_vector": v_pro, "probe_point": p_pro, "probe_base_unit": u_pro
     }
+
+def plot_anchor_vectors_from_gp(gp):
+    """
+    在一张图上绘制：
+      - Reference (等时采样后的) 轨迹
+      - Probe (等时采样后的) 轨迹
+      - 两条锚点对应向量：ref 起点→ref锚点，probe 起点→probe锚点
+    依赖 gp.seed_end, gp.probe_end 已在 predict_from_probe() 中设置。
+    """
+    if gp.sampled is None or not gp.probe_pts or gp.seed_end is None or gp.probe_end is None:
+        print("❗没有可绘制的锚点（先调用 train_gp / predict_from_probe）")
+        return
+
+    ref = gp.sampled.detach().cpu().numpy()              # 等时采样后的参考轨迹
+    probe = np.asarray(gp.probe_pts, dtype=np.float64)   # 等时采样后的 probe 轨迹
+    i_ref = int(gp.seed_end)
+    i_pro = int(gp.probe_end)
+
+    # 边界保护
+    if not (0 <= i_ref < len(ref)) or not (0 <= i_pro < len(probe)):
+        print("❗锚点索引越界，无法绘制")
+        return
+
+    o_ref, p_ref = ref[0],   ref[i_ref]
+    o_pro, p_pro = probe[0], probe[i_pro]
+
+    fig, ax = plt.subplots(1, 1, figsize=(8, 6))
+    ax.plot(ref[:, 0], ref[:, 1], '-', label='Reference (resampled)')
+    ax.plot(probe[:, 0], probe[:, 1], '-', label='Probe (resampled)')
+
+    # 两条“起点→锚点”的向量
+    ax.plot([o_ref[0], p_ref[0]], [o_ref[1], p_ref[1]], '--', linewidth=2, label=f'Ref anchor vec (idx={i_ref})')
+    ax.plot([o_pro[0], p_pro[0]], [o_pro[1], p_pro[1]], '--', linewidth=2, label=f'Probe anchor vec (idx={i_pro})')
+
+    # 标记起点 / 锚点
+    ax.scatter([o_ref[0], p_ref[0]], [o_ref[1], p_ref[1]], s=40, marker='o')
+    ax.scatter([o_pro[0], p_pro[0]], [o_pro[1], p_pro[1]], s=40, marker='x')
+
+    ax.set_aspect('equal', adjustable='box')
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    ax.set_title('Anchor Corresponding Vectors (origin → anchor)')
+    plt.tight_layout()
+    plt.savefig("anchor_vectors_main.png", dpi=150, bbox_inches="tight")
+    plt.show()
+
 
 
 # ==============================
@@ -829,7 +932,7 @@ class GP_predictor:
         self.probe_cross_count_session = 0
         self.current_anchor_ptr = 0
 
-        self.probe_anchor_markers = []  # 显示 probe 上越过锚点的位置
+        self.probe_anchor_markers = []  # 显示 probe 上越过锚点的位置na
         self.probe_predict_mode = 'probe-based'  # or 'probe-based'
         
         # 状态
@@ -860,7 +963,7 @@ class GP_predictor:
         
         # 终点判断
         self.probe_goal = None          # 预测停止的目标点（probe坐标系）
-        self.goal_stop_eps = 0.05       # 距离阈值（单位=坐标单位），可按需调
+        self.goal_stop_eps = 0.005       # 距离阈值（单位=坐标单位），可按需调
         
         # 多gp轨迹
         self.refs = []
@@ -935,10 +1038,10 @@ class GP_predictor:
         dtheta, spatial_scale, used = estimate_similarity_by_vectors_only(anchor_pairs)
         # 使用手动（由矢量可视化阶段设置）
         print("使用初始锚点向量估计......")
-        # dtheta = self.dtheta_manual
-        # spatial_scale = self.scale_manual
-        dtheta = 0
-        spatial_scale = 1
+        dtheta = self.dtheta_manual
+        spatial_scale = self.scale_manual
+        # dtheta = 0
+        # spatial_scale = 1
         print(f"📐 手动设定: Δθ={np.degrees(dtheta):.2f}°, scale={spatial_scale:.3f}")
 
         # === Step 2: 将 probe 映射到参考轨迹帧 ===
@@ -982,7 +1085,7 @@ class GP_predictor:
         start_t = probe_in_ref_frame.shape[0] - 1
 
         # === Step 4: GP rollout（ref frame） ===
-        h = 500
+        h = 2000
         input_type, output_type = METHOD_CONFIGS[METHOD_ID - 1]
         try:
             preds_ref, gt_ref, h_used = rollout_reference(
@@ -1046,23 +1149,23 @@ class GP_predictor:
         self.anchor_vecs_ref = []
         self.anchor_vecs_probe = []
 
-        # 绘制新的锚点向量对
-        for i, pair in enumerate(anchor_pairs):
-            pt_ref = pair['pt_ref']
-            pt_probe = pair['pt_probe']
-            ref_start = pair['ref_start']
-            probe_start = pair['probe_start']
+        # # 绘制新的锚点向量对
+        # for i, pair in enumerate(anchor_pairs):
+        #     pt_ref = pair['pt_ref']
+        #     pt_probe = pair['pt_probe']
+        #     ref_start = pair['ref_start']
+        #     probe_start = pair['probe_start']
 
-            color = cmap(i % 10)
+        #     color = cmap(i % 10)
 
-            ref_vec = np.stack([ref_start, pt_ref], axis=0)
-            h1, = self.ax.plot(ref_vec[:, 0], ref_vec[:, 1], '-', color=color, linewidth=1.5, label=f'ref_vec_{i}')
+        #     ref_vec = np.stack([ref_start, pt_ref], axis=0)
+        #     h1, = self.ax.plot(ref_vec[:, 0], ref_vec[:, 1], '-', color=color, linewidth=1.5, label=f'ref_vec_{i}')
 
-            probe_vec = np.stack([probe_start, pt_probe], axis=0)
-            h2, = self.ax.plot(probe_vec[:, 0], probe_vec[:, 1], '--', color=color, linewidth=1.5, label=f'probe_vec_{i}')
+        #     probe_vec = np.stack([probe_start, pt_probe], axis=0)
+        #     h2, = self.ax.plot(probe_vec[:, 0], probe_vec[:, 1], '--', color=color, linewidth=1.5, label=f'probe_vec_{i}')
 
-            self.anchor_vecs_ref.append(h1)
-            self.anchor_vecs_probe.append(h2)
+        #     self.anchor_vecs_ref.append(h1)
+        #     self.anchor_vecs_probe.append(h2)
 
         return preds_world
 
@@ -1170,30 +1273,31 @@ class GP_predictor:
         # 方便后续：默认把最后一条训练好的参考设为 best_ref
         if hasattr(self, "refs") and self.refs:
             self.best_ref = self.refs[-1]
-        
         return self.model_info  # 按你先前接口约定返回model
 
-    def predict_from_probe(self, probe_traj,model_info=None):
+    def predict_from_probe(self, probe_traj):
         """
         probe_traj: (M,2) numpy array 或 list[list[float,float]]
         一次性设置 probe，计算 Δθ/scale，rollout 并返回预测的 probe 坐标系轨迹 (K,2)
         """
-        self.model_info = model_info
         if self.model_info is None:
             raise RuntimeError("请先调用 train_gp(ref_traj) 进行训练")
         if not hasattr(self, "refs") or not self.refs:
             raise RuntimeError("没有可用参考轨迹，请先训练")
 
         probe_traj = np.asarray(probe_traj, dtype=np.float64)
+        # probe_traj = _crop_probe_by_threshold(probe_traj,0.001)
         if probe_traj.ndim != 2 or probe_traj.shape[1] != 2:
             raise ValueError("probe_traj 需要是 (M,2) 形状的数组")
         if probe_traj.shape[0] < 2:
             raise ValueError("probe_traj 至少需要两个点")
-        
+
         # 统一替换内部 probe 点，并等时重采样（和 release 逻辑一致）
         self.probe_pts = probe_traj.tolist()
         probe_raw = np.asarray(self.probe_pts, dtype=np.float32)
+        print("!!!!!!!!!!!!!!!!!!!!!!!!!probe_raw[:10]:", probe_raw[:10])
         probe_eq = resample_polyline_equal_dt(probe_raw, SAMPLE_HZ, DEFAULT_SPEED)
+        print("!!!!!!!!!!!!!!!!!!!!!!!!!probe_eq[:10]:", probe_eq[:10])
         if probe_eq.shape[0] >= 2:
             self.probe_pts = probe_eq.tolist()
         self.update_probe_line()
@@ -1207,10 +1311,10 @@ class GP_predictor:
             probe_np = np.asarray(self.probe_pts, dtype=np.float64)
 
             # 可视化角度曲线（保留你的plot）
-            plot_angle_changes(ref_np, probe_np, k_hist=K_HIST)
+            # plot_angle_changes(ref_np, probe_np, k_hist=K_HIST)
 
             # 选一个目标角（与你原代码一致 0.5 rad），得到 seed_end / probe_end、以及 manual Δθ/scale
-            angle_target = 0.5
+            angle_target = 0.4
             out = plot_vectors_at_angle_ref_probe(
                 ref_np, probe_np,
                 angle_target=angle_target,
@@ -1398,7 +1502,6 @@ class GP_predictor:
         input_type, output_type = METHOD_CONFIGS[METHOD_ID-1]
         X, Y = build_dataset(self.sampled, K_HIST, input_type, output_type)
         (Xtr, Ytr), (Xte, Yte), ntr = time_split(X, Y, TRAIN_RATIO)
-        print(Xtr.shape)
         ds = {'X_train': Xtr, 'Y_train': Ytr, 'X_test': Xte, 'Y_test': Yte, 'n_train': ntr}
         self.model_info = train_moe(ds, METHOD_ID)
 
@@ -1552,3 +1655,78 @@ class GP_predictor:
             w=csv.writer(f); w.writerow(["x_actual","y_actual"])
             for p in self.sampled.numpy(): w.writerow([float(p[0]), float(p[1])])
         print(f"💾 已保存: {fname}")
+
+# ==============================
+# 入口（在 main 里 plot 出来）
+# ==============================
+if __name__ == "__main__":
+    import csv
+    import numpy as np
+    import matplotlib.pyplot as plt
+
+    csv_path = "training_data.csv"   # 改成你的文件名也行
+
+    # 读成数组
+    rows = []
+    with open(csv_path, "r") as f:
+        r = csv.DictReader(f)
+        for row in r:
+            rows.append(row)
+
+    ref_xy = np.array([[float(r["x_actual"]), float(r["y_actual"])]
+                    for r in rows], dtype=np.float32)
+    
+    #ref前500点作为probe
+    csv_path = "trajectory_full.csv"   # 改成你的文件名也行
+
+    # 读成数组
+    rows = []
+    with open(csv_path, "r") as f:
+        r = csv.DictReader(f)
+        for row in r:
+            rows.append(row)
+
+    probe_xy = np.array([[float(r["x"]), float(r["y"])]
+                    for r in rows], dtype=np.float32)
+
+    print(f"Loaded ref: {ref_xy.shape}, probe: {probe_xy.shape} ")
+    # print("前10个ref点:\n", ref_xy[:10])
+    # print("前10个probe点:\n", probe_xy[:10])
+
+    # 如果你的 GP_predictor __init__ 会阻塞，改成：gp = GP_predictor(show_ui=False)
+    gp = GP_predictor()
+    gp.train_gp(ref_xy)                  # 一次性训练
+    preds = gp.predict_from_probe(probe_xy)   # 一次性预测，返回 (K,2) 或 None
+
+    # === 在 main 里画 ref / probe / prediction ===
+    plt.figure(figsize=(8, 6))
+    plt.plot(ref_xy[:, 0], ref_xy[:, 1], label="Reference")
+    plt.plot(probe_xy[:, 0], probe_xy[:, 1], label="Probe")
+    if preds is not None and len(preds) > 0:
+        plt.plot(preds[:, 0], preds[:, 1], label="Prediction")
+
+    ax = plt.gca()
+    ax.set_aspect('equal', adjustable='box')
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.title("Ref / Probe / Prediction (main)")
+    plt.xlabel("x")
+    plt.ylabel("y")
+    plt.tight_layout()
+
+    # 如需保存
+    plt.savefig("ref_probe_prediction_main.png", dpi=150, bbox_inches="tight")
+    plt.show()
+    
+            
+    # 追加：把找到的两个锚点对应向量画出来
+    plot_anchor_vectors_from_gp(gp)
+
+        # === 保存预测结果到CSV ===
+    if preds is not None and len(preds) > 0:
+        import csv
+        with open("preds.csv", "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["x_pred", "y_pred"])  # 表头
+            writer.writerows(preds.tolist())
+        print(f"Saved predictions to preds.csv, shape={preds.shape}")

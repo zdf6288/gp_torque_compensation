@@ -98,9 +98,8 @@ class GPTrajectory(Node):
             # print(f"probe.shape: {probe.shape}")
             # print(probe)
             with open("gp_model.pkl", "rb") as f:
-                model_info = pickle.load(f)
-            gp_predictor = GP_predictor()
-            predicted = gp_predictor.predict_from_probe(probe, model_info)
+                gp_predictor = pickle.load(f)
+            predicted = gp_predictor.predict_from_probe(probe)
             self.x_pred = []
             for point in predicted:
                 self.x_pred.append([point[0], point[1], 0.65])     
