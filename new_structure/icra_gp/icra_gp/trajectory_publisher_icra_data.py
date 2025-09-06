@@ -236,7 +236,7 @@ class TrajectoryPublisherICRAData(Node):
                     z = self.z_buffer
                     self.x_buffer = x + dx * dt
                     self.y_buffer = y + dy * dt
-                    self.z_buffer = z + dz * dt
+
 
                     self.dx_buffer = dx
                     self.dy_buffer = dy
@@ -248,8 +248,8 @@ class TrajectoryPublisherICRAData(Node):
             trajectory_msg.header.stamp = current_time.to_msg()
             trajectory_msg.header.frame_id = "base_link"
             trajectory_msg.x_des = [x, y, z, 0.0, 0.0, 0.0]         # position (x, y, z, roll, pitch, yaw)
-            trajectory_msg.dx_des = [dx, dy, dz, 0.0, 0.0, 0.0]     # velocity
-            trajectory_msg.ddx_des = [ddx, ddy, ddz, 0.0, 0.0, 0.0] # acceleration
+            trajectory_msg.dx_des = [dx, dy, 0.0, 0.0, 0.0, 0.0]     # velocity
+            trajectory_msg.ddx_des = [ddx, ddy, 0.0, 0.0, 0.0, 0.0] # acceleration
             
             self.trajectory_publisher.publish(trajectory_msg)
             

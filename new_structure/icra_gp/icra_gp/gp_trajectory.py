@@ -6,11 +6,9 @@ from custom_msgs.msg import DataForGP, TaskSpaceCommand
 from custom_msgs.srv import GPPredict
 from std_msgs.msg import Header
 import numpy as np
-import pandas as pd
 import time
-from icra_gp.gp_predictor import train_reference_from_array
-from icra_gp.gp_predictor import predict_trajectory_from_probe
-
+from icra_gp.gp_predictor import GP_predictor
+import pickle
 
 
 class GPTrajectory(Node):
@@ -91,17 +89,18 @@ class GPTrajectory(Node):
             # Convert the input data to numpy array for processing
             # x_real_array = np.array(x).reshape(-1, 3)  # reshape to [N, 3] for [x, y, z]
             
-            df = pd.read_csv('training_data.csv')
-            x_real = df['x_actual'].values
-            y_real = df['y_actual'].values
-            x_real = x_real[::10]
-            y_real = y_real[::10]
-            ref = list(zip(x_real.tolist(), y_real.tolist()))
-            model_bundle = train_reference_from_array(ref)
+            
             x_array = np.array(x)
-            probe2d = x_array[:, :2] 
+            probe2d = x_array[:, :2]
             probe = probe2d[::10]
-            predicted = predict_trajectory_from_probe(model_bundle, probe)
+            # print(f"ref.shape: {ref.shape}")
+            # print(f"x_array.shape: {x_array.shape}")
+            # print(f"probe.shape: {probe.shape}")
+            # print(probe)
+            with open("gp_model.pkl", "rb") as f:
+                model_info = pickle.load(f)
+            gp_predictor = GP_predictor()
+            predicted = gp_predictor.predict_from_probe(probe, model_info)
             self.x_pred = []
             for point in predicted:
                 self.x_pred.append([point[0], point[1], 0.65])     

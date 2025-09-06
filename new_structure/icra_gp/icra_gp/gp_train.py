@@ -5,7 +5,10 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import sys
 import os
-from icra_gp.gp_predictor import train_reference_from_array
+from icra_gp.gp_predictor import GP_predictor
+import pickle
+import rclpy
+
 
 def train():
     df = pd.read_csv('training_data.csv')
@@ -14,21 +17,19 @@ def train():
     x_real = x_real[::10]
     y_real = y_real[::10]
     ref = list(zip(x_real.tolist(), y_real.tolist()))
-    model_bundle = train_reference_from_array(ref)
+    print("Start Training")
+    gp_predictor = GP_predictor()
+    model_info = gp_predictor.train_gp(ref)
     
-    # 将tensor转换为numpy数组并保存为CSV
-    sampled_data = model_bundle['sampled'].detach().cpu().numpy()
-    
-    # 创建DataFrame并保存
-    df_sampled = pd.DataFrame(sampled_data, columns=['x', 'y'])
-    df_sampled.to_csv('sampled_trajectory.csv', index=False)
-    
-    print(f"已保存 {len(sampled_data)} 个点到 sampled_trajectory.csv")
-    print("前5个点:")
-    print(df_sampled.head())
+    with open("gp_model.pkl", "wb") as f:
+        pickle.dump(model_info, f)
+
+    print("GP model saved to gp_model.pkl")
 
 def main():
+    rclpy.init()
     train()
+    rclpy.shutdown()
 
 if __name__ == '__main__':
     main() 
