@@ -189,7 +189,8 @@ class TrajectoryPublisherICRAValidation(Node):
                     # reset start time for lambda trajectory
                     self.start_time = current_time
                     elapsed_time = 0.0
-                    
+                    return
+                                                                                            
                 else:
                     # generate smooth transition trajectory from adjusted robot position to start point
                     # use 5th order polynomial for interpolation

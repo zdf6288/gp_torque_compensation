@@ -93,6 +93,7 @@ class GPTrajectory(Node):
             x_array = np.array(x)
             probe2d = x_array[:, :2]
             probe = probe2d[::10]
+            # probe = probe2d
             # print(f"ref.shape: {ref.shape}")
             # print(f"x_array.shape: {x_array.shape}")
             # print(f"probe.shape: {probe.shape}")
