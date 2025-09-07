@@ -109,6 +109,7 @@ class CartesianImpedanceICRAValidation(Node):
         self.tau_buffer = np.zeros_like(self.effort_msg.efforts)     # buffer for tau
     
         self.lambda_stopped = False                 # flag indicating lambda is stopped
+        self.lambda_has_been_active = False         # flag indicating lambda has been active (False->True->False)
         self.data_for_gp_msg = DataForGP()
         self.gp_predict_finished = False            # flag indicating the end of GP prediction
         self.gp_service_called = False              # flag indicating GP service has been called
@@ -152,7 +153,15 @@ class CartesianImpedanceICRAValidation(Node):
 
     def lambdaCommandCallback(self, msg):
         """callback function for /lambda_command subscriber"""
+        lambda_stopped_buffer = self.lambda_stopped
         self.lambda_stopped = msg.lambda_stopped
+        if not lambda_stopped_buffer and self.lambda_stopped:
+            # lambda just stopped (False->True)
+            pass
+        elif lambda_stopped_buffer and not self.lambda_stopped:
+            # lambda just started (True->False), mark that it has been active
+            self.lambda_has_been_active = True
+        
         if self.lambda_stopped:
             if not self.tau_history:
                 return     # not in process of validation, lambda at initial state
@@ -289,7 +298,8 @@ class CartesianImpedanceICRAValidation(Node):
                 self.data_for_gp_msg.x_real = x[:3].tolist()
                 self.data_for_gp_publisher.publish(self.data_for_gp_msg)
                 
-            elif self.data_recording_enabled and self.lambda_stopped:   
+            elif self.data_recording_enabled \
+                and self.lambda_stopped and self.lambda_has_been_active:   
                 self.tau_history_new.append(tau.tolist())
                 self.time_history_new.append(t_elapsed)
                 self.x_history_new.append(x.tolist())
