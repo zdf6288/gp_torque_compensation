@@ -10,6 +10,7 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name + '/launch', ['launch/cartesian_impedance_icra_launch.py']),
+        ('share/' + package_name + '/launch', ['launch/cartesian_impedance_multi_launch.py']),
         ('share/' + package_name, ['package.xml']),
     ],
     install_requires=['setuptools'],
@@ -27,6 +28,8 @@ setup(
             'trajectory_publisher_icra_validation = icra_gp.trajectory_publisher_icra_validation:main',
             'gp_trajectory = icra_gp.gp_trajectory:main',
             'gp_train = icra_gp.gp_train:main',
+            'cartesian_impedance_multi_data = icra_gp.cartesian_impedance_multi_data:main',
+            'trajectory_publisher_multi_data = icra_gp.trajectory_publisher_multi_data:main',
         ],
     },
 )
