@@ -51,7 +51,7 @@ class TrajectoryPublisherMultiData(Node):
         self.robot_initial_z = None
         self.robot_initial_received = False
         self.declare_parameter('transition_duration', 3.0)  # time to reach start point (s)
-        self.declare_parameter('use_transition', False)     # in multi-class test, we don't use transition
+        self.declare_parameter('use_transition', True)      # in multi-class test, transition is a manual process
         self.transition_duration = self.get_parameter('transition_duration').value
         self.use_transition = self.get_parameter('use_transition').value
         
@@ -176,40 +176,7 @@ class TrajectoryPublisherMultiData(Node):
                 # transition: from adjusted robot position to trajectory start point
                 transition_elapsed = (current_time - self.transition_start_time).nanoseconds / 1e9
                 
-                if transition_elapsed >= self.transition_duration:
-                    # transition complete, start lambda trajectory
-                    self.transition_complete = True
-                    # set initial position to current robot position
-                    self.x_buffer = self.robot_position_x
-                    self.y_buffer = self.robot_position_y
-                    self.z_buffer = self.robot_position_z
-                    self.get_logger().info('Transition complete, starting lambda trajectory')
-                    # reset start time for lambda trajectory
-                    self.start_time = current_time
-                    elapsed_time = 0.0
-                    return
-                    
-                else:
-                    # generate smooth transition trajectory from adjusted robot position to start point
-                    # use 5th order polynomial for interpolation
-                    t = transition_elapsed / self.transition_duration
-                    s = 10*t**3 - 15*t**4 + 6*t**5
-                    
-                    # interpolation
-                    x = self.robot_initial_x + s * (self.trajectory_start_x - self.robot_initial_x)
-                    y = self.robot_initial_y + s * (self.trajectory_start_y - self.robot_initial_y)
-                    z = self.robot_initial_z + s * (self.trajectory_start_z - self.robot_initial_z)
-
-                    ds_dt = (30*t**2 - 60*t**3 + 30*t**4) / self.transition_duration
-                    d2s_dt2 = (60*t - 180*t**2 + 120*t**3) / (self.transition_duration**2)
-                    
-                    dx = ds_dt * (self.trajectory_start_x - self.robot_initial_x)
-                    dy = ds_dt * (self.trajectory_start_y - self.robot_initial_y)
-                    dz = ds_dt * (self.trajectory_start_z - self.robot_initial_z)
-                    
-                    ddx = d2s_dt2 * (self.trajectory_start_x - self.robot_initial_x)
-                    ddy = d2s_dt2 * (self.trajectory_start_y - self.robot_initial_y)
-                    ddz = d2s_dt2 * (self.trajectory_start_z - self.robot_initial_z)
+                pass
             
             # trajectory determined by lambda command
             if self.transition_complete or not self.use_transition:

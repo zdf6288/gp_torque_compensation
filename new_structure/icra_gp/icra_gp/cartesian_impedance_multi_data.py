@@ -79,6 +79,7 @@ class CartesianImpedanceMultiData(Node):
         self.rotation_matrix_des = np.array(
             [[1, 0, 0], [0, -1, 0], [0, 0, -1]], dtype=float)   # desired rotation matrix, z axis perpendicular to ground
         # joint position control state
+        self.joint_position_service_called = False  # flag for joint position service call
         self.joint_position_control_active = True   # start with joint position control
         self.joint_position_adjusted = False        # flag for joint position adjustment
         self.trajectory_started = False             # flag for trajectory start, indicating the start of trajectory publishment
@@ -153,7 +154,7 @@ class CartesianImpedanceMultiData(Node):
                     self.get_logger().info(f'Joint positions adjusted! Error: {joint_error:.6f}')
                     
                     # start trajectory by calling service
-                    if not self.trajectory_started:
+                    if not self.trajectory_started and self.joint_position_service_called:
                         self.start_trajectory()
                 else:
                     # PD control for joint positions
@@ -255,6 +256,7 @@ class CartesianImpedanceMultiData(Node):
                 self.get_logger().warn('Joint position adjust service not ready, retrying...')
                 return
             
+            self.joint_position_service_called = True
             request = JointPositionAdjust.Request()
             request.q_des = self.q_des.tolist()
             request.dq_des = self.dq_des.tolist()
