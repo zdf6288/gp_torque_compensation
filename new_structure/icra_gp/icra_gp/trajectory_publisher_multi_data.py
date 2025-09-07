@@ -96,6 +96,8 @@ class TrajectoryPublisherMultiData(Node):
             self.get_logger().info(f'dq_des: {request.dq_des}')
             
             self.trajectory_enabled = True
+            while True:
+                pass
             
             # reset timing for trajectory
             self.start_time = self.get_clock().now()
@@ -175,8 +177,6 @@ class TrajectoryPublisherMultiData(Node):
             if self.use_transition and not self.transition_complete:
                 # transition: from adjusted robot position to trajectory start point
                 transition_elapsed = (current_time - self.transition_start_time).nanoseconds / 1e9
-                
-                pass
             
             # trajectory determined by lambda command
             if self.transition_complete or not self.use_transition:

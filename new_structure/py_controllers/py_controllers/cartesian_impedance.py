@@ -154,6 +154,10 @@ class CartesianImpedanceController(Node):
                     
                     # start trajectory by calling service
                     if not self.trajectory_started:
+                        # start transition, clear ros2_control interface buffer
+                        tau = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+                        self.effort_msg.efforts = tau.tolist()
+                        self.effort_publisher.publish(self.effort_msg)
                         self.start_trajectory()
                 else:
                     # PD control for joint positions

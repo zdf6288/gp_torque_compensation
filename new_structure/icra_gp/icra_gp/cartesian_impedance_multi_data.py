@@ -154,7 +154,12 @@ class CartesianImpedanceMultiData(Node):
                     self.get_logger().info(f'Joint positions adjusted! Error: {joint_error:.6f}')
                     
                     # start trajectory by calling service
-                    if not self.trajectory_started and self.joint_position_service_called:
+                    if not self.trajectory_started and not self.joint_position_service_called:
+                        self.k_gains = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+                        # start transition, clear ros2_control interface buffer
+                        tau = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+                        self.effort_msg.efforts = tau.tolist()
+                        self.effort_publisher.publish(self.effort_msg)
                         self.start_trajectory()
                 else:
                     # PD control for joint positions
