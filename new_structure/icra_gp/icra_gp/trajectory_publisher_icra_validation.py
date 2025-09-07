@@ -247,6 +247,11 @@ class TrajectoryPublisherICRAValidation(Node):
                         self.dy_buffer = dy
                         self.dz_buffer = 0
             
+            # publish data recording status
+            data_recording_msg = Bool()
+            data_recording_msg.data = self.transition_complete or not self.use_transition
+            self.data_recording_publisher.publish(data_recording_msg)
+
             # publish on /task_space_command
             trajectory_msg = TaskSpaceCommand()
             trajectory_msg.header = Header()
@@ -258,10 +263,6 @@ class TrajectoryPublisherICRAValidation(Node):
             
             self.trajectory_publisher.publish(trajectory_msg)
             
-            # publish data recording status
-            data_recording_msg = Bool()
-            data_recording_msg.data = self.transition_complete or not self.use_transition
-            self.data_recording_publisher.publish(data_recording_msg)
 
         except Exception as e:
             self.get_logger().error(f'Error in trajectory publisher: {str(e)}')

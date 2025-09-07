@@ -155,14 +155,12 @@ class CartesianImpedanceICRAValidation(Node):
         self.lambda_stopped = msg.lambda_stopped
         if self.lambda_stopped:
             if not self.tau_history:
-                pass     # not in process of validation, lambda at initial state
+                return     # not in process of validation, lambda at initial state
             elif not self.gp_predict_finished \
                 and not self.gp_service_called and not self.gp_service_in_progress:
                 self.task_command_received = False
                 self.call_gp_service()
-                pass
-            else:
-                pass
+                return
 
     def stateParameterCallback(self, msg):
         """callback function for /state_parameter subscriber"""
