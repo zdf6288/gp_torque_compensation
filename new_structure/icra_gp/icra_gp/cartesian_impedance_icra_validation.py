@@ -111,6 +111,8 @@ class CartesianImpedanceICRAValidation(Node):
         self.lambda_stopped = False                 # flag indicating lambda is stopped
         self.data_for_gp_msg = DataForGP()
         self.gp_predict_finished = False            # flag indicating the end of GP prediction
+        self.gp_service_called = False              # flag indicating GP service has been called
+        self.gp_service_in_progress = False         # flag indicating GP service is currently being processed
 
         # list for data recording
         self.tau_history = []
@@ -154,7 +156,8 @@ class CartesianImpedanceICRAValidation(Node):
         if self.lambda_stopped:
             if not self.tau_history:
                 pass     # not in process of validation, lambda at initial state
-            elif not self.gp_predict_finished:
+            elif not self.gp_predict_finished \
+                and not self.gp_service_called and not self.gp_service_in_progress:
                 self.task_command_received = False
                 self.call_gp_service()
                 pass
@@ -342,12 +345,18 @@ class CartesianImpedanceICRAValidation(Node):
                 self.get_logger().warn('GP prediction service not ready, retrying...')
                 return
 
+            # set service call state flags
+            self.gp_service_called = True
+            self.gp_service_in_progress = True
+            
             future = self.gp_predict_client.call_async(GPPredict.Request())
             future.add_done_callback(self.gp_predict_callback)
             self.gp_predict_finished = False
             self.get_logger().info('Requested GP prediction via service call')
         except Exception as e:
             self.get_logger().error(f'Error calling GP prediction service: {str(e)}')
+            self.gp_service_called = False
+            self.gp_service_in_progress = False
     
     def gp_predict_callback(self, future):
         """Callback for GP prediction service call"""
@@ -362,6 +371,8 @@ class CartesianImpedanceICRAValidation(Node):
         except Exception as e:
             self.get_logger().error(f'Error in GP prediction callback: {str(e)}')
             self.gp_predict_finished = False
+        finally:
+            self.gp_service_in_progress = False
 
     def signal_handler(self, signum, frame):
         """signal handler, call save data function when program is interrupted"""
