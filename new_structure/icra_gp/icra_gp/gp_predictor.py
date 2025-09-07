@@ -35,10 +35,10 @@ np.random.seed(SEED)
 torch.manual_seed(SEED)
 
 # Tunable parameters
-ANCHOR_ANGLE = np.radians(40)  # angle (rad) for anchor correspondence
+ANCHOR_ANGLE = np.radians(30)  # angle (rad) for anchor correspondence
 K_HIST = 10                      # seed length (history window)
 NEAREST_K = 2
-MAX_DATA_PER_EXPERT = 50
+MAX_DATA_PER_EXPERT = 200
 
 # ==============================
 # Method Hyperparameters
@@ -340,20 +340,21 @@ def _wrap_pi(a: np.ndarray) -> np.ndarray:
 
 def estimate_start_tangent(xy, k: int = 5) -> float:
     """
-    Estimate initial tangent direction (angle) using the first k segments.
+    Initial heading φ0 by chord-average from the origin:
+    mean( P[i] - P[0] ), i=1..k (clamped by available points).
+    This matches the 'global_base_dir' used in training/rollout.
+    Returns radians in (-pi, pi].
     """
-    xy = np.asarray(xy, dtype=np.float64)
-    if len(xy) < 2:
+    P = np.asarray(xy, dtype=np.float64)
+    if P.shape[0] < 2:
         return 0.0
-    k = int(max(2, min(k, len(xy) - 1)))
-    v = np.diff(xy[: k + 1], axis=0)
-    n = np.linalg.norm(v, axis=1, keepdims=True)
-    n[n < 1e-12] = 1.0
-    u = v / n
-    m = u.mean(axis=0)
-    if np.linalg.norm(m) < 1e-12:
-        m = xy[1] - xy[0]
-    return float(np.arctan2(m[1], m[0]))
+    # use up to k chords from the origin
+    m = int(min(max(1, P.shape[0] - 1), max(1, k)))
+    dirs = P[1:m+1] - P[0]
+    v = dirs.mean(axis=0)
+    if not np.isfinite(v).all() or np.linalg.norm(v) < 1e-12:
+        v = P[1] - P[0]
+    return float(np.arctan2(v[1], v[0]))
 
 
 def angles_relative_to_start_tangent(points, k_hist: int, min_r: float = 1e-3):
@@ -365,6 +366,7 @@ def angles_relative_to_start_tangent(points, k_hist: int, min_r: float = 1e-3):
         return np.array([]), np.zeros(0, dtype=bool)
     o = P[0]
     phi0 = estimate_start_tangent(P, k=k_hist)
+    
     v = P - o
     r = np.linalg.norm(v, axis=1)
     th = np.arctan2(v[:, 1], v[:, 0])
@@ -381,6 +383,7 @@ def _angles_with_phi0(points, k_hist: int, min_r: float):
     """
     out = angles_relative_to_start_tangent(points, k_hist=k_hist, min_r=min_r)
     if isinstance(out, tuple) and len(out) == 3:
+        print("⚠️ Warning: angles_relative_to_start_tangent already returns phi0; redundant computation.")
         return out  # (angles, mask, phi0)
     elif isinstance(out, tuple) and len(out) == 2:
         angles, mask = out
@@ -415,35 +418,100 @@ def angle_diff_mod_pi(a: float, b: float) -> float:
     return ((a - b + np.pi) % (2 * np.pi)) - np.pi
 
 
-def first_index_reach_threshold(angles, mask, target, *, inclusive: bool = True, use_abs: bool = False) -> int:
+# def first_index_reach_threshold(angles, mask, target, *, inclusive: bool = True, use_abs: bool = False) -> int:
+#     """
+#     Find the first index where the angle crosses the target threshold.
+#       - use_abs=False: directional threshold (>= target if target>=0 else <= target)
+#       - use_abs=True : magnitude threshold (|angle| >= |target|)
+#       - inclusive=True counts equality as crossing
+#     If never crosses, return index of the closest point (fallback).
+#     """
+#     idxs = np.where(mask)[0]
+#     if idxs.size == 0:
+#         return 0
+
+#     if use_abs:
+#         thr = abs(target)
+#         for i in idxs:
+#             if (abs(angles[i]) >= thr) if inclusive else (abs(angles[i]) > thr):
+#                 return int(i)
+#     else:
+#         if target >= 0:
+#             for i in idxs:
+#                 if (angles[i] >= target) if inclusive else (angles[i] > target):
+#                     return int(i)
+#         else:
+#             for i in idxs:
+#                 if (angles[i] <= target) if inclusive else (angles[i] < target):
+#                     return int(i)
+
+#     # Fallback: nearest to target
+#     return int(idxs[np.argmin(np.abs(angles[idxs] - target))])
+
+def first_index_reach_threshold(
+    angles,
+    mask,
+    target,
+    *,
+    inclusive: bool = True
+) -> int:
     """
-    Find the first index where the angle crosses the target threshold.
-      - use_abs=False: directional threshold (>= target if target>=0 else <= target)
-      - use_abs=True : magnitude threshold (|angle| >= |target|)
-      - inclusive=True counts equality as crossing
-    If never crosses, return index of the closest point (fallback).
+    Scan consecutive valid points (by mask). For each pair (i_prev -> i_curr),
+    check whether target angle is *between* angles[i_prev] and angles[i_curr]
+    along the minimal signed rotation. If yes, return i_prev.
+
+    - Angles are in radians.
+    - Uses circular difference in (-pi, pi] to handle wrap-around.
+    - If no bracket is found, fall back to the closest angle (and return its previous
+      valid index if available, else itself).
     """
     idxs = np.where(mask)[0]
     if idxs.size == 0:
         return 0
+    if idxs.size == 1:
+        return int(idxs[0])
 
-    if use_abs:
-        thr = abs(target)
-        for i in idxs:
-            if (abs(angles[i]) >= thr) if inclusive else (abs(angles[i]) > thr):
-                return int(i)
-    else:
-        if target >= 0:
-            for i in idxs:
-                if (angles[i] >= target) if inclusive else (angles[i] > target):
-                    return int(i)
+    # helper: minimal signed diff in (-pi, pi]
+    def _diff(a, b):
+        # your project already has angle_diff_mod_pi(a, b)
+        return angle_diff_mod_pi(a, b)
+
+    # sweep pairs of consecutive valid indices
+    for j in range(1, len(idxs)):
+        i_prev = idxs[j - 1]
+        i_curr = idxs[j]
+
+        a = float(angles[i_prev])
+        b = float(angles[i_curr])
+
+        d = _diff(b, a)         # signed rotation from a -> b (shortest way), in (-pi, pi]
+        dt = _diff(target, a)   # signed rotation from a -> target, same convention
+
+        if d > 0:
+            # going CCW from a to b
+            if inclusive:
+                hit = (0.0 <= dt <= d)
+            else:
+                hit = (0.0 < dt < d)
+        elif d < 0:
+            # going CW from a to b
+            if inclusive:
+                hit = (d <= dt <= 0.0)
+            else:
+                hit = (d < dt < 0.0)
         else:
-            for i in idxs:
-                if (angles[i] <= target) if inclusive else (angles[i] < target):
-                    return int(i)
+            # d == 0: no rotation (angles equal) → only hit if target == a (when inclusive)
+            hit = inclusive and (abs(dt) == 0.0)
 
-    # Fallback: nearest to target
-    return int(idxs[np.argmin(np.abs(angles[idxs] - target))])
+        if hit:
+            return int(i_prev)
+
+    # ---- fallback: pick the closest angle; prefer returning its previous valid index ----
+    diffs = np.array([abs(_diff(target, float(angles[i]))) for i in idxs])
+    k = int(idxs[int(np.argmin(diffs))])
+    # prefer previous valid index if it exists
+    pos = np.where(idxs == k)[0][0]
+    return int(idxs[pos - 1]) if pos > 0 else k
 
 
 def last_window_rel_angles(points, W: int, min_r: float = 1e-3):
@@ -502,8 +570,8 @@ def get_anchor_correspondence(
     ref_ang, ref_mask, _ = _angles_with_phi0(ref_pts, k_hist=k_hist, min_r=min_r)
     pro_ang, pro_mask, _ = _angles_with_phi0(probe_pts, k_hist=k_hist, min_r=min_r)
 
-    i_ref = first_index_reach_threshold(ref_ang, ref_mask, angle_target, inclusive=True, use_abs=False)
-    i_pro = first_index_reach_threshold(pro_ang, pro_mask, angle_target, inclusive=True, use_abs=False)
+    i_ref = first_index_reach_threshold(ref_ang, ref_mask, angle_target, inclusive=True)
+    i_pro = first_index_reach_threshold(pro_ang, pro_mask, angle_target, inclusive=True)
     print(
         f"🎯 Target angle {angle_target:.2f} rad | "
         f"ref idx={i_ref}, angle={ref_ang[i_ref]:.2f} | "
@@ -577,6 +645,64 @@ def plot_anchor_vectors_from_gp(gp):
     plt.savefig("anchor_vectors_main.png", dpi=150, bbox_inches="tight")
 
 
+def _phi0_unit(points, k_hist=K_HIST):
+    """
+    Compute the unit vector of the initial tangent (phi0) at the origin.
+    Returns (unit_vector, phi0_radians).
+    """
+    pts = np.asarray(points, dtype=np.float64)
+    phi0 = estimate_start_tangent(pts, k=k_hist)
+    u = np.array([np.cos(phi0), np.sin(phi0)], dtype=np.float64)
+    return u, phi0
+
+
+def plot_relative_angle_bases_from_gp(gp, *, k_hist=K_HIST, vec_len=None, filename="relative_angle_bases.png"):
+    """
+    Plot the two base vectors used by the relative-angle computation (phi0 of ref & probe).
+    Uses the current resampled reference (gp.sampled) and probe (gp.probe_pts).
+    """
+    if gp.sampled is None or not gp.probe_pts:
+        print("❗No data to plot base vectors (run train_gp and predict_from_probe first).")
+        return
+
+    # Resampled reference & probe used in your pipeline
+    ref = gp.sampled.detach().cpu().numpy()
+    probe = np.asarray(gp.probe_pts, dtype=np.float64)
+
+    # Compute unit base vectors (phi0) at each origin
+    u_ref, phi_ref = _phi0_unit(ref, k_hist=k_hist)
+    u_pro, phi_pro = _phi0_unit(probe, k_hist=k_hist)
+
+    # Choose a nice arrow length if not provided
+    if vec_len is None:
+        all_pts = np.vstack([ref, probe])
+        span = float(np.max(np.ptp(all_pts, axis=0)))
+        vec_len = max(1e-9, 0.15 * span)
+
+    o_ref = ref[0]
+    o_pro = probe[0]
+
+    fig, ax = plt.subplots(1, 1, figsize=(8, 6))
+    ax.plot(ref[:, 0], ref[:, 1], "-", label="Reference (resampled)")
+    ax.plot(probe[:, 0], probe[:, 1], "-", label="Probe (resampled)")
+
+    # Draw phi0 vectors from each origin
+    ax.quiver(o_ref[0], o_ref[1], vec_len * u_ref[0], vec_len * u_ref[1],
+              angles="xy", scale_units="xy", scale=1, width=0.004,
+              label=f"Ref φ0 (k={k_hist})")
+    ax.quiver(o_pro[0], o_pro[1], vec_len * u_pro[0], vec_len * u_pro[1],
+              angles="xy", scale_units="xy", scale=1, width=0.004,
+              label=f"Probe φ0 (k={k_hist})")
+
+    ax.set_aspect("equal", adjustable="box")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    ax.set_title("Base vectors for relative-angle computation (φ0 at origin)")
+    plt.tight_layout()
+    plt.savefig(filename, dpi=150, bbox_inches="tight")
+    print(f"Saved base vectors plot to {filename} | "
+          f"ref φ0={np.degrees(phi_ref):.2f}°, probe φ0={np.degrees(phi_pro):.2f}°")
+
 # ==============================
 # Predictor Class
 # ==============================
@@ -648,7 +774,7 @@ class GP_predictor:
         start_t = probe_in_ref_frame.shape[0] - 1
 
         # --- Step 4: GP rollout (ref frame) ---
-        h = 2000
+        h = 4000
         try:
             preds_ref, gt_ref, h_used = rollout_reference(
                 model_info,
@@ -724,6 +850,7 @@ class GP_predictor:
         probe_eq = resample_polyline_equal_dt(probe_raw, SAMPLE_HZ, DEFAULT_SPEED)
         if probe_eq.shape[0] >= 2:
             self.probe_pts = probe_eq.tolist()
+            print(f"🔄 Probe resampled to {len(self.probe_pts)} points.")
 
         # Choose best reference (if only one, use it)
         self.best_ref = self.refs[-1]
@@ -738,11 +865,9 @@ class GP_predictor:
                 ref_np,
                 probe_np,
                 angle_target=angle_target,
-                k_hist=K_HIST,
+                k_hist=10,
                 n_segments_base=10,
             )
-            self.seed_end = out["ref_index"]
-            self.probe_end = out["probe_index"]
             v_ref = out["ref_vector"]
             v_pro = out["probe_vector"]
             self.dtheta_manual = float(np.arctan2(v_pro[1], v_pro[0]) - np.arctan2(v_ref[1], v_ref[0]))
@@ -795,13 +920,13 @@ if __name__ == "__main__":
     ref_xy = np.array([[float(r["x_actual"]), float(r["y_actual"])] for r in rows], dtype=np.float32)
 
     # Load probe
-    csv_path = "trajectory_full.csv"
+    csv_path = "probe.csv"
     rows = []
     with open(csv_path, "r") as f:
         r = csv.DictReader(f)
         for row in r:
             rows.append(row)
-    probe_xy = np.array([[float(r["x"]), float(r["y"])] for r in rows], dtype=np.float32)
+    probe_xy = np.array([[float(r["x_actual"]), float(r["y_actual"])] for r in rows], dtype=np.float32)
 
     print(f"Loaded ref: {ref_xy.shape}, probe: {probe_xy.shape}")
 
@@ -832,6 +957,8 @@ if __name__ == "__main__":
     # Save figure
     plt.savefig("ref_probe_prediction_main.png", dpi=150, bbox_inches="tight")
 
+    plot_anchor_vectors_from_gp(gp)
+    plot_relative_angle_bases_from_gp(gp, k_hist=K_HIST, filename="relative_angle_bases.png")
     # Save predictions to CSV
     if preds is not None and len(preds) > 0:
         with open("preds.csv", "w", newline="") as f:

@@ -16,8 +16,8 @@ def train():
     y_real = df['y_actual'].values
     # x_real = x_real[18000:]
     # y_real = y_real[10000:]
-    x_real = x_real[::2]
-    y_real = y_real[::2]
+    # x_real = x_real[::2]
+    # y_real = y_real[::2]
     ref = list(zip(x_real.tolist(), y_real.tolist()))
     print("Start Training")
     gp_predictor = GP_predictor()
