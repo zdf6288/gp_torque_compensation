@@ -11,6 +11,7 @@
   <depend>numpy</depend>
   <depend>pandas</depend>
   <depend>matplotlib</depend>
+  <depend>python3-pynput</depend>
 
   <exec_depend>franka_description</exec_depend>
   <exec_depend>franka_hardware</exec_depend>

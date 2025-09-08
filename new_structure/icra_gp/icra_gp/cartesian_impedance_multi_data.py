@@ -24,14 +24,6 @@ class CartesianImpedanceMultiData(Node):
         self.param_subscription = self.create_subscription(
             StateParameter, '/state_parameter', self.stateParameterCallback, 10)
         
-        # subscribe to /task_space_command
-        self.task_command_subscription = self.create_subscription(
-            TaskSpaceCommand, '/task_space_command', self.taskCommandCallback, 10)
-        
-        # subscribe to /data_recording_enabled to know when to start recording data
-        self.data_recording_subscription = self.create_subscription(
-            Bool, '/data_recording_enabled', self.dataRecordingCallback, 10)
-        
         # publish on /effort_command
         self.effort_publisher = self.create_publisher(
             EffortCommand, '/effort_command', 10)
@@ -65,12 +57,8 @@ class CartesianImpedanceMultiData(Node):
         self.dq_des = np.array(self.get_parameter('dq_des').value, dtype=float)
         self.joint_position_threshold = self.get_parameter('joint_position_threshold').value
         
-        self.q_initial = None               # initial joint position q0
         self.t_initial = None               # initial time
         self.t_last = None                  # last time
-        self.dq_buffer = None               # buffer for joint velocity dq
-        self.zero_jacobian_buffer = None    # buffer for zero jacobian matrix in flange frame
-        self.jacobian_buffer = None         # buffer for jacobian matrix in flange frame
 
         self.task_command_received = False  # flag for task space command received
         self.x_des = None                   # desired position from task space command
@@ -91,37 +79,15 @@ class CartesianImpedanceMultiData(Node):
         self.get_logger().info('Cartesian Impedance controller node started')
         self.get_logger().info(f'Desired joint positions: {self.q_des}')
         self.get_logger().info(f'Joint position threshold: {self.joint_position_threshold}')
-
-        # filter parameters
-        self.filter_freq = 20.0                                      # filter frequency for tau
-        self.filter_beta = 2 * np.pi * self.filter_freq / 1000.0
-        self.tau_buffer = np.zeros_like(self.effort_msg.efforts)    # buffer for tau
     
         # list for data recording
-        self.tau_history = []
         self.time_history = []
         self.x_history = []
-        self.x_des_history = []
-        self.dx_history = []           
-        self.dx_des_history = []
-        self.tau_measured_history = []
-        self.gravity_history = []
 
         # set signal handler
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
         self._signal_handled = False                # flag to avoid repeated data saving
-
-    def taskCommandCallback(self, msg):
-        """callback function for /task_space_command subscriber"""
-        self.task_command_received = True
-        self.x_des = np.array(msg.x_des)
-        self.dx_des = np.array(msg.dx_des)
-        self.ddx_des = np.array(msg.ddx_des)
-        
-    def dataRecordingCallback(self, msg):
-        """callback function for /data_recording_enabled subscriber"""
-        self.data_recording_enabled = msg.data
         
     def stateParameterCallback(self, msg):
         """callback function for /state_parameter subscriber"""
@@ -136,14 +102,10 @@ class CartesianImpedanceMultiData(Node):
                 self.t_last = t_now
                 t_elapsed = 0.0
                 dt = 1e-3
-                ddq = np.zeros_like(dq)
-                self.dq_buffer = dq.copy()
             else:
                 t_elapsed = (t_now - self.t_initial).nanoseconds / 1e9
                 dt = (t_now - self.t_last).nanoseconds / 1e9
-                self.t_last = t_now
-                ddq = (dq - self.dq_buffer) / dt
-                self.dq_buffer = dq.copy()                         
+                self.t_last = t_now                       
 
             # joint position control (for joint position adjustment before trajectory_publisher starts to work)
             if self.joint_position_control_active and not self.joint_position_adjusted:
@@ -173,83 +135,17 @@ class CartesianImpedanceMultiData(Node):
 
                     return
             
-            # cartesian impedance control (after joint position adjustment)
-            if not self.task_command_received:
+            # draw a trajectory by hand
+            if not self.trajectory_started:
                 return
             
-            # get O_T_F, mass, coriolis, flange-framed zero jacobian matrix J(q) and dJ(q)
-            o_t_f_array = np.array(msg.o_t_f)                           # vectorized 4x4 pose matrix in flange frame, column-major
-            mass_matrix_array = np.array(msg.mass)                      # vectorized 7x7 mass matrix, column-major
-            coriolis_matrix_array = np.array(msg.coriolis)              # vectorized diagonal elements of 7x7 coriolis matrix
-            zero_jacobian_array = np.array(msg.zero_jacobian_flange)    # vectorized 6x7 zero jacobian matrix in flange frame, column-major
+            o_t_f_array = np.array(msg.o_t_f)               # vectorized 4x4 pose matrix in flange frame, column-major
+            o_t_f = o_t_f_array.reshape(4, 4, order='F')    # 4x4 pose matrix in flange frame, column-major
+            x = o_t_f[:3, 3]                                # 3x1 position, only x-y-z
 
-            o_t_f = o_t_f_array.reshape(4, 4, order='F')                    # 4x4 pose matrix in flange frame, column-major
-            mass_matrix = mass_matrix_array.reshape(7, 7, order='F')        # 7x7
-            coriolis_matrix = np.diag(coriolis_matrix_array)                # 7x7
-            zero_jacobian = zero_jacobian_array.reshape(6, 7, order='F')    # 6x7
-            zero_jacobian_t = zero_jacobian.T                               # 7x6, transpose of zero_jacobian
-            zero_jacobian_pinv = np.linalg.pinv(zero_jacobian)              # 7x6, pseudoinverse obtained by SVD
-
-            # to control the z axis perpendicular to ground, use 4*7 jacobian matrix
-            jacobian = zero_jacobian[:5, :]                                 # 5x7
-            jacobian_t = jacobian.T                                         # 7x5
-            jacobian_pinv = np.linalg.pinv(jacobian)                        # 5x7, pseudoinverse obtained by SVD
-            if self.jacobian_buffer is None:
-                djacobian = np.zeros_like(jacobian)
-            else:
-                djacobian = (jacobian - self.jacobian_buffer) / dt
-            self.jacobian_buffer = jacobian.copy()
-
-  
-            # get x and dx
-            x = o_t_f[:3, 3]            # 3x1 position, only x-y-z
-            dx = zero_jacobian @ dq     # 6x1 velocity
-            # ddx = zero_jacobian @ ddq + dzero_jacobian @ dq
-
-            rotation_matrix = o_t_f[:3, :3]     # 3x3 rotation matrix
-            r_error = - 0.5 * (np.cross(rotation_matrix[:, 2], self.rotation_matrix_des[:, 2])
-                + np.cross(rotation_matrix[:, 1], self.rotation_matrix_des[:, 1])
-                + np.cross(rotation_matrix[:, 0], self.rotation_matrix_des[:, 0]))
-
-            x_error = np.concatenate([x[:3] - self.x_des[:3], r_error])
-            dx_error = np.concatenate([dx[:5] - self.dx_des[:5], [0.0]])
-
-            # get K_gains and D_gains
-            lambda_matrix = np.linalg.inv(zero_jacobian @ np.linalg.inv(mass_matrix) @ zero_jacobian.T)
-            eigvals, _ = np.linalg.eig(lambda_matrix)
-            d_gains = 2 * self.eta * np.sqrt(eigvals @ self.K_gains)
-            D_gains = np.diag(d_gains)
-            
-            pd_term = self.K_gains @ x_error + D_gains @ dx_error
-            tau = (
-                mass_matrix @ jacobian_pinv @ self.ddx_des[:5]
-                + (coriolis_matrix - mass_matrix @ jacobian_pinv@ djacobian)
-                    @ jacobian_pinv @ dx[:5]
-                - jacobian_t @ pd_term[:5]
-            )
-
-            tau_nullspace = ((np.eye(7) - zero_jacobian_pinv @ zero_jacobian) 
-                @ (self.kpn_gains * (self.q_des - q) + self.dpn_gains * (self.dq_des - dq)))
-            tau = tau + tau_nullspace
-
-            tau = self.filter_beta * tau + (1 - self.filter_beta) * self.tau_buffer
-            self.tau_buffer = tau.copy()
-            tau = np.clip(tau, -50.0, 50.0)
-            
-            # publish on topic /effort_command
-            self.effort_msg.efforts = tau.tolist()
-            self.effort_publisher.publish(self.effort_msg)
-            
-            # record data only when data recording is enabled
-            if self.data_recording_enabled:
-                self.tau_history.append(tau.tolist())
-                self.time_history.append(t_elapsed)
-                self.x_history.append(x.tolist())
-                self.x_des_history.append(self.x_des.tolist())
-                self.dx_history.append(dx[:3].tolist())      
-                self.dx_des_history.append(self.dx_des[:3].tolist()) 
-                self.tau_measured_history.append(np.array(msg.effort_measured).tolist())
-                self.gravity_history.append(np.array(msg.gravity).tolist())
+            # record position data
+            self.time_history.append(t_elapsed)
+            self.x_history.append(x.tolist())
 
         except Exception as e:
             self.get_logger().error(f'Parameter error: {str(e)}')
@@ -284,7 +180,6 @@ class CartesianImpedanceMultiData(Node):
                 # switch to cartesian impedance control, receiving task space command from trajectory_publisher
                 # to move the robot to the start point of trajectory, then follow the trajectory
             else:
-                self.get_logger().warn(f'Trajectory start failed: {response.message}')
                 self.trajectory_started = False         # reset flag to retry
         except Exception as e:
             self.get_logger().error(f'Error in trajectory start callback: {str(e)}')
@@ -311,33 +206,20 @@ class CartesianImpedanceMultiData(Node):
             return
             
         try:
-            filename = 'training_data.csv'
+            filename = 'training_multi_data.csv'
             
             with open(filename, 'w', newline='') as csvfile:
                 writer = csv.writer(csvfile)
                 
                 header = ['Time(s)']
-                header.extend([f'tau_{i+1}' for i in range(len(self.tau_history[0]))])
                 header.extend(['x_actual', 'y_actual', 'z_actual'])
-                header.extend(['x_desired', 'y_desired', 'z_desired'])
-                header.extend(['dx_actual', 'dy_actual', 'dz_actual'])
-                header.extend(['dx_desired', 'dy_desired', 'dz_desired'])
-                header.extend([f'tau_measured_{i+1}' for i in range(len(self.tau_history[0]))])
-                header.extend([f'gravity_{i+1}' for i in range(len(self.tau_history[0]))])
                 writer.writerow(header)
                 
                 for i, t in enumerate(self.time_history):
                     row = [t]
-                    row.extend(self.tau_history[i])
                     row.extend(self.x_history[i][:3])
-                    row.extend(self.x_des_history[i][:3])
-                    row.extend(self.dx_history[i])
-                    row.extend(self.dx_des_history[i])
-                    row.extend(self.tau_measured_history[i])
-                    row.extend(self.gravity_history[i])
-                    writer.writerow(row)
-                    
-            self.get_logger().info(f'Successfully saved {len(self.tau_history)} data points to {filename}')
+                    writer.writerow(row)                    
+            self.get_logger().info(f'Successfully saved {len(self.time_history)} data points to {filename}')
             
         except Exception as e:
             self.get_logger().error(f'Error when saving data: {str(e)}')

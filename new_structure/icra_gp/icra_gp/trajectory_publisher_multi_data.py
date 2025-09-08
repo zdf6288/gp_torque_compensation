@@ -7,38 +7,18 @@ from custom_msgs.srv import JointPositionAdjust
 from std_msgs.msg import Header, Bool
 import numpy as np
 import time
+import threading
+from pynput import keyboard
 
 
 class TrajectoryPublisherMultiData(Node):
     
     def __init__(self):
         super().__init__('trajectory_publisher_multi_data')
-        
-        # publish on /task_space_command
-        self.trajectory_publisher = self.create_publisher(
-            TaskSpaceCommand, '/task_space_command', 10)
-        self.timer = self.create_timer(0.001, self.timer_callback)  # publish at 1000 Hz
-
-        # publish on /data_recording_enabled to inform other nodes when to start recording
-        self.data_recording_publisher = self.create_publisher(
-            Bool, '/data_recording_enabled', 10)
 
         # subscribe to /state_parameter to get robot current state
         self.state_subscription = self.create_subscription(
             StateParameter, '/state_parameter', self.stateCallback, 10)
-        
-        # subscribe to /TwistLeft or /TwistRight according to arm parameter
-        self.declare_parameter('arm', 'left')
-        self.arm = self.get_parameter('arm').value
-        if self.arm == "left":
-            self.twist_subscription = self.create_subscription(
-                LambdaCommand, '/TwistLeft', self.lambdaCallback, 10)
-        elif self.arm == "right":
-            self.twist_subscription = self.create_subscription(
-                LambdaCommand, '/TwistRight', self.lambdaCallback, 10)
-        else:
-            self.get_logger().error(f'Invalid arm parameter: {self.arm}. Must be "left" or "right"')
-            self.twist_subscription = None
         
         # Create service server for joint position adjustment
         self.joint_position_service = self.create_service(
@@ -50,35 +30,21 @@ class TrajectoryPublisherMultiData(Node):
         self.robot_initial_y = None
         self.robot_initial_z = None
         self.robot_initial_received = False
-        self.declare_parameter('transition_duration', 3.0)  # time to reach start point (s)
         self.declare_parameter('use_transition', True)      # in multi-class test, transition is a manual process
         self.transition_duration = self.get_parameter('transition_duration').value
         self.use_transition = self.get_parameter('use_transition').value
         
         self.trajectory_enabled = False         # flag controlled by service
         
+        # keyboard listening variables
+        self.key_pressed_d = False              # flag indicating the 'd' key on keyboard is pressed
+        self.keyboard_listener = None           # keyboard listener object
+        self.keyboard_thread = None             # thread for keyboard listening
+        
         self.start_time = self.get_clock().now()
         self.transition_start_time = None
         self.transition_complete = False        # flag indicating the completion of moving to the start point of trajectory
-        
-        # start point of trajectory
-        self.trajectory_start_x = 0.3
-        self.trajectory_start_y = 0.0
-        self.trajectory_start_z = 0.65
 
-        # for convertion from lambda command to trajectory
-        self.t_buffer = None
-        self.x_buffer = None
-        self.y_buffer = None
-        self.z_buffer = None
-        self.lambda_linear_x = 0.0
-        self.lambda_linear_y = 0.0
-        self.lambda_linear_z = 0.0
-        self.filter_freq = 5                    # for the velocity filter
-        self.filter_beta = 2 * np.pi * self.filter_freq / 1000.0
-        self.dx_buffer = 0.0
-        self.dy_buffer = 0.0
-        self.dz_buffer = 0.0
         
         self.get_logger().info('Trajectory publisher node started')
         self.get_logger().info(f'Publishing trajectory at 1000 Hz')
@@ -88,6 +54,29 @@ class TrajectoryPublisherMultiData(Node):
             self.get_logger().info(f'Transition duration: {self.transition_duration} s')
         self.get_logger().info('Waiting for joint position adjustment service call to enable trajectory...')
     
+    # keyboard listening functions
+    def on_key_press(self, key):
+        """callback function of keyboard listener"""
+        try:
+            if key.char == 'd':
+                self.key_pressed_d = True
+                self.get_logger().info('Key "d" pressed! Continuing trajectory execution...')
+        except AttributeError:
+            pass
+    
+    def start_keyboard_listener(self):
+        """start keyboard listener"""
+        self.key_pressed_d = False
+        self.keyboard_listener = keyboard.Listener(on_press=self.on_key_press)
+        self.keyboard_listener.start()
+        self.get_logger().info('Keyboard listener started. Press "d" to continue...')
+    
+    def stop_keyboard_listener(self):
+        """stop keyboard listener"""
+        if self.keyboard_listener:
+            self.keyboard_listener.stop()
+            self.keyboard_listener = None
+    
     def joint_position_callback(self, request, response):
         """Service callback for joint position adjustment"""
         try:
@@ -95,9 +84,13 @@ class TrajectoryPublisherMultiData(Node):
             self.get_logger().info(f'q_des: {request.q_des}')
             self.get_logger().info(f'dq_des: {request.dq_des}')
             
-            self.trajectory_enabled = True
-            while True:
+            self.start_keyboard_listener()
+            while not self.key_pressed_d:
                 pass
+            self.stop_keyboard_listener()
+            self.key_pressed_d = False
+            
+            self.trajectory_enabled = True
             
             # reset timing for trajectory
             self.start_time = self.get_clock().now()
@@ -147,88 +140,9 @@ class TrajectoryPublisherMultiData(Node):
             self.robot_position_y = o_t_f[1, 3]
             self.robot_position_z = o_t_f[2, 3]
     
-    def lambdaCallback(self, msg):
-        """callback function of /TwistLeft or /TwistRight subscriber"""
-        try:
-            self.lambda_linear_x = msg.linear.x
-            self.lambda_linear_y = msg.linear.y
-            self.lambda_linear_z = msg.linear.z
-        except Exception as e:
-            self.get_logger().error(f'Error in lambda callback: {str(e)}')
-    
     def timer_callback(self):
         """timer callback function, period: 1ms"""
-        try:
-            # check if joint position adjustment is completed
-            if not self.trajectory_enabled:
-                return
-                
-            # wait for initialization of robot position
-            if not self.robot_initial_received:
-                return
-            
-            # get time, initialize varaibles
-            current_time = self.get_clock().now()
-            elapsed_time = (current_time - self.start_time).nanoseconds / 1e9
-            x, y, z = 0.0, 0.0, 0.0
-            dx, dy, dz = 0.0, 0.0, 0.0
-            ddx, ddy, ddz = 0.0, 0.0, 0.0
-            
-            if self.use_transition and not self.transition_complete:
-                # transition: from adjusted robot position to trajectory start point
-                transition_elapsed = (current_time - self.transition_start_time).nanoseconds / 1e9
-            
-            # trajectory determined by lambda command
-            if self.transition_complete or not self.use_transition:
-                if elapsed_time > 0.0:
-                    if self.t_buffer is None:
-                        dt = 1e-3
-                    else:
-                        dt = elapsed_time - self.t_buffer
-                    self.t_buffer = elapsed_time
-                    
-                    # velocity: (dx, dy, dz) for dx_des[:3]
-                    dx = self.filter_beta * (self.lambda_linear_x - self.dx_buffer) + (1 - self.filter_beta) * self.dx_buffer
-                    dy = self.filter_beta * (self.lambda_linear_y - self.dy_buffer) + (1 - self.filter_beta) * self.dy_buffer
-                    dz = self.filter_beta * (self.lambda_linear_z - self.dz_buffer) + (1 - self.filter_beta) * self.dz_buffer
-
-                    # acceleration: (ddx, ddy, ddz) for ddx_des[:3]
-                    ddx = (dx - self.dx_buffer) / dt
-                    ddy = (dy - self.dy_buffer) / dt
-                    ddz = (dz - self.dz_buffer) / dt
-
-                    # position: (x, y, z) for x_des[:3]
-                    x = self.x_buffer
-                    y = self.y_buffer
-                    z = self.z_buffer
-                    self.x_buffer = x + dx * dt
-                    self.y_buffer = y + dy * dt
-
-
-                    self.dx_buffer = dx
-                    self.dy_buffer = dy
-                    self.dz_buffer = dz
-            
-            # publish on /task_space_command
-            trajectory_msg = TaskSpaceCommand()
-            trajectory_msg.header = Header()
-            trajectory_msg.header.stamp = current_time.to_msg()
-            trajectory_msg.header.frame_id = "base_link"
-            trajectory_msg.x_des = [x, y, z, 0.0, 0.0, 0.0]         # position (x, y, z, roll, pitch, yaw)
-            trajectory_msg.dx_des = [dx, dy, 0.0, 0.0, 0.0, 0.0]     # velocity
-            trajectory_msg.ddx_des = [ddx, ddy, 0.0, 0.0, 0.0, 0.0] # acceleration
-            
-            self.trajectory_publisher.publish(trajectory_msg)
-            
-            # publish data recording status
-            data_recording_msg = Bool()
-            data_recording_msg.data = self.transition_complete or not self.use_transition
-            self.data_recording_publisher.publish(data_recording_msg)
-                
-        except Exception as e:
-            self.get_logger().error(f'Error in trajectory publisher: {str(e)}')
-            self.get_logger().error(f'Current state: transition_complete={self.transition_complete}, elapsed_time={elapsed_time}')
-
+        return
 
 def main(args=None):
     rclpy.init(args=args)
@@ -238,6 +152,7 @@ def main(args=None):
         rclpy.spin(trajectory_publisher_multi_data_node)
         pass
     finally:
+        trajectory_publisher_multi_data_node.stop_keyboard_listener()
         trajectory_publisher_multi_data_node.destroy_node()
         rclpy.shutdown()
 
