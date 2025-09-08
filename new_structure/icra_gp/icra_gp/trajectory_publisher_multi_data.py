@@ -31,7 +31,6 @@ class TrajectoryPublisherMultiData(Node):
         self.robot_initial_z = None
         self.robot_initial_received = False
         self.declare_parameter('use_transition', True)      # in multi-class test, transition is a manual process
-        self.transition_duration = self.get_parameter('transition_duration').value
         self.use_transition = self.get_parameter('use_transition').value
         
         self.trajectory_enabled = False         # flag controlled by service
@@ -48,10 +47,6 @@ class TrajectoryPublisherMultiData(Node):
         
         self.get_logger().info('Trajectory publisher node started')
         self.get_logger().info(f'Publishing trajectory at 1000 Hz')
-        self.get_logger().info(f'Arm parameter: {self.arm}')
-        self.get_logger().info(f'Trajectory start point: ({self.trajectory_start_x:.3f}, {self.trajectory_start_y:.3f}, {self.trajectory_start_z:.3f})')
-        if self.use_transition:
-            self.get_logger().info(f'Transition duration: {self.transition_duration} s')
         self.get_logger().info('Waiting for joint position adjustment service call to enable trajectory...')
     
     # keyboard listening functions

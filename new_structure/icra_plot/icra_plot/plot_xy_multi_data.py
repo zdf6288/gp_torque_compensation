@@ -48,9 +48,9 @@ def plot_xy_trajectory(csv_filename):
         print(f'Error when plotting data: {str(e)}')
 
 def main():
-    parser = argparse.ArgumentParser(description='Plot desired vs actual position trajectory on x-y plane from CSV file')
-    parser.add_argument('csv_file', nargs='?', default='training_data.csv',
-                       help='CSV file to plot (default: training_data.csv)')
+    parser = argparse.ArgumentParser(description='Plot actual position trajectory on x-y plane from CSV file')
+    parser.add_argument('csv_file', nargs='?', default='training_multi_data.csv',
+                       help='CSV file to plot (default: training_multi_data.csv)')
     
     args = parser.parse_args()
     

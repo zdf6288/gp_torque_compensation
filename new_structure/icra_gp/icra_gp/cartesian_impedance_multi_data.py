@@ -123,6 +123,7 @@ class CartesianImpedanceMultiData(Node):
                         self.effort_msg.efforts = tau.tolist()
                         self.effort_publisher.publish(self.effort_msg)
                         self.start_trajectory()
+                        return
                 else:
                     # PD control for joint positions
                     self.i_error = self.i_error + (self.q_des - q) * dt
@@ -164,7 +165,6 @@ class CartesianImpedanceMultiData(Node):
             
             future = self.joint_position_client.call_async(request)
             future.add_done_callback(self.trajectory_start_callback)
-            self.trajectory_started = True
             self.get_logger().info('Requested trajectory start via service call')
             
         except Exception as e:
@@ -177,8 +177,8 @@ class CartesianImpedanceMultiData(Node):
             if response.success:
                 self.get_logger().info(f'Trajectory started successfully: {response.message}')
                 self.joint_position_control_active = False  # joint position adjestment completed
-                # switch to cartesian impedance control, receiving task space command from trajectory_publisher
-                # to move the robot to the start point of trajectory, then follow the trajectory
+                self.trajectory_started = True
+                # switch to drawing trajectory by hand
             else:
                 self.trajectory_started = False         # reset flag to retry
         except Exception as e:
@@ -201,8 +201,8 @@ class CartesianImpedanceMultiData(Node):
     
     def save_data_to_file(self):
         """save data to CSV file"""
-        if not self.tau_history:
-            self.get_logger().warning('No data to save - tau_history is empty')
+        if not self.x_history:
+            self.get_logger().warning('No data to save - x_history is empty')
             return
             
         try:
