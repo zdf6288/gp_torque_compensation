@@ -50,6 +50,10 @@ class SkyGP_MOE:
         self.BATCH_STEP = int(batch_step)
         self.WINDOW_SIZE = int(window_size) if window_size is not None else None
         self.LIGHT_MAXITER = int(light_maxiter)
+        
+        # ===== Shared hyperparameters =====
+        self.global_params = None   # {'log_sigma_f', 'log_sigma_n', 'log_lengthscale'}
+        self._since_global_opt = 0  # 新增样本计数（触发全局优化）
 
     # ---------------------------
     # 内核与初始化
@@ -156,38 +160,35 @@ class SkyGP_MOE:
         self.update_param_incremental(x, y, model)
 
         # 在线优化触发（只优化该专家，不共享）
-        cnt = self.localCount[model]
-        if (cnt == self.MIN_POINTS) or (cnt > self.MIN_POINTS and (cnt - self.MIN_POINTS) % self.BATCH_STEP == 0):
+        # —— 改为“全局触发”：累计一定数量新样本后做一次全局共享超参优化 ——
+        self._since_global_opt += 1
+        total_pts = sum(self.localCount)
+        if (total_pts >= self.MIN_POINTS) and (self._since_global_opt % self.BATCH_STEP == 0):
             try:
-                ok_any = False
-                for p_out in range(self.y_dim):
-                    ok_any |= self.optimize_hyperparams(
-                        expert_idx=model,
-                        p=p_out,
-                        max_iter=self.LIGHT_MAXITER,
-                        verbose=False,
-                        window_size=self.WINDOW_SIZE
-                    )
-                if ok_any:
-                    # 超参改变后清空预测缓存
-                    self.last_prediction_cache.clear()
+                ok = self.optimize_hyperparams_global(
+                    max_iter=self.LIGHT_MAXITER,
+                    verbose=True,
+                    window_size=self.WINDOW_SIZE,
+                    adam_lr=1e-3   # 可用你的 params["adam_lr"]
+                )
+                if ok:
+                    self._since_global_opt = 0  # 重置计数
             except Exception as e:
-                print(f"[opt-online] expert {model} 优化失败: {e}")
+                print(f"[opt-online-global] 失败: {e}")
 
     # ---------------------------
     # 增量/重建 & 预测
     # ---------------------------
     def update_param(self, model):
-        """使用当前超参+全量数据，重建该专家的 L 和 alpha"""
         if self.localCount[model] == 0:
             return
-        p = 0  # 逐输出维度独立重建
+        p = 0
         idx = self.localCount[model]
-        params = self.model_params[model]
-        sigma_f = np.exp(params['log_sigma_f'][p])
-        sigma_n = np.exp(params['log_sigma_n'][p])
-        lengthscale = (np.exp(params['log_lengthscale']) if self.y_dim == 1
-                       else np.exp(params['log_lengthscale'][:, p]))
+        # >>> 改这里：用共享 or 私有log超参
+        log_sigma_f, log_sigma_n, log_lengthscale = self._get_param_logs(model, p)
+        sigma_f = np.exp(log_sigma_f)
+        sigma_n = np.exp(log_sigma_n)
+        lengthscale = np.exp(log_lengthscale)
 
         X_subset = self.X_list[model][:, :idx]
         Y_subset = self.Y_list[model][:idx, :]  # (idx, P)
@@ -208,17 +209,16 @@ class SkyGP_MOE:
             self.alpha_all[model][:idx, p] = solve_triangular(L.T, aux_alpha, lower=False)
 
     def update_param_incremental(self, x, y, model):
-        """数据新增（超参不变）时增量更新 L/alpha"""
         p = 0
         idx = self.localCount[model]
         if idx == 0:
             return
 
-        params = self.model_params[model]
-        sigma_f = np.exp(params['log_sigma_f'][p])
-        sigma_n = np.exp(params['log_sigma_n'][p])
-        lengthscale = (np.exp(params['log_lengthscale']) if self.y_dim == 1
-                       else np.exp(params['log_lengthscale'][:, p]))
+        # >>> 改这里
+        log_sigma_f, log_sigma_n, log_lengthscale = self._get_param_logs(model, p)
+        sigma_f = np.exp(log_sigma_f)
+        sigma_n = np.exp(log_sigma_n)
+        lengthscale = np.exp(log_lengthscale)
 
         if idx == 1:
             # 第一条数据时，直接构建 1x1
@@ -274,6 +274,7 @@ class SkyGP_MOE:
 
         mus, vars_ = [], []
         for idx in selected:
+            # print("Using expert", idx)
             self.expert_usage_counts[idx] += 1
 
             n_valid = self.localCount[idx]
@@ -291,11 +292,10 @@ class SkyGP_MOE:
             var = np.zeros(self.y_dim)
 
             for p in range(self.y_dim):
-                params = self.model_params[idx]
-                sigma_f = np.exp(params['log_sigma_f'][p])
-                sigma_n = np.exp(params['log_sigma_n'][p])   # 预测方差不使用噪声项，但保留以备需要
-                lengthscale = (np.exp(params['log_lengthscale']) if self.y_dim == 1
-                               else np.exp(params['log_lengthscale'][:, p]))
+                log_sigma_f, log_sigma_n, log_lengthscale = self._get_param_logs(idx, p)
+                sigma_f = np.exp(log_sigma_f)
+                # sigma_n 当前仅用于需要时
+                lengthscale = np.exp(log_lengthscale)
 
                 k_star = self.kernel_np(X_snapshot, x_query[:, None], lengthscale, sigma_f).flatten()
                 k_xx = sigma_f ** 2
@@ -316,30 +316,26 @@ class SkyGP_MOE:
             mus.append(mu)
             vars_.append(var)
 
-        mus = np.stack(mus)     # (k, P)
-        vars_ = np.stack(vars_) # (k, P)
-        inv_vars = 1.0 / (vars_ + 1e-9)
-        weights = inv_vars / np.sum(inv_vars, axis=0, keepdims=True)
-
-        mu_moe = np.sum(weights * mus, axis=0)
-        var_moe = np.sum(weights * vars_, axis=0)
-        var_moe = np.clip(var_moe, 1e-6, 1e6)
-        return mu_moe, var_moe
-        # mus = np.stack(mus)
-        # vars_ = np.stack(vars_)
+        # mus = np.stack(mus)     # (k, P)
+        # vars_ = np.stack(vars_) # (k, P)
         # inv_vars = 1.0 / (vars_ + 1e-9)
-        # sigma0_sq = np.exp(self.model_params[selected[0]]['log_sigma_f'][0])**2
+        # weights = inv_vars / np.sum(inv_vars, axis=0, keepdims=True)
 
-        # mu_weighted = np.sum(inv_vars * mus, axis=0)
-        # denom = np.sum(inv_vars, axis=0)
-
-        # mu_corr = mu_weighted
-        # denom_corr = denom - (len(mus) - 1) / sigma0_sq
-        # mu_bcm = mu_corr / (denom_corr + 1e-9)
-        # var_bcm = 1.0 / (denom_corr + 1e-9)
-        # var_bcm = np.clip(var_bcm, 1e-6, 1e6)
-
-        # return mu_bcm, var_bcm
+        # mu_moe = np.sum(weights * mus, axis=0)
+        # var_moe = np.sum(weights * vars_, axis=0)
+        # var_moe = np.clip(var_moe, 1e-6, 1e6)
+        # return mu_moe, var_moe
+        mus = np.stack(mus)
+        vars_ = np.stack(vars_)
+        inv_vars = 1.0 / (vars_ + 1e-9)
+        sigma0_sq = np.exp(self.model_params[selected[0]]['log_sigma_f'][0])**2
+        mu_weighted = np.sum(inv_vars * mus, axis=0)
+        denom = np.sum(inv_vars, axis=0)
+        mu_corr = mu_weighted
+        denom_corr = denom - (len(mus) - 1) / sigma0_sq
+        mu_bcm = mu_corr / (denom_corr + 1e-9)
+        var_bcm = 1.0 / (denom_corr + 1e-9)
+        return mu_bcm, var_bcm
 
     # ---------------------------
     # 数据写入（含创建/继承/替换逻辑）
@@ -657,7 +653,197 @@ class SkyGP_MOE:
 
         # 超参变化 => 重建该专家的 Cholesky
         self.update_param(expert_idx)
+        print(f"[opt-Adam] expert {expert_idx} output {p} 优化完成")
         # 预测缓存失效
         self.last_prediction_cache.clear()
 
         return success
+
+    def init_global_params(self, pretrained_params=None):
+            """
+            初始化全局共享超参（log 形式）。
+            - y_dim==1: log_lengthscale.shape = (D,)
+            - y_dim>1 : log_lengthscale.shape = (D, P)  (每个输出一套 lengthscale)
+            """
+            if pretrained_params:
+                outputscale, noise, lengthscale = pretrained_params
+                log_sigma_f = np.log(outputscale.reshape(-1))
+                log_sigma_n = np.log(noise.reshape(-1))
+                if self.y_dim == 1:
+                    log_lengthscale = np.log(lengthscale.reshape(self.x_dim))
+                else:
+                    # 允许传入 (D,P) 或 (D,)；不匹配则广播
+                    L = np.asarray(lengthscale)
+                    if L.ndim == 1:  # (D,)
+                        L = np.tile(L[:, None], (1, self.y_dim))
+                    log_lengthscale = np.log(L)
+            else:
+                log_sigma_f = np.log(np.ones(self.y_dim))
+                log_sigma_n = np.log(np.ones(self.y_dim) * 0.01)
+                if self.y_dim == 1:
+                    log_lengthscale = np.log(np.ones((self.x_dim,)))
+                else:
+                    log_lengthscale = np.log(np.ones((self.x_dim, self.y_dim)))
+
+            self.global_params = {
+                'log_sigma_f': log_sigma_f.astype(np.float64),
+                'log_sigma_n': log_sigma_n.astype(np.float64),
+                'log_lengthscale': log_lengthscale.astype(np.float64),
+            }
+
+    def _get_param_logs(self, expert_idx, p):
+        """
+        统一入口：拿到“log 参数”。若有全局共享，则用全局；否则回退到该专家的私有。
+        返回: (log_sigma_f_p, log_sigma_n_p, log_lengthscale_p) 其中 log_lengthscale_p 形状为 (D,)
+        """
+        if self.global_params is not None:
+            lsf = float(self.global_params['log_sigma_f'][p])
+            lsn = float(self.global_params['log_sigma_n'][p])
+            if self.y_dim == 1:
+                ll = self.global_params['log_lengthscale'].copy()  # (D,)
+            else:
+                ll = self.global_params['log_lengthscale'][:, p].copy()  # (D,)
+            return lsf, lsn, ll
+        else:
+            params = self.model_params[expert_idx]
+            lsf = float(params['log_sigma_f'][p])
+            lsn = float(params['log_sigma_n'][p])
+            if self.y_dim == 1:
+                ll = params['log_lengthscale'].copy()
+            else:
+                ll = params['log_lengthscale'][:, p].copy()
+            return lsf, lsn, ll
+
+    def rebuild_all_experts(self):
+        """按当前（可能更新后的）超参，重建所有专家的 Cholesky 与 alpha。"""
+        for e in range(len(self.X_list)):
+            if self.localCount[e] > 0:
+                self.update_param(e)
+        self.last_prediction_cache.clear()
+        
+    def optimize_hyperparams_global(
+        self,
+        max_iter=60,
+        verbose=False,
+        window_size=None,
+        adam_lr=1e-3,
+        weight_decay=0.0,
+        jitter=1e-6
+    ):
+        """
+        用所有专家的数据（每个专家取最近 window_size 个样本）联合最大化总 MLL，
+        训练一组“共享”log 超参，并回填到 self.global_params，然后重建所有专家。
+        """
+        # 若还没初始化共享超参，先按默认初始化一份
+        if self.global_params is None:
+            self.init_global_params()
+
+        # 收集各专家窗口
+        groups = []  # list of (X_np[D,m], y_np[m], out_index p)
+        total_m = 0
+        for e in range(len(self.X_list)):
+            n = self.localCount[e]
+            if n < 3:
+                continue
+            if window_size is not None and n > window_size:
+                start = n - window_size
+            else:
+                start = 0
+            X_np = self.X_list[e][:, start:n]  # (D, m)
+            m = X_np.shape[1]
+            total_m += m
+            for p in range(self.y_dim):
+                y_np = self.Y_list[e][p, start:n].copy()  # (m,)
+                groups.append((X_np, y_np, p))
+
+        if len(groups) == 0:
+            if verbose:
+                print("[opt-Adam-global] 有效数据不足，跳过")
+            return False
+
+        device = torch.device("cpu")
+        # --- 共享 log 超参（torch 参数） ---
+        log_sigma_f = torch.nn.Parameter(
+            torch.tensor(self.global_params['log_sigma_f'], dtype=torch.float64, device=device)
+        )
+        log_sigma_n = torch.nn.Parameter(
+            torch.tensor(self.global_params['log_sigma_n'], dtype=torch.float64, device=device)
+        )
+        log_lengthscale = torch.nn.Parameter(
+            torch.tensor(self.global_params['log_lengthscale'], dtype=torch.float64, device=device)
+        )
+
+        opt = torch.optim.Adam(
+            [{"params": [log_sigma_f, log_sigma_n, log_lengthscale], "lr": adam_lr, "weight_decay": weight_decay}]
+        )
+        two_pi = torch.tensor(2.0 * np.pi, dtype=torch.float64, device=device)
+
+        def mll_one_group(X_np, y_np, out_p):
+            X = torch.tensor(X_np, dtype=torch.float64, device=device)   # (D, m)
+            y = torch.tensor(y_np, dtype=torch.float64, device=device)   # (m,)
+            m = X.shape[1]
+            if self.y_dim == 1:
+                ls = torch.exp(log_lengthscale)                 # (D,)
+            else:
+                ls = torch.exp(log_lengthscale[:, out_p])       # (D,)
+            sf2 = torch.exp(2.0 * log_sigma_f[out_p])
+            sn2 = torch.exp(2.0 * log_sigma_n[out_p])
+
+            Xs = X / ls.view(-1, 1)
+            a2 = torch.sum(Xs**2, dim=0, keepdim=True)
+            sqd = a2.T + a2 - 2.0 * (Xs.T @ Xs)
+            sqd = sqd.clamp_min(0.0)
+
+            K_rbf = sf2 * torch.exp(-0.5 * sqd)
+            K = K_rbf.clone()
+            K.view(-1)[::m + 1] += sn2
+
+            try:
+                L = torch.linalg.cholesky(K + jitter * torch.eye(m, dtype=torch.float64, device=device))
+            except RuntimeError:
+                L = torch.linalg.cholesky(K + (1e-4) * torch.eye(m, dtype=torch.float64, device=device))
+
+            v = torch.cholesky_solve(y.view(-1, 1), L)
+            alpha = v.view(-1)
+            mll = -0.5 * (y @ alpha) - torch.sum(torch.log(torch.diag(L))) - 0.5 * m * torch.log(two_pi)
+            return mll
+
+        losses = []
+        for step in range(int(max_iter)):
+            opt.zero_grad()
+            total_mll = 0.0
+            for (X_np, y_np, p) in groups:
+                total_mll = total_mll + mll_one_group(X_np, y_np, p)
+            loss = -total_mll
+            loss.backward()
+
+            with torch.no_grad():
+                log_sigma_n.clamp_(min=np.log(1e-5), max=np.log(10.0))
+                log_sigma_f.clamp_(min=np.log(1e-5), max=np.log(10.0))
+                if self.y_dim == 1:
+                    log_lengthscale.clamp_(min=np.log(1e-3), max=np.log(1e3))
+                else:
+                    log_lengthscale.clamp_(min=np.log(1e-3), max=np.log(1e3))
+
+            opt.step()
+            losses.append(float(loss.item()))
+
+            if verbose and (step % 10 == 0 or step == max_iter - 1):
+                print(f"[opt-Adam-global] step {step:03d}, -MLL={loss.item():.4f}, lr={adam_lr}, groups={len(groups)}")
+
+        # 回填到 numpy
+        self.global_params['log_sigma_f'] = log_sigma_f.detach().cpu().numpy().astype(np.float64)
+        self.global_params['log_sigma_n'] = log_sigma_n.detach().cpu().numpy().astype(np.float64)
+        self.global_params['log_lengthscale'] = log_lengthscale.detach().cpu().numpy().astype(np.float64)
+
+        # 用新超参重建所有专家
+        self.rebuild_all_experts()
+
+        if verbose:
+            plt.figure(figsize=(6, 3))
+            plt.plot(losses)
+            plt.xlabel("Step"); plt.ylabel("Negative total MLL")
+            plt.title("Global Hyperparameter Optimization")
+            plt.grid(True); plt.tight_layout(); plt.show()
+
+        return True

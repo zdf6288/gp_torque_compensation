@@ -29,17 +29,21 @@ MAX_EXPERTS = 80
 MIN_POINTS_OFFLINE = 1
 WINDOW_SIZE = None
 METHOD_ID = 1                    # 1=polar->delta; 5=polar+delta->delta
-DEFAULT_SPEED = 0.01             # speed used to convert polyline length to time for equal-time resampling
+DEFAULT_SPEED = 0.1             # speed used to convert polyline length to time for equal-time resampling
 STOP_TAIL_ZERO_STEPS = 0         # set deltas to zero for the last N seeds near the end
 np.random.seed(SEED)
 torch.manual_seed(SEED)
 
 # Tunable parameters
-ANCHOR_ANGLE = np.radians(30)  # angle (rad) for anchor correspondence
+VERBOSE = False
+ANCHOR_ANGLE = np.radians(40)  # angle (rad) for anchor correspondence
 K_HIST = 10                      # seed length (history window)
-NEAREST_K = 2
-MAX_DATA_PER_EXPERT = 200
-
+NEAREST_K = 1
+MAX_DATA_PER_EXPERT = 500
+BASE_SCALE = 100                  # initial guess for scale
+ROLLOUT_STEPS = 500               # steps to rollout in demo
+PHI0_K_PROBE = 500                        # segments to average for phi0 in anchor finding
+PHI0_K_REF = 500                        # segments to average for phi0 in anchor finding
 # ==============================
 # Method Hyperparameters
 # ==============================
@@ -183,13 +187,13 @@ def train_moe(dataset, method_id: int = METHOD_ID):
 
     params = METHOD_HPARAM.get(method_id, {"adam_lr": 0.001, "adam_steps": 200})
     if hasattr(moe, "optimize_hyperparams") and params["adam_steps"] > 0:
-        for e in range(len(moe.X_list)):
-            if moe.localCount[e] >= MIN_POINTS_OFFLINE:
-                for p in range(2):
-                    moe.optimize_hyperparams(
-                        e, p, params["adam_steps"], WINDOW_SIZE, False, params["adam_lr"]
-                    )
-
+        # 新（共享超参一次性训练）
+        moe.optimize_hyperparams_global(
+            max_iter=params["adam_steps"],
+            verbose=False,
+            window_size=WINDOW_SIZE,
+            adam_lr=params["adam_lr"],
+        )
     return {"moe": moe, "scaler": scaler, "input_dim": Din}
 
 
@@ -456,14 +460,12 @@ def first_index_reach_threshold(
     inclusive: bool = True
 ) -> int:
     """
-    Scan consecutive valid points (by mask). For each pair (i_prev -> i_curr),
-    check whether target angle is *between* angles[i_prev] and angles[i_curr]
-    along the minimal signed rotation. If yes, return i_prev.
+    对相邻有效点 (i_prev -> i_curr) 做区间判定：如果 target 或 -target
+    任意一个在从 angles[i_prev] 到 angles[i_curr] 的最小有符号旋转区间内，
+    就返回 i_prev。否则回退到二者中“更接近”的点的前一个索引。
 
-    - Angles are in radians.
-    - Uses circular difference in (-pi, pi] to handle wrap-around.
-    - If no bracket is found, fall back to the closest angle (and return its previous
-      valid index if available, else itself).
+    - 角度单位：弧度
+    - 使用 (-pi, pi] 的最小有符号差处理环绕
     """
     idxs = np.where(mask)[0]
     if idxs.size == 0:
@@ -471,46 +473,42 @@ def first_index_reach_threshold(
     if idxs.size == 1:
         return int(idxs[0])
 
-    # helper: minimal signed diff in (-pi, pi]
     def _diff(a, b):
-        # your project already has angle_diff_mod_pi(a, b)
+        # 最小有符号差 in (-pi, pi]
         return angle_diff_mod_pi(a, b)
 
-    # sweep pairs of consecutive valid indices
+    def _bracket_hit(a, b, t) -> bool:
+        d  = _diff(b, a)   # a -> b 的最小旋转
+        dt = _diff(t, a)   # a -> t 的最小旋转
+        if d > 0:
+            return (0.0 <= dt <= d) if inclusive else (0.0 < dt < d)
+        elif d < 0:
+            return (d <= dt <= 0.0) if inclusive else (d < dt < 0.0)
+        else:
+            # d == 0：a 与 b 重合，仅当 t == a 时命中（考虑数值容差）
+            return inclusive and (abs(dt) <= 1e-12)
+
+    ang = np.asarray(angles, dtype=float)
+    t_pos = float(target)
+    t_neg = -t_pos
+
+    # 扫描相邻有效索引对
     for j in range(1, len(idxs)):
         i_prev = idxs[j - 1]
         i_curr = idxs[j]
+        a = float(ang[i_prev])
+        b = float(ang[i_curr])
 
-        a = float(angles[i_prev])
-        b = float(angles[i_curr])
-
-        d = _diff(b, a)         # signed rotation from a -> b (shortest way), in (-pi, pi]
-        dt = _diff(target, a)   # signed rotation from a -> target, same convention
-
-        if d > 0:
-            # going CCW from a to b
-            if inclusive:
-                hit = (0.0 <= dt <= d)
-            else:
-                hit = (0.0 < dt < d)
-        elif d < 0:
-            # going CW from a to b
-            if inclusive:
-                hit = (d <= dt <= 0.0)
-            else:
-                hit = (d < dt < 0.0)
-        else:
-            # d == 0: no rotation (angles equal) → only hit if target == a (when inclusive)
-            hit = inclusive and (abs(dt) == 0.0)
-
-        if hit:
+        if _bracket_hit(a, b, t_pos) or _bracket_hit(a, b, t_neg):
             return int(i_prev)
 
-    # ---- fallback: pick the closest angle; prefer returning its previous valid index ----
-    diffs = np.array([abs(_diff(target, float(angles[i]))) for i in idxs])
+    # 回退：选择对 {+target, -target} 中更接近的那个
+    diffs_pos = np.array([abs(_diff(float(ang[i]), t_pos)) for i in idxs])
+    diffs_neg = np.array([abs(_diff(float(ang[i]), t_neg)) for i in idxs])
+    diffs = np.minimum(diffs_pos, diffs_neg)
+
     k = int(idxs[int(np.argmin(diffs))])
-    # prefer previous valid index if it exists
-    pos = np.where(idxs == k)[0][0]
+    pos = int(np.where(idxs == k)[0][0])
     return int(idxs[pos - 1]) if pos > 0 else k
 
 
@@ -549,26 +547,14 @@ def _compute_base_unit_vec(points, n_segments: int = 10) -> np.ndarray:
     return v / max(np.linalg.norm(v), 1e-12)
 
 
-def get_anchor_correspondence(
-    ref_pts,
-    probe_pts,
-    angle_target,
-    *,
-    k_hist: int = 10,
-    min_r: float = 1e-3,
-    n_segments_base: int = 10,
-):
-    """
-    Compute anchor correspondence on reference and probe by selecting the first index
-    whose relative angle crosses `angle_target`. Return indices, vectors, points,
-    and base unit vectors for both ref and probe.
-    """
+def get_anchor_correspondence(ref_pts, probe_pts, angle_target, *, min_r: float = 1e-3, n_segments_base: int = 10):
     ref_pts = np.asarray(ref_pts, dtype=np.float64)
     probe_pts = np.asarray(probe_pts, dtype=np.float64)
     assert ref_pts.shape[0] >= 2 and probe_pts.shape[0] >= 2, "ref/probe require at least 2 points"
 
-    ref_ang, ref_mask, _ = _angles_with_phi0(ref_pts, k_hist=k_hist, min_r=min_r)
-    pro_ang, pro_mask, _ = _angles_with_phi0(probe_pts, k_hist=k_hist, min_r=min_r)
+    # 用“原始轨迹上的弦向量平均”定义的 φ0
+    ref_ang, ref_mask, _ = _angles_with_phi0(ref_pts,  k_hist=PHI0_K_REF, min_r=min_r)
+    pro_ang, pro_mask, _ = _angles_with_phi0(probe_pts, k_hist=PHI0_K_PROBE, min_r=min_r)
 
     i_ref = first_index_reach_threshold(ref_ang, ref_mask, angle_target, inclusive=True)
     i_pro = first_index_reach_threshold(pro_ang, pro_mask, angle_target, inclusive=True)
@@ -670,8 +656,8 @@ def plot_relative_angle_bases_from_gp(gp, *, k_hist=K_HIST, vec_len=None, filena
     probe = np.asarray(gp.probe_pts, dtype=np.float64)
 
     # Compute unit base vectors (phi0) at each origin
-    u_ref, phi_ref = _phi0_unit(ref, k_hist=k_hist)
-    u_pro, phi_pro = _phi0_unit(probe, k_hist=k_hist)
+    u_ref, phi_ref = _phi0_unit(gp.ref_pts_raw, k_hist=PHI0_K_REF)
+    u_pro, phi_pro = _phi0_unit(gp.probe_pts_raw, k_hist=PHI0_K_PROBE)
 
     # Choose a nice arrow length if not provided
     if vec_len is None:
@@ -711,6 +697,10 @@ class GP_predictor:
         # State
         self.ref_pts = []
         self.sampled = None
+        
+        self.ref_pts_raw = None      # 原始 ref
+        self.probe_pts_raw = None    # 原始 probe
+        
         self.model_info = None
         self.seed_end = None
 
@@ -723,10 +713,12 @@ class GP_predictor:
 
         # Termination (in probe frame)
         self.probe_goal = None         # predicted finish point in probe coordinates
-        self.goal_stop_eps = 0.03      # Euclidean distance threshold for stopping
+        self.goal_stop_eps = 0.01      # Euclidean distance threshold for stopping
 
         # Multiple reference trajectories
         self.refs = []
+        
+        self.anchor = None
 
     def predict_on_transformed_probe(self):
         """
@@ -774,7 +766,7 @@ class GP_predictor:
         start_t = probe_in_ref_frame.shape[0] - 1
 
         # --- Step 4: GP rollout (ref frame) ---
-        h = 4000
+        h = ROLLOUT_STEPS
         try:
             preds_ref, gt_ref, h_used = rollout_reference(
                 model_info,
@@ -814,16 +806,12 @@ class GP_predictor:
 
     # --- Public API (batch-style) ---
     def train_gp(self, ref_traj):
-        """
-        Train once with a reference trajectory.
-        ref_traj: (N,2) numpy array or list[[x, y], ...]
-        """
         ref_traj = np.asarray(ref_traj, dtype=np.float32)
         if ref_traj.ndim != 2 or ref_traj.shape[1] != 2:
             raise ValueError("ref_traj must be shaped (N, 2)")
-        self.ref_pts = ref_traj.tolist()
+        self.ref_pts_raw = ref_traj.tolist()     # <<< 保存原始
+        self.ref_pts = self.ref_pts_raw[:]       # 保持同值（handle_train 内会重采样但不覆盖 raw）
         self.handle_train()
-        # default to the last trained reference
         if hasattr(self, "refs") and self.refs:
             self.best_ref = self.refs[-1]
         return self.model_info
@@ -839,6 +827,8 @@ class GP_predictor:
             raise RuntimeError("No available reference; please train first.")
 
         probe_traj = np.asarray(probe_traj, dtype=np.float64)
+        self.probe_pts_raw = probe_traj.tolist()   # <<< 保存原始
+    
         if probe_traj.ndim != 2 or probe_traj.shape[1] != 2:
             raise ValueError("probe_traj must be shaped (M, 2)")
         if probe_traj.shape[0] < 2:
@@ -857,21 +847,24 @@ class GP_predictor:
 
         # Angle-based alignment: pick a target angle and compute indices & manual Δθ/scale
         if self.sampled is not None and len(self.probe_pts) > 1:
-            ref_np = self.sampled.detach().cpu().numpy()
-            probe_np = np.asarray(self.probe_pts, dtype=np.float64)
+            # 用原始 ref/probe（在重采样之前）来计算相对角度的基向量与锚点
+            ref_raw   = np.asarray(self.ref_pts_raw,   dtype=np.float64)
+            probe_raw = np.asarray(self.probe_pts_raw, dtype=np.float64)
 
             angle_target = ANCHOR_ANGLE
             out = get_anchor_correspondence(
-                ref_np,
-                probe_np,
+                ref_raw,             # <<< 原始 ref
+                probe_raw,           # <<< 原始 probe
                 angle_target=angle_target,
-                k_hist=10,
-                n_segments_base=10,
+                n_segments_base=10
             )
+            self.anchor = out
             v_ref = out["ref_vector"]
             v_pro = out["probe_vector"]
             self.dtheta_manual = float(np.arctan2(v_pro[1], v_pro[0]) - np.arctan2(v_ref[1], v_ref[0]))
-            self.scale_manual = float(np.linalg.norm(v_pro) / max(np.linalg.norm(v_ref), 1e-6))
+            self.scale_manual  = float(np.linalg.norm(v_pro) / max(np.linalg.norm(v_ref), 1e-6))
+            # self.dtheta_manual = 0
+            # self.scale_manual  = 1
             print(out)
         else:
             print("❗ Insufficient reference or probe points; cannot align angles/vectors.")
@@ -911,7 +904,7 @@ class GP_predictor:
 if __name__ == "__main__":
     import time
 
-    csv_path = "training_data.csv"
+    csv_path = "hand_train_s.csv"
     rows = []
     with open(csv_path, "r") as f:
         r = csv.DictReader(f)
@@ -920,7 +913,7 @@ if __name__ == "__main__":
     ref_xy = np.array([[float(r["x_actual"]), float(r["y_actual"])] for r in rows], dtype=np.float32)
 
     # Load probe
-    csv_path = "probe.csv"
+    csv_path = "hand_probe_s.csv"
     rows = []
     with open(csv_path, "r") as f:
         r = csv.DictReader(f)
@@ -938,23 +931,76 @@ if __name__ == "__main__":
     dt = time.perf_counter() - t0
     print(f"[predict_from_probe] elapsed: {dt*1000:.2f} ms ({dt:.4f} s)")
 
+    # >>> add transformed reference overlay <<<
+    dtheta = gp.dtheta_manual
+    scale  = gp.scale_manual
+    R = np.array([[np.cos(dtheta), -np.sin(dtheta)],
+                [np.sin(dtheta),  np.cos(dtheta)]], dtype=np.float64)
+    ref0, probe0 = ref_xy[0], probe_xy[0]
+    ref_xy_in_probe = (ref_xy - ref0) @ R.T * scale + probe0
+    
     # Plot ref / probe / prediction
-    plt.figure(figsize=(8, 6))
-    plt.plot(ref_xy[:, 0], ref_xy[:, 1], label="Reference")
-    plt.plot(probe_xy[:, 0], probe_xy[:, 1], label="Probe")
+    fig, ax = plt.subplots(figsize=(8, 6), constrained_layout=False)
+    
+    # === 在主图上每 MAX_DATA_PER_EXPERT 个点做一次标记（含最后一个点） ===
+    def _every_k_indices(n, k):
+        idxs = np.arange(0, n, k, dtype=int)
+        if len(idxs) == 0 or idxs[-1] != n - 1:
+            idxs = np.r_[idxs, n - 1]
+        return idxs
+
+    kstep = int(MAX_DATA_PER_EXPERT)
+
+    # 原始 ref/probe 的索引
+    ref_idx   = _every_k_indices(ref_xy.shape[0],   kstep)
+    probe_idx = _every_k_indices(probe_xy.shape[0], kstep)
+
+    # --- 画对应的两个锚向量（origin -> anchor） ---
+    if getattr(gp, "anchor", None) is not None:
+        # ref/probe 的原点与对应锚点（来自 get_anchor_correspondence，基于原始轨迹）
+        o_ref = ref_xy[0]
+        p_ref = gp.anchor["ref_point"]
+        o_pro = probe_xy[0]
+        p_pro = gp.anchor["probe_point"]
+
+        # 画两条虚线向量 + 端点标记
+        ax.plot([o_ref[0], p_ref[0]], [o_ref[1], p_ref[1]],
+                '--', linewidth=2, color='C3',
+                label=f"Ref anchor vec (idx={gp.anchor['ref_index']})", zorder=4)
+        ax.plot([o_pro[0], p_pro[0]], [o_pro[1], p_pro[1]],
+                '--', linewidth=2, color='C4',
+                label=f"Probe anchor vec (idx={gp.anchor['probe_index']})", zorder=4)
+
+        ax.scatter([o_ref[0], p_ref[0]], [o_ref[1], p_ref[1]],
+                s=32, marker='o', color='C3', zorder=5)
+        ax.scatter([o_pro[0], p_pro[0]], [o_pro[1], p_pro[1]],
+                s=32, marker='x', color='C4', zorder=5)
+
+    ax.plot(ref_xy[:, 0],  ref_xy[:, 1],  label="Reference",  zorder=3)
+    ax.plot(probe_xy[:, 0], probe_xy[:, 1], label="Probe",      zorder=3)
     if preds is not None and len(preds) > 0:
-        plt.plot(preds[:, 0], preds[:, 1], label="Prediction")
+        ax.plot(preds[:, 0], preds[:, 1], label="Prediction",   zorder=3)
 
-    ax = plt.gca()
+    #若你有“Reference→Probe”的对齐叠加曲线，也建议给高一点zorder
+    ax.plot(ref_xy_in_probe[:, 0], ref_xy_in_probe[:, 1], '--', linewidth=2,
+            label=f"Reference→Probe (θ={np.degrees(gp.dtheta_manual):.1f}°, s={gp.scale_manual:.3f})",
+            zorder=3)
+
     ax.set_aspect("equal", adjustable="box")
-    plt.grid(True, alpha=0.3)
-    plt.legend()
-    plt.title("Ref / Probe / Prediction (main)")
-    plt.xlabel("x")
-    plt.ylabel("y")
-    plt.tight_layout()
+    ax.grid(True, alpha=0.3)
 
-    # Save figure
+    # >>> 关键：把图例移到右侧画布外 <<<
+    ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5),
+            borderaxespad=0., frameon=True, framealpha=0.85)
+
+    # 预留右侧空间给图例
+    plt.subplots_adjust(right=0.78)
+
+    ax.set_title("Ref / Probe / Prediction (main)")
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+
+    plt.tight_layout()
     plt.savefig("ref_probe_prediction_main.png", dpi=150, bbox_inches="tight")
 
     plot_anchor_vectors_from_gp(gp)

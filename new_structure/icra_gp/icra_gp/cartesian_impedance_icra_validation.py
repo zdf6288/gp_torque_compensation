@@ -124,7 +124,7 @@ class CartesianImpedanceICRAValidation(Node):
         self.dx_des_history = []
         self.tau_measured_history = []
         self.gravity_history = []
-        # lists for recording data when lambda is not working
+        # lists for recording data after GP prediction
         self.tau_history_new = []
         self.time_history_new = []
         self.x_history_new = []
@@ -145,7 +145,6 @@ class CartesianImpedanceICRAValidation(Node):
         self.x_des = np.array(msg.x_des)
         self.dx_des = np.array(msg.dx_des)
         self.ddx_des = np.array(msg.ddx_des)
-        self.get_logger().debug('Received task space command, enabling control execution')
         
     def dataRecordingCallback(self, msg):
         """callback function for /data_recording_enabled subscriber"""
@@ -201,6 +200,7 @@ class CartesianImpedanceICRAValidation(Node):
                         self.effort_msg.efforts = tau.tolist()
                         self.effort_publisher.publish(self.effort_msg)
                         self.start_trajectory()
+                        return
                 else:
                     # PD control for joint positions
                     self.i_error = self.i_error + (self.q_des - q) * dt

@@ -39,6 +39,8 @@ class GPTrajectory(Node):
         # trajectory publishing control
         self.predicted_trajectory_index = 0             # current index for publishing predicted trajectory
         self.predicted_trajectory_finished = False      # flag indicating publishment ofpredicted trajectory is finished
+        self.point_repeat_count = 0                     # counter for repeating each point 10 times
+        self.points_per_repeat = 10                     # number of times to publish each point
         
         self.get_logger().info('GP trajectory data collection node started')
 
@@ -89,11 +91,10 @@ class GPTrajectory(Node):
             # Convert the input data to numpy array for processing
             # x_real_array = np.array(x).reshape(-1, 3)  # reshape to [N, 3] for [x, y, z]
             
-            
             x_array = np.array(x)
             probe2d = x_array[:, :2]
-            probe = probe2d[::10]
-            # probe = probe2d
+            # probe = probe2d[::10]
+            probe = probe2d
             # print(f"ref.shape: {ref.shape}")
             # print(f"x_array.shape: {x_array.shape}")
             # print(f"probe.shape: {probe.shape}")
@@ -110,6 +111,7 @@ class GPTrajectory(Node):
             # predicted trajectory publishing control variables
             self.predicted_trajectory_index = 0
             self.predicted_trajectory_finished = False
+            self.point_repeat_count = 0      # reset repeat counter for new prediction
 
             self.get_logger().info(f'GP prediction completed. Predicted {len(self.x_pred)} points.')
             return True
@@ -133,16 +135,21 @@ class GPTrajectory(Node):
                 task_cmd.x_des = [xyz[0], xyz[1], xyz[2], 0.0, 0.0, 0.0]
                 task_cmd.dx_des = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
                 task_cmd.ddx_des = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-                self.predicted_trajectory_index += 1
 
                 # publish task space command
                 self.task_space_command_publisher.publish(task_cmd)
+                
+                # publish every point 10 times
+                self.point_repeat_count += 1
+                if self.point_repeat_count >= self.points_per_repeat:
+                    self.predicted_trajectory_index += 1
+                    self.point_repeat_count = 0  # reset counter for next point
 
             else:
                 # all predicted trajectory published
                 self.predicted_trajectory_finished = True
                 self.get_logger().info('All trajectory points have been sent, trajectory publishing finished')
-                return     
+                return
 
 def main(args=None):
     rclpy.init(args=args)
