@@ -11,10 +11,10 @@ from icra_gp.gp_predictor import GP_predictor
 import pickle
 
 
-class GPTrajectory(Node):
+class GPTrajectoryMulti(Node):
     
     def __init__(self):
-        super().__init__('gp_trajectory')
+        super().__init__('gp_trajectory_multi')
         
         # subscribe to /data_for_gp topic
         self.data_subscription = self.create_subscription(
@@ -35,6 +35,7 @@ class GPTrajectory(Node):
         self.x_real = []        # store position data [x, y, z]
         self.time_stamp = []    # store time stamp
         self.x_pred = []        # store predicted position data [x, y, z]
+        self.z_des = None       # desired z to keep the pen contact with the paper
         
         # trajectory publishing control
         self.predicted_trajectory_index = 0             # current index for publishing predicted trajectory
@@ -53,6 +54,7 @@ class GPTrajectory(Node):
             position = list(msg.x_real)  # [x, y, z]  
             self.x_real.append(position)
             self.time_stamp.append(timestamp)
+            self.z_des = position[2] - 0.2
                 
         except Exception as e:
             self.get_logger().error(f'Error when processing data message: {str(e)}')
@@ -100,7 +102,7 @@ class GPTrajectory(Node):
             predicted = gp_predictor.predict_from_probe(probe)
             self.x_pred = []
             for point in predicted:
-                self.x_pred.append([point[0], point[1], 0.65])     
+                self.x_pred.append([point[0], point[1], self.z_des])     
 
             self.gp_finished = True
 
@@ -149,13 +151,13 @@ class GPTrajectory(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    gp_trajectory_node = GPTrajectory()
+    gp_trajectory_multi_node = GPTrajectoryMulti()
     
     try:
-        rclpy.spin(gp_trajectory_node)
+        rclpy.spin(gp_trajectory_multi_node)
         pass
     finally:
-        gp_trajectory_node.destroy_node()
+        gp_trajectory_multi_node.destroy_node()
         rclpy.shutdown()
 
 

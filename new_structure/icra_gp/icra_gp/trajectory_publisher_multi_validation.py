@@ -2,22 +2,26 @@
 
 import rclpy
 from rclpy.node import Node
-from custom_msgs.msg import  StateParameter
+from custom_msgs.msg import StateParameter
 from custom_msgs.srv import JointPositionAdjust
+from std_msgs.msg import Header, Bool
 import numpy as np
 import time
-import threading
 from pynput import keyboard
 
 
-class TrajectoryPublisherMultiData(Node):
+class TrajectoryPublisherMultiValidation(Node):
     
     def __init__(self):
-        super().__init__('trajectory_publisher_multi_data')
+        super().__init__('trajectory_publisher_multi_validation')
 
         # subscribe to /state_parameter to get robot current state
         self.state_subscription = self.create_subscription(
             StateParameter, '/state_parameter', self.stateCallback, 10)
+
+        # subscribe to /data_recording_enabled to know when to start recording data
+        self.data_recording_subscription = self.create_subscription(
+            Bool, '/data_recording_enabled', self.dataRecordingCallback, 10)
         
         # Create service server for joint position adjustment
         self.joint_position_service = self.create_service(
@@ -32,16 +36,17 @@ class TrajectoryPublisherMultiData(Node):
         self.declare_parameter('use_transition', True)      # in multi-class test, transition is a manual process
         self.use_transition = self.get_parameter('use_transition').value
         
-        self.trajectory_enabled = False         # flag controlled by service
-        
+        self.trajectory_enabled = False                     # flag controlled by service
+
         # keyboard listening variables
         self.key_pressed_d = False              # flag indicating the 'd' key on keyboard is pressed
+        self.key_pressed_v = False              # flag indicating the 'v' key on keyboard is pressed
         self.keyboard_listener = None           # keyboard listener object
         self.keyboard_thread = None             # thread for keyboard listening
         
         self.start_time = self.get_clock().now()
-        self.transition_start_time = None
         self.transition_complete = False        # flag indicating the completion of moving to the start point of trajectory
+        self.transition_start_time = None
 
         self.get_logger().info('Trajectory publisher node started')
         self.get_logger().info(f'Publishing trajectory at 1000 Hz')
@@ -54,12 +59,16 @@ class TrajectoryPublisherMultiData(Node):
             if key.char == 'd':
                 self.key_pressed_d = True
                 self.get_logger().info('Key "d" pressed! Continuing trajectory execution...')
+            if key.char == 'v':
+                self.key_pressed_v = True
+                self.get_logger().info('Key "v" pressed! Stop recording data probe, start GP prediction...')
         except AttributeError:
             pass
     
     def start_keyboard_listener(self):
         """start keyboard listener"""
         self.key_pressed_d = False
+        self.key_pressed_v = False
         self.keyboard_listener = keyboard.Listener(on_press=self.on_key_press)
         self.keyboard_listener.start()
         self.get_logger().info('Keyboard listener started. Press "d" to continue...')
@@ -76,13 +85,12 @@ class TrajectoryPublisherMultiData(Node):
             self.get_logger().info(f'Received joint position adjustment request')
             self.get_logger().info(f'q_des: {request.q_des}')
             self.get_logger().info(f'dq_des: {request.dq_des}')
-            
-            self.trajectory_enabled = True
 
+            self.trajectory_enabled = True
+            
             self.start_keyboard_listener()
             while not self.key_pressed_d:
                 pass
-            self.stop_keyboard_listener()
             self.key_pressed_d = False
             self.transition_complete = True
             
@@ -123,24 +131,39 @@ class TrajectoryPublisherMultiData(Node):
                 if self.use_transition:
                     self.transition_start_time = self.get_clock().now()
                     self.get_logger().info('Starting transition to trajectory start point')
-                
             except Exception as e:
                 self.get_logger().error(f'Error extracting robot initial position: {str(e)}')
     
     def timer_callback(self):
         """timer callback function, period: 1ms"""
+        if not self.transition_complete:
+            return
+        
+        if not self.key_pressed_v:
+            # publish data recording status
+            data_recording_msg = Bool()
+            data_recording_msg.data = True
+            self.data_recording_publisher.publish(data_recording_msg)
+        else:
+            self.stop_keyboard_listener()
+
+            data_recording_msg = Bool()
+            data_recording_msg.data = False
+            self.data_recording_publisher.publish(data_recording_msg)
+
+
         return
 
 def main(args=None):
     rclpy.init(args=args)
-    trajectory_publisher_multi_data_node = TrajectoryPublisherMultiData()
+    trajectory_publisher_multi_validation_node = TrajectoryPublisherMultiValidation()
     
     try:
-        rclpy.spin(trajectory_publisher_multi_data_node)
+        rclpy.spin(trajectory_publisher_multi_validation_node)
         pass
     finally:
-        trajectory_publisher_multi_data_node.stop_keyboard_listener()
-        trajectory_publisher_multi_data_node.destroy_node()
+        trajectory_publisher_multi_validation_node.stop_keyboard_listener()
+        trajectory_publisher_multi_validation_node.destroy_node()
         rclpy.shutdown()
 
 

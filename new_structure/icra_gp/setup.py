@@ -30,6 +30,7 @@ setup(
             'gp_train = icra_gp.gp_train:main',
             'cartesian_impedance_multi_data = icra_gp.cartesian_impedance_multi_data:main',
             'trajectory_publisher_multi_data = icra_gp.trajectory_publisher_multi_data:main',
+            'gp_trajectory_multi = icra_gp.gp_trajectory_multi:main',
         ],
     },
 )

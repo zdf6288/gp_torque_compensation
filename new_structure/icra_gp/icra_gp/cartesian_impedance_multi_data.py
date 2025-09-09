@@ -140,6 +140,7 @@ class CartesianImpedanceMultiData(Node):
             if not self.trajectory_started:
                 return
             
+            # get O_T_F matrix and position
             o_t_f_array = np.array(msg.o_t_f)               # vectorized 4x4 pose matrix in flange frame, column-major
             o_t_f = o_t_f_array.reshape(4, 4, order='F')    # 4x4 pose matrix in flange frame, column-major
             x = o_t_f[:3, 3]                                # 3x1 position, only x-y-z

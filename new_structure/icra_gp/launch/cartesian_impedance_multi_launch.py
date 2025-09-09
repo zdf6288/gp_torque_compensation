@@ -77,15 +77,15 @@ def generate_launch_description():
                     PythonExpression(["'", mode, "' == 'data'"]),
                 ),
         ),
-        # Node(
-        #     package='icra_gp',
-        #     executable='cartesian_impedance_multi_validation',
-        #     name='cartesian_impedance_multi_validation',
-        #     output='screen',
-        #     condition=IfCondition(
-        #         PythonExpression(["'", mode, "' == 'validation'"]),
-        #     ),
-        # ),
+        Node(
+            package='icra_gp',
+            executable='cartesian_impedance_multi_validation',
+            name='cartesian_impedance_multi_validation',
+            output='screen',
+            condition=IfCondition(
+                PythonExpression(["'", mode, "' == 'validation'"]),
+            ),
+        ),
         Node(
             package='icra_gp',
             executable='trajectory_publisher_multi_data',
@@ -95,22 +95,22 @@ def generate_launch_description():
                 PythonExpression(["'", mode, "' == 'data'"]),
             ),
         ),
-        # Node(
-        #     package='icra_gp',
-        #     executable='trajectory_publisher_multi_validation',
-        #     name='trajectory_publisher_multi_validation',
-        #     output='screen',
-        #     condition=IfCondition(
-        #         PythonExpression(["'", mode, "' == 'validation'"]),
-        #     ),
-        # ),
-        # Node(
-        #     package='icra_gp',
-        #     executable='gp_multi_trajectory',
-        #     name='gp_multi_trajectory',
-        #     output='screen',
-        #     condition=IfCondition(
-        #         PythonExpression(["'", mode, "' == 'validation'"]),
-        #     ),
-        # ),
+        Node(
+            package='icra_gp',
+            executable='trajectory_publisher_multi_validation',
+            name='trajectory_publisher_multi_validation',
+            output='screen',
+            condition=IfCondition(
+                PythonExpression(["'", mode, "' == 'validation'"]),
+            ),
+        ),
+        Node(
+            package='icra_gp',
+            executable='gp_trajectory_multi',
+            name='gp_trajectory_multi',
+            output='screen',
+            condition=IfCondition(
+                PythonExpression(["'", mode, "' == 'validation'"]),
+            ),
+        ),
     ])
