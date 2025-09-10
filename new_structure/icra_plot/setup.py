@@ -23,6 +23,7 @@ setup(
             'plot_xy_icra_data = icra_plot.plot_xy_icra_data:main',
             'plot_xy_icra_validation = icra_plot.plot_xy_icra_validation:main',
             'plot_xy_multi_data = icra_plot.plot_xy_multi_data:main',
+            'plot_xy_multi_validation = icra_plot.plot_xy_multi_validation:main',
         ],
     },
 )

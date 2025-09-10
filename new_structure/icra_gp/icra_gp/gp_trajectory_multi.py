@@ -94,9 +94,11 @@ class GPTrajectoryMulti(Node):
             # x_real_array = np.array(x).reshape(-1, 3)  # reshape to [N, 3] for [x, y, z]
             
             x_array = np.array(x)
+            x_array = x_array[2000:]
             probe2d = x_array[:, :2]
             # probe = probe2d[::10]
             probe = probe2d
+            print(probe[:50])
             with open("gp_model.pkl", "rb") as f:
                 gp_predictor = pickle.load(f)
             predicted = gp_predictor.predict_from_probe(probe)

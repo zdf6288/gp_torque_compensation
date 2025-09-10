@@ -19,9 +19,10 @@ class TrajectoryPublisherMultiValidation(Node):
         self.state_subscription = self.create_subscription(
             StateParameter, '/state_parameter', self.stateCallback, 10)
 
-        # subscribe to /data_recording_enabled to know when to start recording data
-        self.data_recording_subscription = self.create_subscription(
-            Bool, '/data_recording_enabled', self.dataRecordingCallback, 10)
+        # publish on /data_recording_enabled to inform other nodes when to start recording
+        self.data_recording_publisher = self.create_publisher(
+            Bool, '/data_recording_enabled', 10)
+        self.timer = self.create_timer(0.001, self.timer_callback)  # publish at 1000 Hz
         
         # Create service server for joint position adjustment
         self.joint_position_service = self.create_service(

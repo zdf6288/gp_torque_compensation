@@ -43,6 +43,10 @@ class CartesianImpedanceMultiValidation(Node):
         # create service client for joint position adjustment
         self.joint_position_client = self.create_client(
             JointPositionAdjust, '/joint_position_adjust')
+
+        # create service client for GP prediction
+        self.gp_predict_client = self.create_client(
+            GPPredict, '/gp_predict')
         
         self.declare_parameter('k_pd', [24.0, 24.0, 24.0, 24.0, 10.0, 6.0, 2.0])    # k_gains in PD control (joint space)
         self.declare_parameter('d_pd', [16.0, 16.0, 16.0, 16.0, 10.0, 6.0, 2.0])    # d_gains in PD control (joint space)
@@ -52,7 +56,7 @@ class CartesianImpedanceMultiValidation(Node):
         self.i_pid = np.array(self.get_parameter('i_pid').value, dtype=float)
         self.i_error = np.zeros(7)
 
-        self.declare_parameter('k_gains', [750.0, 750.0, 100.0, 75.0, 75.0, 0.0])   # k_gains in impedance control (task space)
+        self.declare_parameter('k_gains', [750.0, 750.0, 25.0, 75.0, 75.0, 0.0])    # k_gains in impedance control (task space)
         self.k_gains = np.array(self.get_parameter('k_gains').value, dtype=float)
         self.K_gains = np.diag(self.k_gains)
         self.eta = 1.0                                                              # for calculating d_gains
@@ -195,36 +199,34 @@ class CartesianImpedanceMultiValidation(Node):
             if not self.trajectory_started:
                 return
             
+            
+            # get O_T_F, mass, coriolis, flange-framed zero jacobian matrix J(q) and dJ(q)
+            o_t_f_array = np.array(msg.o_t_f)                           # vectorized 4x4 pose matrix in flange frame, column-major
+            mass_matrix_array = np.array(msg.mass)                      # vectorized 7x7 mass matrix, column-major
+            coriolis_matrix_array = np.array(msg.coriolis)              # vectorized diagonal elements of 7x7 coriolis matrix
+            zero_jacobian_array = np.array(msg.zero_jacobian_flange)    # vectorized 6x7 zero jacobian matrix in flange frame, column-major
+            o_t_f = o_t_f_array.reshape(4, 4, order='F')                    # 4x4 pose matrix in flange frame, column-major
+            mass_matrix = mass_matrix_array.reshape(7, 7, order='F')        # 7x7
+            coriolis_matrix = np.diag(coriolis_matrix_array)                # 7x7
+            zero_jacobian = zero_jacobian_array.reshape(6, 7, order='F')    # 6x7
+            zero_jacobian_t = zero_jacobian.T                               # 7x6, transpose of zero_jacobian
+            zero_jacobian_pinv = np.linalg.pinv(zero_jacobian)              # 7x6, pseudoinverse obtained by SVD
+            # to control the z axis perpendicular to ground, use 4*7 jacobian matrix
+            jacobian = zero_jacobian[:5, :]                                 # 5x7
+            jacobian_t = jacobian.T                                         # 7x5
+            jacobian_pinv = np.linalg.pinv(jacobian)                        # 5x7, pseudoinverse obtained by SVD
+            if self.jacobian_buffer is None:
+                djacobian = np.zeros_like(jacobian)
+            else:
+                djacobian = (jacobian - self.jacobian_buffer) / dt
+            self.jacobian_buffer = jacobian.copy()
+
+            # get x and dx
+            x = o_t_f[:3, 3]            # 3x1 position, only x-y-z
+            dx = zero_jacobian @ dq     # 6x1 velocity
+            # ddx = zero_jacobian @ ddq + dzero_jacobian @ dq
+
             if self.task_command_received:
-                # get O_T_F, mass, coriolis, flange-framed zero jacobian matrix J(q) and dJ(q)
-                o_t_f_array = np.array(msg.o_t_f)                           # vectorized 4x4 pose matrix in flange frame, column-major
-                mass_matrix_array = np.array(msg.mass)                      # vectorized 7x7 mass matrix, column-major
-                coriolis_matrix_array = np.array(msg.coriolis)              # vectorized diagonal elements of 7x7 coriolis matrix
-                zero_jacobian_array = np.array(msg.zero_jacobian_flange)    # vectorized 6x7 zero jacobian matrix in flange frame, column-major
-
-                o_t_f = o_t_f_array.reshape(4, 4, order='F')                    # 4x4 pose matrix in flange frame, column-major
-                mass_matrix = mass_matrix_array.reshape(7, 7, order='F')        # 7x7
-                coriolis_matrix = np.diag(coriolis_matrix_array)                # 7x7
-                zero_jacobian = zero_jacobian_array.reshape(6, 7, order='F')    # 6x7
-                zero_jacobian_t = zero_jacobian.T                               # 7x6, transpose of zero_jacobian
-                zero_jacobian_pinv = np.linalg.pinv(zero_jacobian)              # 7x6, pseudoinverse obtained by SVD
-
-                # to control the z axis perpendicular to ground, use 4*7 jacobian matrix
-                jacobian = zero_jacobian[:5, :]                                 # 5x7
-                jacobian_t = jacobian.T                                         # 7x5
-                jacobian_pinv = np.linalg.pinv(jacobian)                        # 5x7, pseudoinverse obtained by SVD
-                if self.jacobian_buffer is None:
-                    djacobian = np.zeros_like(jacobian)
-                else:
-                    djacobian = (jacobian - self.jacobian_buffer) / dt
-                self.jacobian_buffer = jacobian.copy()
-
-    
-                # get x and dx
-                x = o_t_f[:3, 3]            # 3x1 position, only x-y-z
-                dx = zero_jacobian @ dq     # 6x1 velocity
-                # ddx = zero_jacobian @ ddq + dzero_jacobian @ dq
-
                 rotation_matrix = o_t_f[:3, :3]     # 3x3 rotation matrix
                 r_error = - 0.5 * (np.cross(rotation_matrix[:, 2], self.rotation_matrix_des[:, 2])
                     + np.cross(rotation_matrix[:, 1], self.rotation_matrix_des[:, 1])
@@ -259,20 +261,21 @@ class CartesianImpedanceMultiValidation(Node):
                 self.effort_msg.efforts = tau.tolist()
                 self.effort_publisher.publish(self.effort_msg)
             
+            # self.get_logger().info(f'record_before_gp: {self.data_recording_enabled and not self.gp_predict_finished}')
+            # self.get_logger().info(f'record_after_gp: {self.gp_predict_finished}')
             # record data only when data recording is enabled
             if self.data_recording_enabled and not self.gp_predict_finished:
-                    self.data_for_gp_msg.time = t_elapsed
-                    self.data_for_gp_msg.x = x.tolist()
-                    self.data_for_gp_publisher.publish(self.data_for_gp_msg)
+                self.time_history.append(t_elapsed)
+                self.x_history.append(x.tolist())
 
-                    # publish on topic /data_for_gp
-                    self.data_for_gp_msg.x_real = x[:3].tolist()
-                    self.data_for_gp_publisher.publish(self.data_for_gp_msg)
+                # publish on topic /data_for_gp
+                self.data_for_gp_msg.x_real = x[:3].tolist()
+                self.data_for_gp_publisher.publish(self.data_for_gp_msg)
                     
             elif self.gp_predict_finished:
                 self.time_history_new.append(t_elapsed)
-                self.x_history_new.append(x.tolist())
-                self.x_des_history_new.append(self.x_des.tolist())
+                self.x_history_new.append(x[:3].tolist())
+                self.x_des_history_new.append(self.x_des[:3].tolist())
                 
 
         except Exception as e:
