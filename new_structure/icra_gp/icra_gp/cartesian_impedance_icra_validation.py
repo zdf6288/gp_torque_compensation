@@ -12,8 +12,6 @@ import csv
 import traceback
 import sys
 
-def vee(mat):
-    return np.array([mat[2, 1], mat[0, 2], mat[1, 0]])
 
 class CartesianImpedanceICRAValidation(Node):
     

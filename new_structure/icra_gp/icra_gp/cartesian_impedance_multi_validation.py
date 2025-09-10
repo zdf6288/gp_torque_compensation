@@ -12,8 +12,6 @@ import csv
 import traceback
 import sys
 
-def vee(mat):
-    return np.array([mat[2, 1], mat[0, 2], mat[1, 0]])
 
 class CartesianImpedanceMultiValidation(Node):
     
@@ -118,7 +116,6 @@ class CartesianImpedanceMultiValidation(Node):
         self.time_history_new = []
         self.x_history_new = []
         self.x_des_history_new = []
-
 
         # set signal handler
         signal.signal(signal.SIGINT, self.signal_handler)

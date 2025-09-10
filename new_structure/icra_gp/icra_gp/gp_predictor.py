@@ -36,14 +36,15 @@ torch.manual_seed(SEED)
 
 # Tunable parameters
 VERBOSE = False
-ANCHOR_ANGLE = np.radians(40)  # angle (rad) for anchor correspondence
+ANCHOR_ANGLE = np.radians(15)  # angle (rad) for anchor correspondence
 K_HIST = 10                      # seed length (history window)
 NEAREST_K = 1
-MAX_DATA_PER_EXPERT = 500
+MAX_DATA_PER_EXPERT = 400
 BASE_SCALE = 100                  # initial guess for scale
 ROLLOUT_STEPS = 500               # steps to rollout in demo
 PHI0_K_PROBE = 500                        # segments to average for phi0 in anchor finding
 PHI0_K_REF = 500                        # segments to average for phi0 in anchor finding
+SELECT_HORIZON = 500
 # ==============================
 # Method Hyperparameters
 # ==============================
@@ -200,76 +201,63 @@ def train_moe(dataset, method_id: int = METHOD_ID):
 def moe_predict(info, feat_1xD: torch.Tensor):
     """Predict (mu, var) in original label space given a 1xD feature tensor."""
     moe, scaler = info["moe"], info["scaler"]
-    x = torch_to_np(feat_1xD.squeeze(0).float())  # shape: (D,)
-    mu, var = moe.predict(torch_to_np(scaler.x_transform(torch.tensor(x))))
-    mu = np.array(mu).reshape(1, -1)  # ensure (1, 2)
-    y = torch_to_np(scaler.y_inverse(torch.tensor(mu)))  # -> (1, 2)
+    x_n = torch_to_np(scaler.x_transform(feat_1xD.float()))  # (1, D)
+    mu_n, var_n = moe.predict(x_n.squeeze(0))                # var_n 是标准化空间
+    mu_n = np.array(mu_n).reshape(1, -1)
+    y = torch_to_np(scaler.y_inverse(torch.tensor(mu_n)))    # 预测均值 -> 原始空间
+
+    # 方差也映射回原始空间：Var[Y] = Var[Y_n] * (Y_std^2)
+    Y_std = torch_to_np(scaler.Y_std).reshape(-1)            # (Dout,)
+    var = np.array(var_n).reshape(-1) * (Y_std**2)           # (Dout,)
     return y, var
 
 
-def rollout_reference(model_info, traj: torch.Tensor, start_t: int, h: int, k: int, scaler=None):
+def rollout_reference_with_var(model_info, traj: torch.Tensor, start_t: int, h: int, k: int):
     """
-    Roll out predictions in reference frame starting from index start_t using history length k.
-    Returns (pred_positions, ground_truth, horizon_used).
+    与 rollout_reference 类似，但额外返回每步的预测方差（在参考坐标系，输出为 var_x,var_y 的和）。
+    返回: (pred_positions, var_trace_per_step, horizon_used)
     """
     assert start_t >= (k - 1), f"start_t={start_t} too small; requires at least {k - 1}"
     T = traj.shape[0]
     h = max(0, h)
 
-    # Use global origin and base direction consistent with training
     global_origin = traj[0]
     if traj.shape[0] > 1:
-        print("✅ Compute probe global base direction as average of first 10 segments")
         end_idx = min(10, traj.shape[0] - 1)
         dirs = traj[1 : end_idx + 1] - traj[0]
         global_base_dir = dirs.mean(dim=0)
-        print(f"   global_base_dir = {global_base_dir.numpy()}")
     else:
-        print("⚠️ Not enough points to compute global direction; using default [1, 0]")
         global_base_dir = torch.tensor([1.0, 0.0])
 
-    # Initialize history
     hist_pos = [traj[start_t - (k - 1) + i].clone() for i in range(k)]
-    hist_del = []
-    for i in range(k):
-        idx = start_t - (k - 1) + i
-        prev = traj[idx - 1] if idx - 1 >= 0 else traj[0]
-        hist_del.append(traj[idx] - prev)
-
     cur_pos = hist_pos[-1].clone()
+
     preds_pos = []
+    var_trace_list = []
 
     for _ in range(h):
-        feats = []
-
-        # Use global_origin for consistency with training
         polar_feat = polar_feat_from_xy_torch(torch.stack(hist_pos[-k:]), global_origin)
-        feats.append(polar_feat.reshape(1, -1))  # (1, 3K)
+        x = polar_feat.reshape(1, -1)  # (1, 3k)
 
-        x = torch.cat(feats, dim=1)  # (1, D)
-
-        # GP predict in fixed frame
-        y_pred, _ = moe_predict(model_info, x)  # (1, 2)
+        # 参考坐标系下的 delta 与方差
+        y_pred, var_ref = moe_predict(model_info, x)   # var_ref: (2,) 是参考系里 x,y 的方差
         y_pred = torch.tensor(y_pred, dtype=torch.float32)
 
-        # Rotate step back to world frame
+        # 旋回到“世界/参考几何”坐标（只用于累加点位；方差的 trace 旋转不变）
         gb = global_base_dir / global_base_dir.norm()
         R = torch.stack([gb, torch.tensor([-gb[1], gb[0]])], dim=1)
         step_world = y_pred @ R.T  # (1, 2)
-        next_pos = cur_pos + step_world[0]
-        next_del = step_world[0]
 
-        # Update history
+        next_pos = cur_pos + step_world[0]
         hist_pos.append(next_pos)
-        hist_del.append(next_del)
         cur_pos = next_pos
         preds_pos.append(next_pos)
 
-    preds = torch.stack(preds_pos, dim=0) if preds_pos else torch.zeros((0, 2))
+        # 记录该步的 trace 方差（x,y 方差之和，旋转不变；跨参考时再乘以 scale^2）
+        var_trace_list.append(float(np.sum(var_ref)))
 
-    # Ground truth slice (optional; may be empty near the end)
-    gt = traj[start_t + 1 : start_t + 1 + h]
-    return preds, gt, h
+    preds = torch.stack(preds_pos, dim=0) if preds_pos else torch.zeros((0, 2))
+    return preds, var_trace_list, h
 
 
 # ==============================
@@ -421,36 +409,6 @@ def angle_diff_mod_pi(a: float, b: float) -> float:
     """Compute minimal signed difference between a and b in (-pi, pi]."""
     return ((a - b + np.pi) % (2 * np.pi)) - np.pi
 
-
-# def first_index_reach_threshold(angles, mask, target, *, inclusive: bool = True, use_abs: bool = False) -> int:
-#     """
-#     Find the first index where the angle crosses the target threshold.
-#       - use_abs=False: directional threshold (>= target if target>=0 else <= target)
-#       - use_abs=True : magnitude threshold (|angle| >= |target|)
-#       - inclusive=True counts equality as crossing
-#     If never crosses, return index of the closest point (fallback).
-#     """
-#     idxs = np.where(mask)[0]
-#     if idxs.size == 0:
-#         return 0
-
-#     if use_abs:
-#         thr = abs(target)
-#         for i in idxs:
-#             if (abs(angles[i]) >= thr) if inclusive else (abs(angles[i]) > thr):
-#                 return int(i)
-#     else:
-#         if target >= 0:
-#             for i in idxs:
-#                 if (angles[i] >= target) if inclusive else (angles[i] > target):
-#                     return int(i)
-#         else:
-#             for i in idxs:
-#                 if (angles[i] <= target) if inclusive else (angles[i] < target):
-#                     return int(i)
-
-#     # Fallback: nearest to target
-#     return int(idxs[np.argmin(np.abs(angles[idxs] - target))])
 
 def first_index_reach_threshold(
     angles,
@@ -656,7 +614,8 @@ def plot_relative_angle_bases_from_gp(gp, *, k_hist=K_HIST, vec_len=None, filena
     probe = np.asarray(gp.probe_pts, dtype=np.float64)
 
     # Compute unit base vectors (phi0) at each origin
-    u_ref, phi_ref = _phi0_unit(gp.ref_pts_raw, k_hist=PHI0_K_REF)
+    ref_raw_for_plot = gp.best_ref.get("raw", gp.ref_pts_raw) if hasattr(gp, "best_ref") and gp.best_ref else gp.ref_pts_raw
+    u_ref, phi_ref = _phi0_unit(ref_raw_for_plot, k_hist=PHI0_K_REF)
     u_pro, phi_pro = _phi0_unit(gp.probe_pts_raw, k_hist=PHI0_K_PROBE)
 
     # Choose a nice arrow length if not provided
@@ -688,6 +647,11 @@ def plot_relative_angle_bases_from_gp(gp, *, k_hist=K_HIST, vec_len=None, filena
     plt.savefig(filename, dpi=150, bbox_inches="tight")
     print(f"Saved base vectors plot to {filename} | "
           f"ref φ0={np.degrees(phi_ref):.2f}°, probe φ0={np.degrees(phi_pro):.2f}°")
+
+def _closest_index(pt, arr):
+    arr = np.asarray(arr, dtype=np.float64)
+    d = np.linalg.norm(arr - pt[None, :], axis=1)
+    return int(np.argmin(d))
 
 # ==============================
 # Predictor Class
@@ -768,7 +732,7 @@ class GP_predictor:
         # --- Step 4: GP rollout (ref frame) ---
         h = ROLLOUT_STEPS
         try:
-            preds_ref, gt_ref, h_used = rollout_reference(
+            preds_ref, gt_ref, h_used = rollout_reference_with_var(
                 model_info,
                 torch.tensor(probe_in_ref_frame, dtype=torch.float32),
                 start_t=start_t,
@@ -817,60 +781,53 @@ class GP_predictor:
         return self.model_info
 
     def predict_from_probe(self, probe_traj):
-        """
-        Predict once with a probe trajectory (array-like of shape (M,2)).
-        Returns the predicted path in the probe frame as a (K,2) ndarray or None.
-        """
-        if self.model_info is None:
+        if self.model_info is None and not self.refs:
             raise RuntimeError("Call train_gp(ref_traj) before prediction.")
-        if not hasattr(self, "refs") or not self.refs:
-            raise RuntimeError("No available reference; please train first.")
 
         probe_traj = np.asarray(probe_traj, dtype=np.float64)
-        self.probe_pts_raw = probe_traj.tolist()   # <<< 保存原始
-    
+        self.probe_pts_raw = probe_traj.tolist()
+
         if probe_traj.ndim != 2 or probe_traj.shape[1] != 2:
             raise ValueError("probe_traj must be shaped (M, 2)")
         if probe_traj.shape[0] < 2:
             raise ValueError("probe_traj requires at least two points")
 
-        # Resample probe to equal dt
-        self.probe_pts = probe_traj.tolist()
-        probe_raw = np.asarray(self.probe_pts, dtype=np.float32)
-        probe_eq = resample_polyline_equal_dt(probe_raw, SAMPLE_HZ, DEFAULT_SPEED)
+        # 等时重采样 probe（用于 GP 特征构造/rollout）
+        probe_eq = resample_polyline_equal_dt(probe_traj.astype(np.float32), SAMPLE_HZ, DEFAULT_SPEED)
         if probe_eq.shape[0] >= 2:
             self.probe_pts = probe_eq.tolist()
             print(f"🔄 Probe resampled to {len(self.probe_pts)} points.")
+        probe_eq_np  = np.asarray(self.probe_pts, dtype=np.float64)
+        probe_raw_np = np.asarray(self.probe_pts_raw, dtype=np.float64)
 
-        # Choose best reference (if only one, use it)
-        self.best_ref = self.refs[-1]
+        # === 关键：在多参考中选平均预测方差最低者（用10步） ===
+        if len(self.refs) == 0:
+            raise RuntimeError("No available reference; please train first.")
 
-        # Angle-based alignment: pick a target angle and compute indices & manual Δθ/scale
-        if self.sampled is not None and len(self.probe_pts) > 1:
-            # 用原始 ref/probe（在重采样之前）来计算相对角度的基向量与锚点
-            ref_raw   = np.asarray(self.ref_pts_raw,   dtype=np.float64)
-            probe_raw = np.asarray(self.probe_pts_raw, dtype=np.float64)
+        # === 用 MSE 选最匹配的参考（默认对齐到锚点，比较前 100 点） ===
+        best_idx, best_pack, best_mse = self._choose_best_ref_by_mse(
+            probe_eq_np, probe_raw_np, horizon=100, align_on_anchor=True
+        )
+        if best_idx is None:
+            print("❗ Failed to choose a best reference (insufficient data).")
+            return None
 
-            angle_target = ANCHOR_ANGLE
-            out = get_anchor_correspondence(
-                ref_raw,             # <<< 原始 ref
-                probe_raw,           # <<< 原始 probe
-                angle_target=angle_target,
-                n_segments_base=10
-            )
-            self.anchor = out
-            v_ref = out["ref_vector"]
-            v_pro = out["probe_vector"]
-            self.dtheta_manual = float(np.arctan2(v_pro[1], v_pro[0]) - np.arctan2(v_ref[1], v_ref[0]))
-            self.scale_manual  = float(np.linalg.norm(v_pro) / max(np.linalg.norm(v_ref), 1e-6))
-            # self.dtheta_manual = 0
-            # self.scale_manual  = 1
-            print(out)
-        else:
-            print("❗ Insufficient reference or probe points; cannot align angles/vectors.")
+        out, dtheta, scale = best_pack
+        self.best_ref = self.refs[best_idx]
+        print(f"✅ Selected reference #{best_idx} for prediction.")
+        self.sampled  = self.best_ref["sampled"]          # 让图里/后续函数使用“最佳参考”的采样轨迹
+        self.anchor = out
+        self.dtheta_manual = dtheta
+        self.scale_manual  = scale
+        # 将原始 anchor 点映射到“重采样后的”索引，供 plot_anchor_vectors_from_gp 使用
+        ref_resampled = self.sampled.detach().cpu().numpy()           # (Nr,2)
+        probe_resampled = np.asarray(self.probe_pts, dtype=np.float64) # (Np,2)
 
+        self.seed_end  = _closest_index(self.anchor["ref_point"],   ref_resampled)
+        self.probe_end = _closest_index(self.anchor["probe_point"], probe_resampled)
+
+        # 最终用“最佳参考”的 Δθ/scale 做完整 rollout
         preds_world = self.predict_on_transformed_probe()
-        print("🧼 Probe state cleared; ready for next prediction.")
         return preds_world
 
     # --- Internal training routine (reference frame) ---
@@ -895,54 +852,134 @@ class GP_predictor:
         self.model_info = train_moe(ds, METHOD_ID)
 
         # Record as one reference model
-        self.refs.append(dict(sampled=self.sampled, model_info=self.model_info))
+        self.refs.append(dict(
+            sampled=self.sampled,
+            model_info=self.model_info,
+            raw=np.array(self.ref_pts_raw, dtype=np.float32)  # 保存该参考的原始轨迹
+        ))
 
+    def _choose_best_ref_by_mse(
+        self,
+        probe_eq_np: np.ndarray,
+        probe_raw_np: np.ndarray,
+        *,
+        horizon: int | None = 100,     # 比如只看前 100 个对齐后的点；None 表示用全部重叠段
+        align_on_anchor: bool = True   # 是否用锚点对齐两个序列的索引（更稳）
+    ):
+        """
+        对每条参考：
+        1) 用原始 ref/probe 计算锚点 -> 得到 Δθ 与 scale
+        2) 将“参考的等时重采样轨迹”旋转/缩放到 probe 坐标系
+        3) 按索引一一对应计算平方距离并取均值（MSE）
+            - 若 align_on_anchor=True：让 ref 的锚点索引与 probe 的锚点索引对齐后再比
+            - horizon 限制只比较前 horizon 个重叠点
+        返回: (best_idx, (anchor_out, dtheta, scale), best_mse)
+        """
+        best_idx, best_mse, best_pack = None, float("inf"), None
+
+        for ridx, ref in enumerate(self.refs):
+            ref_raw = ref.get("raw", None)
+            if ref_raw is None or ref["model_info"] is None:
+                continue
+
+            # 1) 锚点/尺度（用原始轨迹做角度基与锚点）
+            out = get_anchor_correspondence(
+                ref_raw, probe_raw_np, angle_target=ANCHOR_ANGLE, n_segments_base=10
+            )
+            v_ref, v_pro = out["ref_vector"], out["probe_vector"]
+            dtheta = float(np.arctan2(v_pro[1], v_pro[0]) - np.arctan2(v_ref[1], v_ref[0]))
+            scale  = float(np.linalg.norm(v_pro) / max(np.linalg.norm(v_ref), 1e-6))
+
+            # 2) 参考（等时重采样）→ probe 坐标系
+            ref_samp = ref["sampled"].detach().cpu().numpy()     # (Nr,2)
+            c, s = np.cos(dtheta), np.sin(dtheta)
+            R = np.array([[c, -s], [s,  c]], dtype=np.float64)
+            ref_in_probe = (ref_samp - ref_samp[0]) @ R.T * scale + probe_eq_np[0]
+
+            # 3) 选择对齐的重叠段并计算 MSE
+            if align_on_anchor:
+                # 用锚点在“重采样序列”中的最近索引做对齐
+                i_ref_res = _closest_index(out["ref_point"],   ref_samp)
+                i_pro_res = _closest_index(out["probe_point"], probe_eq_np)
+                offset = int(i_pro_res - i_ref_res)  # ref 序列需要向右移多少才能对齐 probe
+
+                start_ref = max(0, -offset)
+                start_pro = max(0,  offset)
+                n_overlap = min(ref_in_probe.shape[0] - start_ref,
+                                probe_eq_np.shape[0] - start_pro)
+                if n_overlap <= 0:
+                    continue
+                if horizon is not None:
+                    n_overlap = min(n_overlap, int(horizon))
+
+                A = ref_in_probe[start_ref : start_ref + n_overlap]
+                B = probe_eq_np[start_pro : start_pro + n_overlap]
+            else:
+                n_overlap = min(ref_in_probe.shape[0], probe_eq_np.shape[0])
+                if n_overlap <= 0:
+                    continue
+                if horizon is not None:
+                    n_overlap = min(n_overlap, int(horizon))
+                A = ref_in_probe[:n_overlap]
+                B = probe_eq_np[:n_overlap]
+
+            mse = float(np.mean(np.sum((A - B) ** 2, axis=1)))
+            print(f"Ref #{ridx}: MSE@{n_overlap} = {mse:.6f}")
+
+            if mse < best_mse:
+                best_mse  = mse
+                best_idx  = ridx
+                best_pack = (out, dtheta, scale)
+
+        return best_idx, best_pack, best_mse
 
 # ==============================
 # Main (batch run)
 # ==============================
 if __name__ == "__main__":
-    import time
+    import time, glob
 
-    csv_path = "hand_train_s.csv"
-    rows = []
-    with open(csv_path, "r") as f:
-        r = csv.DictReader(f)
-        for row in r:
-            rows.append(row)
-    ref_xy = np.array([[float(r["x_actual"]), float(r["y_actual"])] for r in rows], dtype=np.float32)
+    # 1) 多条训练轨迹
+    train_files = sorted(glob.glob("hand_train_*.csv"))  # 比如 hand_train_1.csv, hand_train_2.csv, ...
+    gp = GP_predictor()
+    for fp in train_files:
+        rows = []
+        with open(fp, "r") as f:
+            r = csv.DictReader(f)
+            for row in r:
+                rows.append(row)
+        ref_xy = np.array([[float(r["x_actual"]), float(r["y_actual"])] for r in rows], dtype=np.float32)
+        print(f"Training on {fp}, shape={ref_xy.shape}")
+        gp.train_gp(ref_xy)
 
-    # Load probe
-    csv_path = "hand_probe_s.csv"
+    # 2) 加载一条 probe
     rows = []
-    with open(csv_path, "r") as f:
+    with open("hand_probe_c.csv", "r") as f:
         r = csv.DictReader(f)
         for row in r:
             rows.append(row)
     probe_xy = np.array([[float(r["x_actual"]), float(r["y_actual"])] for r in rows], dtype=np.float32)
 
-    print(f"Loaded ref: {ref_xy.shape}, probe: {probe_xy.shape}")
-
-    gp = GP_predictor()
-    gp.train_gp(ref_xy)
-
-    t0 = time.perf_counter()
+    # 3) 预测（内部会先用每个参考 GP 预测10步选最优，再完整 rollout）
     preds = gp.predict_from_probe(probe_xy)
-    dt = time.perf_counter() - t0
-    print(f"[predict_from_probe] elapsed: {dt*1000:.2f} ms ({dt:.4f} s)")
 
     # >>> add transformed reference overlay <<<
+    # 从 best_ref 取参考曲线（优先原始 raw，若没有就用 sampled）
+    ref_sel = gp.best_ref.get("raw")
+    if ref_sel is None:
+        ref_sel = gp.best_ref["sampled"].detach().cpu().numpy()
+
+    # 用挑选出的参考来做“参考→probe”的叠加
     dtheta = gp.dtheta_manual
     scale  = gp.scale_manual
     R = np.array([[np.cos(dtheta), -np.sin(dtheta)],
                 [np.sin(dtheta),  np.cos(dtheta)]], dtype=np.float64)
-    ref0, probe0 = ref_xy[0], probe_xy[0]
-    ref_xy_in_probe = (ref_xy - ref0) @ R.T * scale + probe0
-    
-    # Plot ref / probe / prediction
+    ref0, probe0 = ref_sel[0], probe_xy[0]
+    ref_xy_in_probe = (ref_sel - ref0) @ R.T * scale + probe0
+
+    # --- 绘图 ---
     fig, ax = plt.subplots(figsize=(8, 6), constrained_layout=False)
-    
-    # === 在主图上每 MAX_DATA_PER_EXPERT 个点做一次标记（含最后一个点） ===
+
     def _every_k_indices(n, k):
         idxs = np.arange(0, n, k, dtype=int)
         if len(idxs) == 0 or idxs[-1] != n - 1:
@@ -951,19 +988,18 @@ if __name__ == "__main__":
 
     kstep = int(MAX_DATA_PER_EXPERT)
 
-    # 原始 ref/probe 的索引
-    ref_idx   = _every_k_indices(ref_xy.shape[0],   kstep)
+    # ✅ 用被选中的参考 ref_sel，而不是 ref_xy
+    ref_idx   = _every_k_indices(ref_sel.shape[0],   kstep)
     probe_idx = _every_k_indices(probe_xy.shape[0], kstep)
 
     # --- 画对应的两个锚向量（origin -> anchor） ---
     if getattr(gp, "anchor", None) is not None:
-        # ref/probe 的原点与对应锚点（来自 get_anchor_correspondence，基于原始轨迹）
-        o_ref = ref_xy[0]
+        # ✅ ref 的原点也要来自 ref_sel
+        o_ref = ref_sel[0]
         p_ref = gp.anchor["ref_point"]
         o_pro = probe_xy[0]
         p_pro = gp.anchor["probe_point"]
 
-        # 画两条虚线向量 + 端点标记
         ax.plot([o_ref[0], p_ref[0]], [o_ref[1], p_ref[1]],
                 '--', linewidth=2, color='C3',
                 label=f"Ref anchor vec (idx={gp.anchor['ref_index']})", zorder=4)
@@ -976,30 +1012,24 @@ if __name__ == "__main__":
         ax.scatter([o_pro[0], p_pro[0]], [o_pro[1], p_pro[1]],
                 s=32, marker='x', color='C4', zorder=5)
 
-    ax.plot(ref_xy[:, 0],  ref_xy[:, 1],  label="Reference",  zorder=3)
-    ax.plot(probe_xy[:, 0], probe_xy[:, 1], label="Probe",      zorder=3)
+    # ✅ 这里用 ref_sel 画“被选中的参考”
+    ax.plot(ref_sel[:, 0],  ref_sel[:, 1],  label="Reference (selected)",  zorder=3)
+    ax.plot(probe_xy[:, 0], probe_xy[:, 1], label="Probe", zorder=3)
     if preds is not None and len(preds) > 0:
-        ax.plot(preds[:, 0], preds[:, 1], label="Prediction",   zorder=3)
+        ax.plot(preds[:, 0], preds[:, 1], label="Prediction", zorder=3)
 
-    #若你有“Reference→Probe”的对齐叠加曲线，也建议给高一点zorder
+    # 叠加“参考→Probe”的对齐曲线（你前面已经用 ref_sel 算好了 ref_xy_in_probe）
     ax.plot(ref_xy_in_probe[:, 0], ref_xy_in_probe[:, 1], '--', linewidth=2,
             label=f"Reference→Probe (θ={np.degrees(gp.dtheta_manual):.1f}°, s={gp.scale_manual:.3f})",
             zorder=3)
 
     ax.set_aspect("equal", adjustable="box")
     ax.grid(True, alpha=0.3)
-
-    # >>> 关键：把图例移到右侧画布外 <<<
     ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5),
             borderaxespad=0., frameon=True, framealpha=0.85)
-
-    # 预留右侧空间给图例
     plt.subplots_adjust(right=0.78)
-
     ax.set_title("Ref / Probe / Prediction (main)")
-    ax.set_xlabel("x")
-    ax.set_ylabel("y")
-
+    ax.set_xlabel("x"); ax.set_ylabel("y")
     plt.tight_layout()
     plt.savefig("ref_probe_prediction_main.png", dpi=150, bbox_inches="tight")
 

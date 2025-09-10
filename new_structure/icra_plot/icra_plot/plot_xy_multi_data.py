@@ -17,6 +17,11 @@ class PlotXYMultiDataNode(Node):
         self.data_start_index = self.get_parameter('data_start_index').get_parameter_value().integer_value
         self.get_logger().info(f'Using data_start_index: {self.data_start_index}')
 
+        self.declare_parameter('filename', 'training_multi_data.csv')
+        self.filename = self.get_parameter('filename').get_parameter_value().string_value
+        self.get_logger().info(f'Plotting data from file: {self.filename}')
+
+
     def plot_xy_trajectory(self, csv_filename):
         """plot actual position trajectory on x-y plane"""
         
@@ -66,15 +71,12 @@ def main():
     rclpy.init()
     node = PlotXYMultiDataNode()
     
-    node.declare_parameter('csv_file', 'training_multi_data.csv')
-    csv_file = node.get_parameter('csv_file').get_parameter_value().string_value
-    
-    if not csv_file.endswith('.csv'):
+    if not node.filename.endswith('.csv'):
         node.get_logger().error('Please provide a CSV file')
         rclpy.shutdown()
         sys.exit(1)
     
-    node.plot_xy_trajectory(csv_file)
+    node.plot_xy_trajectory(node.filename)
     rclpy.shutdown()
 
 if __name__ == '__main__':

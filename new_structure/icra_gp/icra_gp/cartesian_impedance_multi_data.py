@@ -12,8 +12,6 @@ import csv
 import traceback
 import sys
 
-def vee(mat):
-    return np.array([mat[2, 1], mat[0, 2], mat[1, 0]])
 
 class CartesianImpedanceMultiData(Node):
     
@@ -88,6 +86,11 @@ class CartesianImpedanceMultiData(Node):
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
         self._signal_handled = False                # flag to avoid repeated data saving
+
+        # filename for data recording
+        self.declare_parameter('filename', 'training_multi_data.csv')
+        self.filename = self.get_parameter('filename').get_parameter_value().string_value
+        self.get_logger().info(f'Data will be recorded in goal filepath: {self.filename}')
         
     def stateParameterCallback(self, msg):
         """callback function for /state_parameter subscriber"""
@@ -192,12 +195,14 @@ class CartesianImpedanceMultiData(Node):
             if self._signal_handled:
                 return
             self._signal_handled = True
-            self.get_logger().info(f'Received signal {signum}, saving data...')
+            self.get_logger().info(f'*** SIGNAL HANDLER CALLED - SIGNAL {signum} ***')
+            self.get_logger().info(f'Data collected so far: {len(self.time_history)} points')
             self.save_data_to_file()
             self.get_logger().info(f'Signal handler completed successfully')
-            sys.exit(0)
+            # Don't call sys.exit(0) here to allow proper cleanup
         except Exception as e:
             self.get_logger().error(f'Error in signal handler: {str(e)}')
+            self.get_logger().error(f'Traceback: {traceback.format_exc()}')
             self._signal_handled = False
     
     def save_data_to_file(self):
@@ -207,7 +212,7 @@ class CartesianImpedanceMultiData(Node):
             return
             
         try:
-            filename = 'training_multi_data.csv'
+            filename = self.filename
             
             with open(filename, 'w', newline='') as csvfile:
                 writer = csv.writer(csvfile)
@@ -233,23 +238,31 @@ def main(args=None):
     try:
         rclpy.spin(cartesian_impedance_multi_data_node)
     except KeyboardInterrupt:
-        cartesian_impedance_multi_data_node.get_logger().info('Received keyboard interrupt, saving data...')
+        cartesian_impedance_multi_data_node.get_logger().info('*** KEYBOARD INTERRUPT RECEIVED ***')
+        cartesian_impedance_multi_data_node.get_logger().info(f'Data collected so far: {len(cartesian_impedance_multi_data_node.time_history)} points')
     except Exception as e:
         cartesian_impedance_multi_data_node.get_logger().error(f'Error when running program: {str(e)}')
     finally:
         try:
-            # save data to file only if signal handler has not been executed
-            if not cartesian_impedance_multi_data_node._signal_handled:
-                cartesian_impedance_multi_data_node.get_logger().info('Signal handler not executed, saving data to file...')
-                cartesian_impedance_multi_data_node.save_data_to_file()
-            else:
-                cartesian_impedance_multi_data_node.get_logger().info('Signal handler executed, data already saved, skipping...')
+            # Always try to save data, regardless of signal handler status
+            cartesian_impedance_multi_data_node.get_logger().info('*** MAIN FUNCTION FINALLY BLOCK - SAVING DATA ***')
+            cartesian_impedance_multi_data_node.get_logger().info(f'Data collected: {len(cartesian_impedance_multi_data_node.time_history)} points')
+            cartesian_impedance_multi_data_node.save_data_to_file()
                 
         except Exception as e:
             cartesian_impedance_multi_data_node.get_logger().error(f'Error when saving data: {str(e)}')
+            cartesian_impedance_multi_data_node.get_logger().error(f'Traceback: {traceback.format_exc()}')
         
-        cartesian_impedance_multi_data_node.destroy_node()
-        rclpy.shutdown()
+        try:
+            cartesian_impedance_multi_data_node.destroy_node()
+        except Exception as e:
+            cartesian_impedance_multi_data_node.get_logger().error(f'Error destroying node: {str(e)}')
+        
+        try:
+            rclpy.shutdown()
+        except Exception as e:
+            # Ignore shutdown errors to prevent process termination
+            pass
 
 
 if __name__ == '__main__':

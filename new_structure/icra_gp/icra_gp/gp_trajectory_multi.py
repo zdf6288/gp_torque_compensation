@@ -41,7 +41,7 @@ class GPTrajectoryMulti(Node):
         self.predicted_trajectory_index = 0             # current index for publishing predicted trajectory
         self.predicted_trajectory_finished = False      # flag indicating publishment ofpredicted trajectory is finished
         self.point_repeat_count = 0                     # counter for repeating each point 10 times
-        self.points_per_repeat = 10                     # number of times to publish each point
+        self.points_per_repeat = 20                     # number of times to publish each point
         
         self.get_logger().info('GP trajectory data collection node started')
 
@@ -54,7 +54,7 @@ class GPTrajectoryMulti(Node):
             position = list(msg.x_real)  # [x, y, z]  
             self.x_real.append(position)
             self.time_stamp.append(timestamp)
-            self.z_des = position[2] - 0.1
+            self.z_des = position[2] - 0.25
             # z_desired is slightly lower than the last captured z-position
             # to keep the pen contact with the paper
                 
@@ -96,7 +96,7 @@ class GPTrajectoryMulti(Node):
             # x_real_array = np.array(x).reshape(-1, 3)  # reshape to [N, 3] for [x, y, z]
             
             x_array = np.array(x)
-            x_array = x_array[2000:]
+            x_array = x_array[1500:]
             probe2d = x_array[:, :2]
             # probe = probe2d[::10]
             probe = probe2d
