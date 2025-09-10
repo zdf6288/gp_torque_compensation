@@ -33,6 +33,7 @@ setup(
             'trajectory_publisher_multi_data = icra_gp.trajectory_publisher_multi_data:main',
             'trajectory_publisher_multi_validation = icra_gp.trajectory_publisher_multi_validation:main',
             'gp_trajectory_multi = icra_gp.gp_trajectory_multi:main',
+            'gp_train_multi = icra_gp.gp_train_multi:main',
         ],
     },
 )

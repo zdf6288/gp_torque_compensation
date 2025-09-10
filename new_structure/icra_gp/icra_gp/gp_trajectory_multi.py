@@ -54,7 +54,9 @@ class GPTrajectoryMulti(Node):
             position = list(msg.x_real)  # [x, y, z]  
             self.x_real.append(position)
             self.time_stamp.append(timestamp)
-            self.z_des = position[2] - 0.2
+            self.z_des = position[2] - 0.1
+            # z_desired is slightly lower than the last captured z-position
+            # to keep the pen contact with the paper
                 
         except Exception as e:
             self.get_logger().error(f'Error when processing data message: {str(e)}')
@@ -99,7 +101,7 @@ class GPTrajectoryMulti(Node):
             # probe = probe2d[::10]
             probe = probe2d
             print(probe[:50])
-            with open("gp_model.pkl", "rb") as f:
+            with open("gp_multi_model.pkl", "rb") as f:
                 gp_predictor = pickle.load(f)
             predicted = gp_predictor.predict_from_probe(probe)
             self.x_pred = []
