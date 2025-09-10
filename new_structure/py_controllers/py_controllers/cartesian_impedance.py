@@ -296,7 +296,6 @@ class CartesianImpedanceController(Node):
             self.get_logger().info(f'Received signal {signum}, saving data...')
             self.save_data_to_file()
             self.get_logger().info(f'Signal handler completed successfully')
-            sys.exit(0)
         except Exception as e:
             self.get_logger().error(f'Error in signal handler: {str(e)}')
             self._signal_handled = False
