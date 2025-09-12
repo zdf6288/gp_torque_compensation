@@ -11,6 +11,7 @@ setup(
             ['resource/' + package_name]),
         ('share/' + package_name + '/launch', ['launch/cartesian_impedance_icra_launch.py']),
         ('share/' + package_name + '/launch', ['launch/cartesian_impedance_multi_launch.py']),
+        ('share/' + package_name + '/launch', ['launch/cartesian_impedance_validation_launch.py']),
         ('share/' + package_name, ['package.xml']),
     ],
     install_requires=['setuptools'],
@@ -34,6 +35,7 @@ setup(
             'trajectory_publisher_multi_validation = icra_gp.trajectory_publisher_multi_validation:main',
             'gp_trajectory_multi = icra_gp.gp_trajectory_multi:main',
             'gp_train_multi = icra_gp.gp_train_multi:main',
+            'gp_trajectory_validation = icra_gp.gp_trajectory_validation:main',
         ],
     },
 )
