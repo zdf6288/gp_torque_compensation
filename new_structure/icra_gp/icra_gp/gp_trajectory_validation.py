@@ -40,7 +40,7 @@ class GPTrajectoryValidation(Node):
         self.predicted_trajectory_index = 0             # current index for publishing predicted trajectory
         self.predicted_trajectory_finished = False      # flag indicating publishment ofpredicted trajectory is finished
         self.point_repeat_count = 0                     # counter for repeating each point 10 times
-        self.points_per_repeat = 20                     # number of times to publish each point
+        self.points_per_repeat = 5                     # number of times to publish each point
         
         self.declare_parameter('filename', 'validation_data.csv')
         self.filename = self.get_parameter('filename').get_parameter_value().string_value
@@ -57,7 +57,7 @@ class GPTrajectoryValidation(Node):
             position = list(msg.x_real)  # [x, y, z]  
             self.x_real.append(position)
             self.time_stamp.append(timestamp)
-            self.z_des = position[2] - 0.15
+            self.z_des = position[2] - 0.05
             # z_desired is slightly lower than the last captured z-position
             # to keep the pen contact with the paper
                 
@@ -104,8 +104,9 @@ class GPTrajectoryValidation(Node):
                 y_temp = df['y_actual'].values - df['y_actual'].values[0]
                 x_pred = x_temp + self.x_real[-1][0]
                 y_pred = y_temp + self.x_real[-1][1]
-                
-                self.x_pred = np.column_stack((x_pred, y_pred, self.z_des))   
+            
+            for i in range(len(x_pred)):
+                self.x_pred.append([x_pred[i], y_pred[i], self.z_des])   
 
             self.gp_finished = True
 
