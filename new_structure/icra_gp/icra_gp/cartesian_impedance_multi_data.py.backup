@@ -11,10 +11,7 @@ import signal
 import csv
 import traceback
 import sys
-import threading
 
-# Global variable to store the node instance for signal handling
-cartesian_node_instance = None
 
 class CartesianImpedanceMultiData(Node):
     
@@ -89,7 +86,6 @@ class CartesianImpedanceMultiData(Node):
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
         self._signal_handled = False                # flag to avoid repeated data saving
-        self._shutdown_requested = False            # flag to indicate shutdown was requested
 
         # filename for data recording
         self.declare_parameter('filename', 'training_multi_data.csv')
@@ -99,10 +95,6 @@ class CartesianImpedanceMultiData(Node):
     def stateParameterCallback(self, msg):
         """callback function for /state_parameter subscriber"""
         try:
-            # Check if shutdown was requested
-            if self._shutdown_requested:
-                return
-                
             # initialize t_initial, get t_elapsed, t_last and dt
             # initialize q_initial, get q, dq and ddq
             t_now = self.get_clock().now()
@@ -203,15 +195,9 @@ class CartesianImpedanceMultiData(Node):
             if self._signal_handled:
                 return
             self._signal_handled = True
-            self._shutdown_requested = True
             self.get_logger().info(f'Received signal {signum}, saving data...')
             self.save_data_to_file()
             self.get_logger().info(f'Signal handler completed successfully')
-            
-            # Request shutdown of the node
-            self.get_logger().info('Requesting node shutdown...')
-            rclpy.shutdown()
-            
         except Exception as e:
             self.get_logger().error(f'Error in signal handler: {str(e)}')
             self._signal_handled = False
@@ -243,29 +229,28 @@ class CartesianImpedanceMultiData(Node):
             self.get_logger().error(f'Traceback: {traceback.format_exc()}')
 
 def main(args=None):
-    global cartesian_node_instance
     rclpy.init(args=args)
-    cartesian_node_instance = CartesianImpedanceMultiData()
+    cartesian_impedance_multi_data_node = CartesianImpedanceMultiData()
 
     try:
-        rclpy.spin(cartesian_node_instance)
+        rclpy.spin(cartesian_impedance_multi_data_node)
     except KeyboardInterrupt:
-        cartesian_node_instance.get_logger().info('Received keyboard interrupt, saving data...')
+        cartesian_impedance_multi_data_node.get_logger().info('Received keyboard interrupt, saving data...')
     except Exception as e:
-        cartesian_node_instance.get_logger().error(f'Error when running program: {str(e)}')
+        cartesian_impedance_multi_data_node.get_logger().error(f'Error when running program: {str(e)}')
     finally:
         try:
             # save data to file only if signal handler has not been executed
-            if not cartesian_node_instance._signal_handled:
-                cartesian_node_instance.get_logger().info('Signal handler not executed, saving data to file...')
-                cartesian_node_instance.save_data_to_file()
+            if not cartesian_impedance_multi_data_node._signal_handled:
+                cartesian_impedance_multi_data_node.get_logger().info('Signal handler not executed, saving data to file...')
+                cartesian_impedance_multi_data_node.save_data_to_file()
             else:
-                cartesian_node_instance.get_logger().info('Signal handler executed, data already saved, skipping...')
+                cartesian_impedance_multi_data_node.get_logger().info('Signal handler executed, data already saved, skipping...')
                 
         except Exception as e:
-            cartesian_node_instance.get_logger().error(f'Error when saving data: {str(e)}')
+            cartesian_impedance_multi_data_node.get_logger().error(f'Error when saving data: {str(e)}')
         
-        cartesian_node_instance.destroy_node()
+        cartesian_impedance_multi_data_node.destroy_node()
         rclpy.shutdown()
 
 

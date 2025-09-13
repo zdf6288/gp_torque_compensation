@@ -54,7 +54,7 @@ class GPTrajectoryMulti(Node):
             position = list(msg.x_real)  # [x, y, z]  
             self.x_real.append(position)
             self.time_stamp.append(timestamp)
-            self.z_des = position[2] - 0.15
+            self.z_des = position[2] - 0.075
             # z_desired is slightly lower than the last captured z-position
             # to keep the pen contact with the paper
                 
@@ -96,7 +96,7 @@ class GPTrajectoryMulti(Node):
             # x_real_array = np.array(x).reshape(-1, 3)  # reshape to [N, 3] for [x, y, z]
             
             x_array = np.array(x)
-            x_array = x_array[500:]
+            x_array = x_array[200:]
             probe2d = x_array[:, :2]
             # probe = probe2d[::10]
             probe = probe2d

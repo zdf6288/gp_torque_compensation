@@ -36,10 +36,10 @@ torch.manual_seed(SEED)
 
 # Tunable parameters
 VERBOSE = False
-ANCHOR_ANGLE = np.radians(15)  # angle (rad) for anchor correspondence
+ANCHOR_ANGLE = np.radians(30)  # angle (rad) for anchor correspondence
 K_HIST = 10                      # seed length (history window)
 NEAREST_K = 1
-MAX_DATA_PER_EXPERT = 400
+MAX_DATA_PER_EXPERT = 1000
 BASE_SCALE = 100                  # initial guess for scale
 ROLLOUT_STEPS = 500               # steps to rollout in demo
 PHI0_K_PROBE = 500                        # segments to average for phi0 in anchor finding
@@ -212,52 +212,67 @@ def moe_predict(info, feat_1xD: torch.Tensor):
     return y, var
 
 
-def rollout_reference_with_var(model_info, traj: torch.Tensor, start_t: int, h: int, k: int):
-    """
-    与 rollout_reference 类似，但额外返回每步的预测方差（在参考坐标系，输出为 var_x,var_y 的和）。
-    返回: (pred_positions, var_trace_per_step, horizon_used)
-    """
-    assert start_t >= (k - 1), f"start_t={start_t} too small; requires at least {k - 1}"
+def rollout_reference(model_info, traj, start_t, h, k):
+    assert start_t >= (k - 1), f"start_t={start_t} 太小，至少需要 {k - 1}"
     T = traj.shape[0]
     h = max(0, h)
-
+    
+    # ✅ 保持和训练时一致：使用 global origin 和 global base_dir
     global_origin = traj[0]
     if traj.shape[0] > 1:
-        end_idx = min(10, traj.shape[0] - 1)
-        dirs = traj[1 : end_idx + 1] - traj[0]
+        print("✅ 计算probe全局方向为前10段平均方向")
+        end_idx = min(10, traj.shape[0]-1)
+        dirs = traj[1:end_idx+1] - traj[0]
         global_base_dir = dirs.mean(dim=0)
     else:
+        print("⚠️ 轨迹点不足2个，无法计算全局方向，使用默认方向")
         global_base_dir = torch.tensor([1.0, 0.0])
 
+    # 初始化历史位置和 delta
     hist_pos = [traj[start_t - (k - 1) + i].clone() for i in range(k)]
-    cur_pos = hist_pos[-1].clone()
+    hist_del = []
+    for i in range(k):
+        idx = start_t - (k - 1) + i
+        prev = traj[idx - 1] if idx - 1 >= 0 else traj[0]
+        hist_del.append(traj[idx] - prev)
 
-    preds_pos = []
-    var_trace_list = []
+    cur_pos = hist_pos[-1].clone()
+    preds_std = []  # 存储标准化预测
+    preds_pos = []  # 存储实际位置（反标准化后）
+    vars_seq = []  # 新增：存储每步方差
 
     for _ in range(h):
+        feats = []
+
         polar_feat = polar_feat_from_xy_torch(torch.stack(hist_pos[-k:]), global_origin)
-        x = polar_feat.reshape(1, -1)  # (1, 3k)
+        feats.append(polar_feat.reshape(1, -1))  # (1, 2K)
 
-        # 参考坐标系下的 delta 与方差
-        y_pred, var_ref = moe_predict(model_info, x)   # var_ref: (2,) 是参考系里 x,y 的方差
-        y_pred = torch.tensor(y_pred, dtype=torch.float32)
+        x = torch.cat(feats, dim=1)  # shape (1, D)
 
-        # 旋回到“世界/参考几何”坐标（只用于累加点位；方差的 trace 旋转不变）
+        # GP预测
+        y_pred, var = moe_predict(model_info, x)  # 现在拿到 var
+        y_pred = torch.tensor(y_pred, dtype=torch.float32)  # 确保 tensor 类型一致
+        # print(f"Predicted (std space): {y_pred.numpy()}")
+        preds_std.append(y_pred[0])
+        vars_seq.append(var)   # <--- 保存方差
+
         gb = global_base_dir / global_base_dir.norm()
         R = torch.stack([gb, torch.tensor([-gb[1], gb[0]])], dim=1)
-        step_world = y_pred @ R.T  # (1, 2)
-
+        step_world = y_pred @ R.T  # shape (1, 2)
         next_pos = cur_pos + step_world[0]
+        next_del = step_world[0]
+        
+        # 更新历史
         hist_pos.append(next_pos)
+        hist_del.append(next_del)
         cur_pos = next_pos
         preds_pos.append(next_pos)
+        
+    preds = torch.stack(preds_pos, dim=0)
 
-        # 记录该步的 trace 方差（x,y 方差之和，旋转不变；跨参考时再乘以 scale^2）
-        var_trace_list.append(float(np.sum(var_ref)))
-
-    preds = torch.stack(preds_pos, dim=0) if preds_pos else torch.zeros((0, 2))
-    return preds, var_trace_list, h
+    # Ground truth (可选，仅调试用)
+    gt = traj[start_t + 1: start_t + 1 + h]
+    return preds, gt, h, np.array(vars_seq)
 
 
 # ==============================
@@ -677,7 +692,7 @@ class GP_predictor:
 
         # Termination (in probe frame)
         self.probe_goal = None         # predicted finish point in probe coordinates
-        self.goal_stop_eps = 0.01      # Euclidean distance threshold for stopping
+        self.goal_stop_eps = 0.005      # Euclidean distance threshold for stopping
 
         # Multiple reference trajectories
         self.refs = []
@@ -685,87 +700,90 @@ class GP_predictor:
         self.anchor = None
 
     def predict_on_transformed_probe(self):
-        """
-        Use anchor vectors to estimate Δθ and scale, map probe into the reference frame,
-        use its last K_HIST points as the GP seed to roll out in the ref frame, then map
-        predictions back to the probe frame. Supports standardization.
-        """
         if not hasattr(self, "best_ref") or self.best_ref is None:
-            print("❗ No best reference found (draw a probe first).")
+            print("❗ 未找到最佳参考轨迹 (请先画 probe)")
             return
-
         if len(self.probe_pts) < K_HIST:
-            print("❗ Probe is too short.")
+            print("❗ probe 太短")
             return
 
-        # --- Step 0: Prepare data ---
-        ref_np = self.best_ref["sampled"].numpy()
-        model_info = self.best_ref["model_info"]
+        # === Step 0: 数据准备 ===
+        ref_np = self.best_ref['sampled'].numpy()
+        model_info = self.best_ref['model_info']
         probe_np = np.asarray(self.probe_pts, dtype=np.float64)
 
-        # --- Step 1: Δθ and scale (manual or estimated externally) ---
-        print("Estimating using the first pair of anchor vectors...")
+        # === Step 1: Δθ 和 scale ===
         dtheta = self.dtheta_manual
         spatial_scale = self.scale_manual
-        print(f"📐 Manual settings: Δθ={np.degrees(dtheta):.2f}°, scale={spatial_scale:.3f}")
+        print(f"📐 手动设定: Δθ={np.degrees(dtheta):.2f}°, scale={spatial_scale:.3f}")
 
-        # --- Step 2: Map probe → reference frame ---
+        # === Step 2: probe → ref frame ===
         c, s = np.cos(-dtheta), np.sin(-dtheta)
         R_inv = np.array([[c, -s], [s, c]])
         probe_origin = probe_np[0]
-        probe_in_ref_frame = ((probe_np - probe_origin) @ R_inv.T) / spatial_scale
+        probe_in_ref = ((probe_np - probe_origin) @ R_inv.T) / spatial_scale
 
-        # Target endpoint (for optional truncation)
+        # === Step 3: 目标终点 = ref最后一点映射回 probe ===
         c_f, s_f = np.cos(dtheta), np.sin(dtheta)
-        R_fwd = np.array([[c_f, -s_f], [s_f, c_f]], dtype=np.float64)
+        R_fwd = np.array([[c_f, -s_f], [s_f, c_f]])
         ref_vec_total = ref_np[-1] - ref_np[0]
         probe_goal = probe_origin + spatial_scale * (R_fwd @ ref_vec_total)
         self.probe_goal = probe_goal
-        print(f"🎯 Target end (Probe frame): {probe_goal}")
 
-        # --- Step 3: GP seed ---
-        if len(probe_in_ref_frame) < K_HIST:
-            print(f"❗ probe_in_ref_frame length < {K_HIST}; cannot seed GP.")
-            return
-        start_t = probe_in_ref_frame.shape[0] - 1
+        # === Step 4: GP rollout in ref frame ===
+        start_t = probe_in_ref.shape[0] - 1
+        h = 500
 
-        # --- Step 4: GP rollout (ref frame) ---
-        h = ROLLOUT_STEPS
-        try:
-            preds_ref, gt_ref, h_used = rollout_reference_with_var(
-                model_info,
-                torch.tensor(probe_in_ref_frame, dtype=torch.float32),
-                start_t=start_t,
-                h=h,
-                k=K_HIST,
-            )
-        except Exception as e:
-            print(f"❗ GP rollout failed: {e}")
-            traceback.print_exc()
-            return
-
-        preds_ref_np = (
-            preds_ref.numpy() if preds_ref is not None and preds_ref.numel() > 0 else np.zeros((0, 2), dtype=np.float32)
+        preds_ref, gt_ref, h_used, vars_ref = rollout_reference(
+            model_info,
+            torch.tensor(probe_in_ref, dtype=torch.float32),
+            start_t=start_t,
+            h=h,
+            k=K_HIST
         )
 
-        # --- Step 5: Map predictions back to probe frame ---
-        c2, s2 = np.cos(dtheta), np.sin(dtheta)
-        R = np.array([[c2, -s2], [s2, c2]])
-        preds_world = (preds_ref_np * spatial_scale) @ R.T + probe_origin
+        preds_ref_np = preds_ref.numpy()
+        vars_ref = np.array(vars_ref)
 
-        # Optional: truncate when reaching the target endpoint
+        # === Step 5: 截断逻辑 ===
+        preds_world = (preds_ref_np * spatial_scale) @ R_fwd.T + probe_origin
         if self.probe_goal is not None and preds_world.shape[0] > 0:
             dists = np.linalg.norm(preds_world - self.probe_goal[None, :], axis=1)
-            hit = np.where(dists <= self.goal_stop_eps)[0]
-            if hit.size > 0:
-                cut = int(hit[0]) + 1
-                print(
-                    f"✂️ Prediction enters threshold at idx={hit[0]} (d={dists[hit[0]]:.3f} ≤ {self.goal_stop_eps:.3f}); "
-                    f"truncate to {cut} points."
-                )
-                preds_world = preds_world[:cut]
+            hits = np.where(dists <= self.goal_stop_eps)[0]
+            cut_idx_final = None
+            for cut_idx in hits:
+                var_at_hit = np.max(vars_ref[cut_idx])
+                print(f"[Probe-based] idx={cut_idx}, d={dists[cut_idx]:.3f}, var={var_at_hit:.6f}")
+                # if var_at_hit > 0.0001:   # ✅ 同时满足条件
+                cut_idx_final = cut_idx
+                break
+            if cut_idx_final is not None:
+                print(f"✂️ Probe-based 截断到 {cut_idx_final} 点")
+                preds_ref_np = preds_ref_np[:cut_idx_final]
+                vars_ref = vars_ref[:cut_idx_final]
 
-        print(f"✅ Prediction complete | Δθ={np.degrees(dtheta):.1f}°, scale={spatial_scale:.3f}")
+        # === Step 6: 方差带（ref frame → probe frame）===
+        stds_ref = np.sqrt(vars_ref)
+        upper_ref = preds_ref_np + 2 * stds_ref
+        lower_ref = preds_ref_np - 2 * stds_ref
+        polygon_ref = np.vstack([upper_ref, lower_ref[::-1]])
+
+        preds_world = (preds_ref_np * spatial_scale) @ R_fwd.T + probe_origin
+        polygon_world = (polygon_ref * spatial_scale) @ R_fwd.T + probe_origin
+        self.pred_vars = vars_ref
+
+        # if hasattr(self, "poly_probe") and self.poly_probe:
+        #     self.poly_probe.remove()
+        # self.poly_probe = self.ax.fill(
+        #     polygon_world[:, 0], polygon_world[:, 1],
+        #     color='green', alpha=0.2, label='Probe-based ±2σ region'
+        # )[0]
+
+        # self.update_scaled_pred(preds_world)
+        
+        # 原始轨迹上的预测点
+        self.preds_ref = preds_ref_np
+        print(f"✅ Probe-based 预测完成 | Δθ={np.degrees(dtheta):.1f}°, scale={spatial_scale:.3f}")
         return preds_world
 
     # --- Public API (batch-style) ---
