@@ -16,6 +16,7 @@ def generate_launch_description():
     fake_sensor_commands_parameter_name = 'fake_sensor_commands'
     use_rviz_parameter_name = 'use_rviz'
     mode_parameter_name = 'mode'
+    filename_parameter_name = 'filename'
 
     robot_ip = LaunchConfiguration(robot_ip_parameter_name)
     load_gripper = LaunchConfiguration(load_gripper_parameter_name)
@@ -23,6 +24,7 @@ def generate_launch_description():
     fake_sensor_commands = LaunchConfiguration(fake_sensor_commands_parameter_name)
     use_rviz = LaunchConfiguration(use_rviz_parameter_name)
     mode = LaunchConfiguration(mode_parameter_name)
+    filename = LaunchConfiguration(filename_parameter_name)
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -50,6 +52,10 @@ def generate_launch_description():
             mode_parameter_name,
             default_value='data',
             description='Mode selection: data or validation'),
+        DeclareLaunchArgument(
+            filename_parameter_name,
+            default_value='training_data.csv',
+            description='Filename for data recording'),
 
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource([PathJoinSubstitution(
@@ -76,6 +82,7 @@ def generate_launch_description():
                 condition=IfCondition(
                     PythonExpression(["'", mode, "' == 'data'"]),
                 ),
+            parameters=[{'filename': filename}],
         ),
         Node(
             package='icra_gp',
@@ -106,8 +113,8 @@ def generate_launch_description():
         ),
         Node(
             package='icra_gp',
-            executable='gp_trajectory',
-            name='gp_trajectory',
+            executable='gp_trajectory_multi',
+            name='gp_trajectory_multi',
             output='screen',
             condition=IfCondition(
                 PythonExpression(["'", mode, "' == 'validation'"]),

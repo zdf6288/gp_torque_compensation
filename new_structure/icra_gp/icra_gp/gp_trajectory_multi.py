@@ -96,7 +96,7 @@ class GPTrajectoryMulti(Node):
             # x_real_array = np.array(x).reshape(-1, 3)  # reshape to [N, 3] for [x, y, z]
             
             x_array = np.array(x)
-            x_array = x_array[200:]
+            x_array = x_array[400:]
             probe2d = x_array[:, :2]
             # probe = probe2d[::10]
             probe = probe2d

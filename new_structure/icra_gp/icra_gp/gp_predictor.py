@@ -824,7 +824,7 @@ class GP_predictor:
 
         # === 用 MSE 选最匹配的参考（默认对齐到锚点，比较前 100 点） ===
         best_idx, best_pack, best_mse = self._choose_best_ref_by_mse(
-            probe_eq_np, probe_raw_np, horizon=100, align_on_anchor=True
+            probe_eq_np, probe_raw_np, horizon=100, align_on_anchor=False
         )
         if best_idx is None:
             print("❗ Failed to choose a best reference (insufficient data).")

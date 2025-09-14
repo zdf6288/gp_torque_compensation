@@ -64,7 +64,7 @@ class TrajectoryPublisherICRAData(Node):
         # start point of trajectory
         self.trajectory_start_x = 0.3
         self.trajectory_start_y = 0.0
-        self.trajectory_start_z = 0.65
+        self.trajectory_start_z = 0.60
 
         # for convertion from lambda command to trajectory
         self.t_buffer = None
@@ -148,9 +148,13 @@ class TrajectoryPublisherICRAData(Node):
     def lambdaCallback(self, msg):
         """callback function of /TwistLeft or /TwistRight subscriber"""
         try:
-            self.lambda_linear_x = msg.linear.x
-            self.lambda_linear_y = msg.linear.y
+            # self.lambda_linear_x = msg.linear.x
+            # self.lambda_linear_y = msg.linear.y
             self.lambda_linear_z = msg.linear.z
+            # change to fit the visual field when recording ICRA video
+            self.lambda_linear_x = msg.linear.y
+            self.lambda_linear_y = - msg.linear.x
+
         except Exception as e:
             self.get_logger().error(f'Error in lambda callback: {str(e)}')
     
@@ -233,7 +237,7 @@ class TrajectoryPublisherICRAData(Node):
                     # position: (x, y, z) for x_des[:3]
                     x = self.x_buffer
                     y = self.y_buffer
-                    z = self.z_buffer
+                    z = self.trajectory_start_z - 0.02
                     self.x_buffer = x + dx * dt
                     self.y_buffer = y + dy * dt
 

@@ -46,7 +46,7 @@ class CartesianImpedanceICRAData(Node):
         self.i_pid = np.array(self.get_parameter('i_pid').value, dtype=float)
         self.i_error = np.zeros(7)
 
-        self.declare_parameter('k_gains', [750.0, 750.0, 750.0, 75.0, 75.0, 0.0])   # k_gains in impedance control (task space)
+        self.declare_parameter('k_gains', [750.0, 750.0, 500.0, 10.0, 10.0, 0.0])   # k_gains in impedance control (task space)
         self.k_gains = np.array(self.get_parameter('k_gains').value, dtype=float)
         self.K_gains = np.diag(self.k_gains)
         self.eta = 1.0                                                              # for calculating d_gains
@@ -108,6 +108,11 @@ class CartesianImpedanceICRAData(Node):
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
         self._signal_handled = False                # flag to avoid repeated data saving
+
+        # filename for data recording
+        self.declare_parameter('filename', 'training_data.csv')
+        self.filename = self.get_parameter('filename').get_parameter_value().string_value
+        self.get_logger().info(f'Data will be recorded in goal filepath: {self.filename}')
 
     def taskCommandCallback(self, msg):
         """callback function for /task_space_command subscriber"""
@@ -305,9 +310,8 @@ class CartesianImpedanceICRAData(Node):
             return
             
         try:
-            filename = 'training_data.csv'
             
-            with open(filename, 'w', newline='') as csvfile:
+            with open(self.filename, 'w', newline='') as csvfile:
                 writer = csv.writer(csvfile)
                 
                 header = ['Time(s)']
@@ -331,7 +335,7 @@ class CartesianImpedanceICRAData(Node):
                     row.extend(self.gravity_history[i])
                     writer.writerow(row)
                     
-            self.get_logger().info(f'Successfully saved {len(self.tau_history)} data points to {filename}')
+            self.get_logger().info(f'Successfully saved {len(self.tau_history)} data points to {self.filename}')
             
         except Exception as e:
             self.get_logger().error(f'Error when saving data: {str(e)}')
