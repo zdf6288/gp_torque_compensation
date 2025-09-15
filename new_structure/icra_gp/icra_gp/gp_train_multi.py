@@ -37,11 +37,11 @@ class GPTrainMultiNode(Node):
             self.get_logger().error(f"Error in training: {str(e)}")
             return
         
-        if os.path.exists("gp_multi_model.pkl") and os.path.getsize("gp_multi_model.pkl") > 0:
+        if os.path.exists("gp_multi_lambda_model.pkl") and os.path.getsize("gp_multi_lambda_model.pkl") > 0:
             try:
-                with open("gp_multi_model.pkl", "rb") as f:
+                with open("gp_multi_lambda_model.pkl", "rb") as f:
                     gp_predictor = pickle.load(f)
-                self.get_logger().info("Loaded existing GP model from gp_multi_model.pkl")
+                self.get_logger().info("Loaded existing GP model from gp_multi_lambda_model.pkl")
             except (pickle.PickleError, EOFError) as e:
                 self.get_logger().warn(f"Failed to load existing model: {e}. Creating new model.")
                 gp_predictor = GP_predictor()
@@ -51,10 +51,10 @@ class GPTrainMultiNode(Node):
         
         gp_predictor.train_gp(ref)
         
-        with open("gp_multi_model.pkl", "wb") as f:
+        with open("gp_multi_lambda_model.pkl", "wb") as f:
             pickle.dump(gp_predictor, f)
 
-        self.get_logger().info("GP model saved to gp_multi_model.pkl")
+        self.get_logger().info("GP model saved to gp_multi_lambda_model.pkl")
 
 def main():
     rclpy.init()

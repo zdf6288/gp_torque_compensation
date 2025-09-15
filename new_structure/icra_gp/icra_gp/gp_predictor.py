@@ -732,7 +732,7 @@ class GP_predictor:
 
         # === Step 4: GP rollout in ref frame ===
         start_t = probe_in_ref.shape[0] - 1
-        h = 500
+        h = 600
 
         preds_ref, gt_ref, h_used, vars_ref = rollout_reference(
             model_info,

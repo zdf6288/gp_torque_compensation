@@ -54,7 +54,7 @@ class GPTrajectoryMulti(Node):
             position = list(msg.x_real)  # [x, y, z]  
             self.x_real.append(position)
             self.time_stamp.append(timestamp)
-            self.z_des = position[2] - 0.075
+            self.z_des = position[2] - 0.010
             # z_desired is slightly lower than the last captured z-position
             # to keep the pen contact with the paper
                 
@@ -96,12 +96,12 @@ class GPTrajectoryMulti(Node):
             # x_real_array = np.array(x).reshape(-1, 3)  # reshape to [N, 3] for [x, y, z]
             
             x_array = np.array(x)
-            x_array = x_array[400:]
+            x_array = x_array[1000:]
             probe2d = x_array[:, :2]
             # probe = probe2d[::10]
             probe = probe2d
             print(probe[:50])
-            with open("gp_multi_model.pkl", "rb") as f:
+            with open("gp_multi_lambda_model.pkl", "rb") as f:
                 gp_predictor = pickle.load(f)
             predicted = gp_predictor.predict_from_probe(probe)
             self.x_pred = []

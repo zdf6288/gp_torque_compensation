@@ -2,7 +2,7 @@
 
 import rclpy
 from rclpy.node import Node
-from custom_msgs.msg import StateParameter, EffortCommand, TaskSpaceCommand
+from custom_msgs.msg import StateParameter, EffortCommand, TaskSpaceCommand, LambdaCommand
 from custom_msgs.srv import JointPositionAdjust
 from std_msgs.msg import Bool
 import numpy as np
@@ -29,6 +29,10 @@ class CartesianImpedanceICRAData(Node):
         # subscribe to /data_recording_enabled to know when to start recording data
         self.data_recording_subscription = self.create_subscription(
             Bool, '/data_recording_enabled', self.dataRecordingCallback, 10)
+
+        # subscribe to /lambda_command to know when lambda is stopped
+        self.lambda_command_subscription = self.create_subscription(
+            LambdaCommand, '/TwistLeft', self.lambdaCommandCallback, 10)
         
         # publish on /effort_command
         self.effort_publisher = self.create_publisher(
@@ -46,7 +50,7 @@ class CartesianImpedanceICRAData(Node):
         self.i_pid = np.array(self.get_parameter('i_pid').value, dtype=float)
         self.i_error = np.zeros(7)
 
-        self.declare_parameter('k_gains', [750.0, 750.0, 500.0, 10.0, 10.0, 0.0])   # k_gains in impedance control (task space)
+        self.declare_parameter('k_gains', [750.0, 750.0, 250.0, 10.0, 10.0, 0.0])   # k_gains in impedance control (task space)
         self.k_gains = np.array(self.get_parameter('k_gains').value, dtype=float)
         self.K_gains = np.diag(self.k_gains)
         self.eta = 1.0                                                              # for calculating d_gains
@@ -124,6 +128,10 @@ class CartesianImpedanceICRAData(Node):
     def dataRecordingCallback(self, msg):
         """callback function for /data_recording_enabled subscriber"""
         self.data_recording_enabled = msg.data
+
+    def lambdaCommandCallback(self, msg):
+        """callback function for /lambda_command subscriber"""
+        self.lambda_stopped = msg.lambda_stopped
         
     def stateParameterCallback(self, msg):
         """callback function for /state_parameter subscriber"""
@@ -242,7 +250,7 @@ class CartesianImpedanceICRAData(Node):
             self.effort_publisher.publish(self.effort_msg)
             
             # record data only when data recording is enabled
-            if self.data_recording_enabled:
+            if self.data_recording_enabled and not self.lambda_stopped:
                 self.tau_history.append(tau.tolist())
                 self.time_history.append(t_elapsed)
                 self.x_history.append(x.tolist())

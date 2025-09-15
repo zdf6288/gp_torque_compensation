@@ -62,9 +62,9 @@ class TrajectoryPublisherICRAValidation(Node):
         self.transition_complete = False        # flag indicating the completion of moving to the start point of trajectory
         
         # start point of trajectory
-        self.trajectory_start_x = 0.3
+        self.trajectory_start_x = 0.5
         self.trajectory_start_y = 0.0
-        self.trajectory_start_z = 0.60
+        self.trajectory_start_z = 0.58
 
         # for convertion from lambda command to trajectory
         self.t_buffer = None
@@ -242,7 +242,7 @@ class TrajectoryPublisherICRAValidation(Node):
                         # position: (x, y, z) for x_des[:3]
                         x = self.x_buffer + dx * dt
                         y = self.y_buffer + dy * dt
-                        z = self.trajectory_start_z - 0.02
+                        z = self.trajectory_start_z - 0.005
                         self.x_buffer = x
                         self.y_buffer = y
     
