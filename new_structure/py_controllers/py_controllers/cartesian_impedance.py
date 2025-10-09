@@ -105,6 +105,8 @@ class CartesianImpedanceController(Node):
         self.dx_des_history = []
         self.tau_measured_history = []
         self.gravity_history = []
+        self.q_history = []
+        self.dq_history = []
 
         # set signal handler
         signal.signal(signal.SIGINT, self.signal_handler)
@@ -180,6 +182,8 @@ class CartesianImpedanceController(Node):
             mass_matrix_array = np.array(msg.mass)                      # vectorized 7x7 mass matrix, column-major
             coriolis_matrix_array = np.array(msg.coriolis)              # vectorized diagonal elements of 7x7 coriolis matrix
             zero_jacobian_array = np.array(msg.zero_jacobian_flange)    # vectorized 6x7 zero jacobian matrix in flange frame, column-major
+            gravity_measured = np.array(msg.gravity)
+            tau_measured = np.array(msg.effort_measured)
 
             o_t_f = o_t_f_array.reshape(4, 4, order='F')                    # 4x4 pose matrix in flange frame, column-major
             mass_matrix = mass_matrix_array.reshape(7, 7, order='F')        # 7x7
@@ -197,8 +201,6 @@ class CartesianImpedanceController(Node):
             else:
                 djacobian = (jacobian - self.jacobian_buffer) / dt
             self.jacobian_buffer = jacobian.copy()
-
-  
             # get x and dx
             x = o_t_f[:3, 3]            # 3x1 position, only x-y-z
             dx = zero_jacobian @ dq     # 6x1 velocity
@@ -225,6 +227,8 @@ class CartesianImpedanceController(Node):
                     @ jacobian_pinv @ dx[:5]
                 - jacobian_t @ pd_term[:5]
             )
+            tau_residual = tau_measured - tau - gravity_measured
+            print("tau_residual", tau_residual)
 
             tau_nullspace = ((np.eye(7) - zero_jacobian_pinv @ zero_jacobian) 
                 @ (self.kpn_gains * (self.q_des - q) + self.dpn_gains * (self.dq_des - dq)))
@@ -248,6 +252,8 @@ class CartesianImpedanceController(Node):
                 self.dx_des_history.append(self.dx_des[:3].tolist()) 
                 self.tau_measured_history.append(np.array(msg.effort_measured).tolist())
                 self.gravity_history.append(np.array(msg.gravity).tolist())
+                self.q_history.append(q.tolist())
+                self.dq_history.append(dq.tolist()) 
 
         except Exception as e:
             self.get_logger().error(f'Parameter error: {str(e)}')
@@ -320,6 +326,8 @@ class CartesianImpedanceController(Node):
                 header.extend(['dx_desired', 'dy_desired', 'dz_desired'])
                 header.extend([f'tau_measured_{i+1}' for i in range(len(self.tau_history[0]))])
                 header.extend([f'gravity_{i+1}' for i in range(len(self.tau_history[0]))])
+                header.extend([f'joint_pos_{i+1}' for i in range(7)])   
+                header.extend([f'joint_vel_{i+1}' for i in range(7)])
                 writer.writerow(header)
                 
                 for i, t in enumerate(self.time_history):
@@ -331,6 +339,8 @@ class CartesianImpedanceController(Node):
                     row.extend(self.dx_des_history[i])
                     row.extend(self.tau_measured_history[i])
                     row.extend(self.gravity_history[i])
+                    row.extend(self.q_history[i])       
+                    row.extend(self.dq_history[i])       
                     writer.writerow(row)
                     
             self.get_logger().info(f'Successfully saved {len(self.tau_history)} data points to {filename}')

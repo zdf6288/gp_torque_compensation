@@ -16,6 +16,27 @@ def plot_data_from_csv(csv_filename):
         
     try:
         df = pd.read_csv(csv_filename)
+
+                # -------------------------------
+        # 子采样 + 平滑组合处理
+        # -------------------------------
+
+        # 子采样率（越大 → 点越少）
+        DECIMATE = 5     # 每5个取一个点  (1000Hz → 200Hz)
+        # 平滑窗口大小
+        SMOOTH_WINDOW = 10  # 相当于 ~50ms 平滑
+
+        # Step 1: 子采样
+        df = df.iloc[::DECIMATE, :].reset_index(drop=True)
+
+        # Step 2: 平滑 (滚动均值)
+        df_smooth = df.rolling(window=SMOOTH_WINDOW, center=True).mean()
+
+        # 用平滑后的数据替换原 df，避免后面改很多
+        df = df_smooth.dropna().reset_index(drop=True)
+
+        print(f"✅ Applied decimation (/{DECIMATE}) and smoothing (window={SMOOTH_WINDOW})")
+        print(f"Resulting data points: {len(df)}")
         
         time_history = df['Time(s)'].values
         
@@ -191,6 +212,67 @@ def plot_data_from_csv(csv_filename):
         
     except Exception as e:
         print(f'Error when plotting data: {str(e)}')
+
+    # ===== 新增：读取关节位置 =====
+    joint_pos_cols = [c for c in df.columns if c.startswith('joint_pos_')]
+    if len(joint_pos_cols) == 7 and \
+    (tau_measured_history_array.size > 0 and gravity_history_array.size > 0 and tau_history_array.size > 0):
+
+        # 力矩误差：tau_cmd - (tau_meas - gravity)
+        tau_err = tau_history_array - (tau_measured_history_array - gravity_history_array)  # shape: [N,7]
+        q_all   = df[joint_pos_cols].values  # shape: [N,7]
+
+        # 画 7 个关节的 位置-误差 散点 + 线性拟合
+        fig2, axes2 = plt.subplots(3, 3, figsize=(18, 14))
+        fig2.suptitle('Joint Position vs Torque Error', fontsize=14)
+
+        # 只用到前 7 个子图
+        import itertools
+        grid_axes = list(itertools.chain.from_iterable(axes2))
+        for j in range(7):
+            ax = grid_axes[j]
+            qj = q_all[:, j]
+            ej = tau_err[:, j]
+
+            vel_col = f'joint_vel_{j+1}'
+            if vel_col in df.columns:
+                vj = df[vel_col].values
+                pos_mask = vj >= 0
+                ax.scatter(qj[pos_mask], ej[pos_mask], s=8, c='red', alpha=0.5, label='v > 0')
+                ax.scatter(qj[~pos_mask], ej[~pos_mask], s=8, c='blue', alpha=0.5, label='v < 0')
+            else:
+                ax.scatter(qj, ej, s=6, alpha=0.5, label=f'Joint {j+1}')
+
+            # 线性拟合 y = a x + b（最小二乘）
+            if len(qj) >= 2:
+                A = np.vstack([qj, np.ones_like(qj)]).T
+                a, b = np.linalg.lstsq(A, ej, rcond=None)[0]
+                xfit = np.linspace(qj.min(), qj.max(), 100)
+                yfit = a * xfit + b
+                ax.plot(xfit, yfit, linewidth=2, label=f'fit: y={a:.3f}x+{b:.3f}')
+
+                # 皮尔逊相关系数
+                corr = np.corrcoef(qj, ej)[0, 1]
+                ax.set_title(f'Joint {j+1}  (corr={corr:.3f})')
+            else:
+                ax.set_title(f'Joint {j+1}')
+
+            ax.set_xlabel('Joint Position [rad]')
+            ax.set_ylabel('Torque Error [Nm]')
+            ax.grid(True)
+            ax.legend()
+
+        # 多出的第 9 个子图清空
+        grid_axes[8].axis('off')
+
+        plt.tight_layout()
+        out2 = csv_filename.replace('.csv', '_pos_vs_tauerr.png')
+        fig2.savefig(out2, dpi=300, bbox_inches='tight')
+        print(f'Figure saved as {out2}')
+    else:
+        print('Skip joint position vs torque error plot: missing joint_pos_* columns or torque data.')
+
+
 
 def main():
     parser = argparse.ArgumentParser(description='Plot data from Cartesian Impedance Controller CSV file')
