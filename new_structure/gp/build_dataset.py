@@ -4,6 +4,11 @@ from scipy.signal import medfilt
 import matplotlib.pyplot as plt
 import os
 
+
+from scipy.signal import butter, filtfilt, savgol_filter, medfilt
+import numpy as np
+import pandas as pd
+
 def load_csvs(pattern="*.csv"):
     paths = glob.glob(pattern)
     if not paths:
@@ -36,40 +41,69 @@ def make_ddq_from_dq(dq_series, dt):
     k = 5 if len(ddq) >= 5 else (len(ddq) // 2 * 2 + 1)  # 奇数核
     return medfilt(ddq, kernel_size=max(3, k))
 
-def build_xy(df, dt=0.001, use_vel=False):
+def build_xy(df, dt=0.001, use_vel=False, fs=None, lp_tau=6.0, median_k=5):
     X_list, Y_list = [], []
     for j in range(1, 8):
-        # 关节角/速
-        q = df[f"joint_pos_{j}"].values
-        if f"joint_vel_{j}" in df.columns:
-            dq = df[f"joint_vel_{j}"].values
-        else:
-            # 无速度时可由位置差分估算（不建议在线使用，这里只离线兜底）
-            dq = np.zeros_like(q)
-
+        q  = df[f"joint_pos_{j}"].values
+        dq = df.get(f"joint_vel_{j}", pd.Series(np.zeros_like(q))).values
         ddq = make_ddq_from_dq(pd.Series(dq), dt)
 
-        # 力矩与重力
         tau_cmd = df[f"tau_{j}"].values
         tau_meas = df[f"tau_measured_{j}"].values
         g = df[f"gravity_{j}"].values
 
-        # 学习目标：残差力矩
+        # 残差力矩
         y = tau_meas - g - tau_cmd
 
-        # 输入：q, ddq（可选加 dq）
-        if use_vel:
-            x = np.stack([q, dq, ddq], axis=1)
-        else:
-            x = np.stack([q, ddq], axis=1)
+        # 对 y 做去尖 + 低通
+        y = median_despike(y, k=median_k)
+        if lp_tau and lp_tau > 0 and fs and fs > 0:
+            y = butter_lowpass_filtfilt(y, fs=fs, fc=lp_tau, order=4)
 
-        # 去掉极端离群点（相对中位数的 5σ）
+        x = np.stack([q, ddq] if not use_vel else [q, dq, ddq], axis=1)
+
         y_med, y_std = np.median(y), np.std(y) if np.std(y) > 0 else 1.0
         m = np.abs(y - y_med) < 5 * y_std
 
         X_list.append(x[m].astype(np.float32))
         Y_list.append(y[m].astype(np.float32)[:, None])
     return X_list, Y_list
+
+def butter_lowpass_filtfilt(x, fs, fc, order=4):
+    """
+    零相位 Butterworth 低通。x: 1D ndarray，fs: 采样频率(Hz)，fc: 截止频率(Hz)
+    """
+    if fc is None or fc <= 0 or fs <= 0:
+        return x
+    wn = fc / (0.5 * fs)  # 归一化截止频率
+    wn = min(max(wn, 1e-6), 0.999999)
+    b, a = butter(order, wn, btype='low', analog=False)
+    # filtfilt 需要长度> 3*(max(len(a),len(b))-1)
+    if x.size < 3 * (max(len(a), len(b)) - 1) + 1:
+        return x
+    return filtfilt(b, a, x, method="pad")
+
+def savgol_smooth(x, window=9, poly=3):
+    """
+    Savitzky–Golay 平滑。window 必须奇数且>= poly+2
+    """
+    w = int(window)
+    if w % 2 == 0:
+        w += 1
+    w = max(w, poly + 3 if (poly + 3) % 2 == 1 else poly + 4)
+    if x.size < w:
+        return x
+    return savgol_filter(x, window_length=w, polyorder=poly, mode='interp')
+
+def median_despike(x, k=5):
+    """中值滤波去尖点（奇数核）"""
+    k = int(k)
+    if k % 2 == 0:
+        k += 1
+    if x.size < k:
+        return x
+    return medfilt(x, kernel_size=k)
+
 
 def save_per_joint_plots(X_list, Y_list, out_npz_path, use_vel=False):
     """
@@ -164,6 +198,11 @@ def main():
                     help="save 7 per-joint figures after building dataset")
     ap.add_argument("--no-show", action="store_true",
                     help="(reserved) do not show figures (we always save)")
+    ap.add_argument("--lp-dq", type=float, default=10.0, help="dq 低通截止频率(Hz), 0=不滤")
+    ap.add_argument("--lp-tau", type=float, default=6.0,  help="tau残差低通截止频率(Hz), 0=不滤")
+    ap.add_argument("--sg-window", type=int, default=9,   help="Savitzky-Golay 窗口(奇数)")
+    ap.add_argument("--sg-poly", type=int, default=3,     help="Savitzky-Golay 多项式阶数")
+    ap.add_argument("--median-k", type=int, default=5,    help="中值滤波核(奇数)")
 
     args = ap.parse_args()
 
@@ -175,7 +214,9 @@ def main():
     eff_dt = args.dt * (args.decimate if args.decimate and args.decimate > 1 else 1)
 
     # 3) 构建 X/Y
-    X_list, Y_list = build_xy(df, dt=eff_dt, use_vel=args.use_vel)
+    fs = 1.0 / eff_dt
+    X_list, Y_list = build_xy(df, dt=eff_dt, use_vel=args.use_vel, fs=fs,
+                            lp_tau=args.lp_tau, median_k=args.median_k)
 
     # 4) 保存
     np.savez(
