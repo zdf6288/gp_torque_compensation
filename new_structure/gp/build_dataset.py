@@ -60,7 +60,8 @@ def build_xy(df, dt=0.001, use_vel=False, fs=None, lp_tau=6.0, median_k=5):
         if lp_tau and lp_tau > 0 and fs and fs > 0:
             y = butter_lowpass_filtfilt(y, fs=fs, fc=lp_tau, order=4)
 
-        x = np.stack([q, ddq] if not use_vel else [q, dq, ddq], axis=1)
+        # x = np.stack([q, ddq] if not use_vel else [q, dq, ddq], axis=1)
+        x = np.stack([q])
 
         y_med, y_std = np.median(y), np.std(y) if np.std(y) > 0 else 1.0
         m = np.abs(y - y_med) < 5 * y_std

@@ -1,0 +1,78 @@
+# =====================================================
+# === ROS2 / colcon workspace ignore template =========
+# =====================================================
+
+# === Colcon build products ===
+build/
+install/
+log/
+
+# === ROS2 generated files ===
+*.pyc
+__pycache__/
+*.so
+*.o
+*.a
+*.out
+*.pdb
+*.obj
+*.dll
+*.exe
+*.dSYM/
+*.class
+
+# === Python virtual envs ===
+venv/
+.env/
+.venv/
+
+# === CMake / catkin / ament build temp ===
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+ament_cmake_core/
+Testing/
+CTestTestfile.cmake
+Makefile
+
+# === Editor / IDE ===
+.vscode/
+.idea/
+*.swp
+*.swo
+*.user
+*.DS_Store
+
+# === Data / logs / debug ===
+*.log
+*.csv
+*.bag
+*.npz
+*.pkl
+*.npy
+*.yaml~
+*.old
+*.tmp
+*.bak
+
+# === Custom folders (e.g. GP models or generated data) ===
+gp_models/
+data/
+outputs/
+results/
+plots/
+
+# === Launch / params temp ===
+*.launch.py~
+*.param.yaml~
+
+# === ROS2 specific auto-generated ===
+install_setup.bash
+install/local_setup.*
+build/local_setup.*
+log/latest_build/
+.colcon_install_cache
+
+# =====================================================
+# === End of template =================================
+# =====================================================
