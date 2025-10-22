@@ -73,71 +73,62 @@ def make_ddq_from_dq(dq_series, dt):
 def build_xy(
     df,
     dt=0.001,
-    use_vel=False,
+    use_vel=False,           # False: [q, ddq_des]; True: [q, dq_des, ddq_des]
     fs=None,
     lp_tau=6.0,
     median_k=5,
-    direction="positive",      # "positive" | "negative" | "all"
-    dir_by="tau_cmd",          # "tau_cmd" | "dq"
-    eps=1e-9,
 ):
     """
-    direction: 选择正/负/全部样本
-    dir_by:    用哪个量判方向（tau_cmd 或 dq）
+    X: [q, dq_des_joint, ddq_des_joint] 或 [q, ddq_des_joint]
+    Y: tau_measured - gravity - tau_cmd (残差力矩)
+    另外返回：同一掩码下的 tau_cmd、tau_measured、gravity
     """
     X_list, Y_list = [], []
+    C_list, M_list, G_list = [], [], []
+
+    required = [
+        "joint_pos_", "tau_", "tau_measured_", "gravity_",
+        "dq_des_joint_", "ddq_des_joint_"
+    ]
+    for pref in required:
+        for j in range(1, 8):
+            col = f"{pref}{j}"
+            if col not in df.columns:
+                raise KeyError(f"缺少列: {col}")
+
     for j in range(1, 8):
-        q  = df[f"joint_pos_{j}"].values
-        dq = df.get(f"joint_vel_{j}", pd.Series(np.zeros_like(q))).values
-        ddq = make_ddq_from_dq(pd.Series(dq), dt)
+        q        = df[f"joint_pos_{j}"].values.astype(float)
+        dq_des   = df[f"dq_des_joint_{j}"].values.astype(float)
+        ddq_des  = df[f"ddq_des_joint_{j}"].values.astype(float)
+        tau_cmd  = df[f"tau_{j}"].values.astype(float)
+        tau_meas = df[f"tau_measured_{j}"].values.astype(float)
+        g        = df[f"gravity_{j}"].values.astype(float)
 
-        tau_cmd  = df[f"tau_{j}"].values
-        tau_meas = df[f"tau_measured_{j}"].values
-        g        = df[f"gravity_{j}"].values
-
-        # 残差力矩
+        # 目标 y（残差）
         y = tau_meas - g - tau_cmd
 
-        # 方向掩码
-        if dir_by == "tau_cmd":
-            s = tau_cmd
-        elif dir_by == "dq":
-            s = dq
-        else:
-            raise ValueError("dir_by must be 'tau_cmd' or 'dq'")
-
-        if direction == "positive":
-            m_dir = s > eps
-        elif direction == "negative":
-            m_dir = s < -eps
-        elif direction == "all":
-            m_dir = np.ones_like(s, dtype=bool)
-        else:
-            raise ValueError("direction must be 'positive' | 'negative' | 'all'")
-
-        # 去尖 +（可选）低通
+        # 去尖 + 可选低通（对 y）
         y = median_despike(y, k=median_k)
         if lp_tau and lp_tau > 0 and fs and fs > 0:
             y = butter_lowpass_filtfilt(y, fs=fs, fc=lp_tau, order=4)
 
-        # 5σ 剔除异常
-        y_med = np.median(y)
-        y_std = np.std(y) if np.std(y) > 0 else 1.0
-        m_robust = np.abs(y - y_med) < 5 * y_std
+        # 5σ鲁棒掩码
+        y_med = np.median(y); y_std = np.std(y) if np.std(y) > 0 else 1.0
+        m = np.abs(y - y_med) < 5 * y_std
 
-        # 组合掩码
-        m = m_dir & m_robust
+        # 特征
+        X = np.stack([q, dq_des, ddq_des], axis=1) if use_vel else np.stack([q, ddq_des], axis=1)
 
-        # # 组特征
-        # if use_vel:
-        #     x = np.stack([q, dq, ddq], axis=1)   # (N,3)
-        # else:
-        #     x = np.stack([q, ddq], axis=1)       # (N,2)
-
-        x = q.reshape(-1, 1)
-        X_list.append(x[m].astype(np.float32))
+        # 统一掩码后的入表
+        X_list.append(X[m].astype(np.float32))
         Y_list.append(y[m].astype(np.float32)[:, None])
-    return X_list, Y_list
+        C_list.append(tau_cmd[m].astype(np.float32))
+        M_list.append(tau_meas[m].astype(np.float32))
+        G_list.append(g[m].astype(np.float32))
+
+    return X_list, Y_list, C_list, M_list, G_list
+
+
 
 
 def butter_lowpass_filtfilt(x, fs, fc, order=4):
@@ -178,83 +169,88 @@ def median_despike(x, k=5):
 
 def save_per_joint_plots(X_list, Y_list, out_npz_path, use_vel=False):
     """
-    为每个关节保存一张图：
-      - 左：q vs y（残差力矩），带线性拟合
-      - 右：ddq vs y（若 use_vel=True 也额外画 dq vs y）
+    为每个关节保存图：
+      - 1) q vs y（残差力矩），带线性拟合和相关系数
+      - 2) ddq_des vs y
+      - 3) 若 use_vel=True：dq_des vs y
+    约定:
+      use_vel=False: X = [q, ddq_des]
+      use_vel=True : X = [q, dq_des, ddq_des]
     """
+    import numpy as np
+    import matplotlib.pyplot as plt
+    import os
+
     out_dir = os.path.dirname(out_npz_path) or "."
     prefix = os.path.splitext(os.path.basename(out_npz_path))[0]
 
     for j in range(7):
-        X = X_list[j]    # shape [N, 2] or [N, 3]
-        Y = Y_list[j][:, 0]  # shape [N]
+        X = X_list[j]
+        Y = Y_list[j][:, 0]
 
         if X.shape[0] < 5:
             print(f"[warn] joint {j+1}: not enough samples ({X.shape[0]}) -> skip plot")
             continue
 
-        # 拆输入
+        # 拆特征
         if use_vel:
-            q, dq, ddq = X[:, 0], X[:, 1], X[:, 2]
+            q         = X[:, 0]
+            dq_des    = X[:, 1]
+            ddq_des   = X[:, 2]
+            ncols     = 3
         else:
-            q = X[:, 0]
+            q         = X[:, 0]
+            ddq_des   = X[:, 1]
+            ncols     = 2
 
-        fig, axes = plt.subplots(1, 2 + (1 if use_vel else 0), figsize=(12, 4))
-        if not isinstance(axes, np.ndarray):
-            axes = np.array([axes])
+        fig, axes = plt.subplots(1, ncols, figsize=(6*ncols, 4))
+        if ncols == 1:
+            axes = [axes]
+        else:
+            axes = np.atleast_1d(axes)
 
-        # 1) q vs y
-        ax = axes[0]
-        ax.scatter(q, Y, s=8, alpha=0.5)
-        # 线性拟合
-        A = np.vstack([q, np.ones_like(q)]).T
-        a, b = np.linalg.lstsq(A, Y, rcond=None)[0]
-        xfit = np.linspace(q.min(), q.max(), 200)
-        yfit = a * xfit + b
-        ax.plot(xfit, yfit, linewidth=2, label=f'fit: y={a:.3f}x+{b:.3f}')
-        corr = np.corrcoef(q, Y)[0, 1]
-        ax.set_title(f'Joint {j+1}: q vs y (corr={corr:.3f})')
-        ax.set_xlabel('q [rad]')
-        ax.set_ylabel('Residual torque y [Nm]')
-        ax.grid(True)
-        ax.legend(loc='best', fontsize=9)
+        def _scatter_fit(ax, x, y, xlab, title_prefix):
+            ax.scatter(x, y, s=8, alpha=0.5)
+            # 线性拟合（容错）
+            try:
+                A = np.vstack([x, np.ones_like(x)]).T
+                coef = np.linalg.lstsq(A, y, rcond=None)[0]
+                a, b = float(coef[0]), float(coef[1])
+                xfit = np.linspace(np.min(x), np.max(x), 200)
+                yfit = a * xfit + b
+                ax.plot(xfit, yfit, linewidth=2, label=f'fit: y={a:.3f}x+{b:.3f}')
+            except Exception:
+                a = b = np.nan
 
-        # # 2) ddq vs y
-        # ax = axes[1]
-        # ax.scatter(ddq, Y, s=8, alpha=0.5)
-        # A = np.vstack([ddq, np.ones_like(ddq)]).T
-        # a, b = np.linalg.lstsq(A, Y, rcond=None)[0]
-        # xfit = np.linspace(ddq.min(), ddq.max(), 200)
-        # yfit = a * xfit + b
-        # ax.plot(xfit, yfit, linewidth=2, label=f'fit: y={a:.3f}x+{b:.3f}')
-        # corr = np.corrcoef(ddq, Y)[0, 1]
-        # ax.set_title(f'Joint {j+1}: ddq vs y (corr={corr:.3f})')
-        # ax.set_xlabel('ddq [rad/s^2]')
-        # ax.set_ylabel('Residual torque y [Nm]')
-        # ax.grid(True)
-        # ax.legend(loc='best', fontsize=9)
+            # 相关系数（容错）
+            try:
+                corr = np.corrcoef(x, y)[0, 1]
+            except Exception:
+                corr = np.nan
 
-        # 3) 可选：dq vs y
-        if use_vel:
-            ax = axes[2]
-            ax.scatter(dq, Y, s=8, alpha=0.5)
-            A = np.vstack([dq, np.ones_like(dq)]).T
-            a, b = np.linalg.lstsq(A, Y, rcond=None)[0]
-            xfit = np.linspace(dq.min(), dq.max(), 200)
-            yfit = a * xfit + b
-            ax.plot(xfit, yfit, linewidth=2, label=f'fit: y={a:.3f}x+{b:.3f}')
-            corr = np.corrcoef(dq, Y)[0, 1]
-            ax.set_title(f'Joint {j+1}: dq vs y (corr={corr:.3f})')
-            ax.set_xlabel('dq [rad/s]')
+            ax.set_title(f'Joint {j+1}: {title_prefix} (corr={corr:.3f})')
+            ax.set_xlabel(xlab)
             ax.set_ylabel('Residual torque y [Nm]')
             ax.grid(True)
-            ax.legend(loc='best', fontsize=9)
+            if not np.isnan(a):
+                ax.legend(loc='best', fontsize=9)
+
+        # 1) q vs y
+        _scatter_fit(axes[0], q, Y, 'q [rad]', 'q vs y')
+
+        # 2) ddq_des vs y
+        _scatter_fit(axes[1], ddq_des, Y, 'ddq_des [rad/s²]', 'ddq_des vs y')
+
+        # 3) dq_des vs y（仅 use_vel=True）
+        if use_vel and ncols == 3:
+            _scatter_fit(axes[2], dq_des, Y, 'dq_des [rad/s]', 'dq_des vs y')
 
         plt.tight_layout()
         out_png = os.path.join(out_dir, f"{prefix}_joint{j+1}.png")
         fig.savefig(out_png, dpi=220, bbox_inches='tight')
         plt.close(fig)
         print(f"🖼 saved {out_png}")
+
         
 def main():
     ap = argparse.ArgumentParser(description="Build per-joint GP dataset with decimation + smoothing")
@@ -290,17 +286,18 @@ def main():
 
     # 3) 构建 X/Y
     fs = 1.0 / eff_dt
-    X_list, Y_list = build_xy(  
+    X_list, Y_list, C_list, M_list, G_list = build_xy(
         df, dt=eff_dt, use_vel=args.use_vel, fs=fs,
-        lp_tau=args.lp_tau, median_k=args.median_k,
-        direction=args.direction, dir_by=args.dir_by
+        lp_tau=args.lp_tau, median_k=args.median_k
     )
 
-    # 4) 保存
     np.savez(
         args.out,
-        **{f"X{j}": X_list[j - 1] for j in range(1, 8)},
-        **{f"Y{j}": Y_list[j - 1] for j in range(1, 8)},
+        **{f"X{j}": X_list[j-1] for j in range(1, 8)},
+        **{f"Y{j}": Y_list[j-1] for j in range(1, 8)},
+        **{f"C{j}": C_list[j-1] for j in range(1, 8)},   # tau_cmd
+        **{f"M{j}": M_list[j-1] for j in range(1, 8)},   # tau_measured
+        **{f"G{j}": G_list[j-1] for j in range(1, 8)},   # gravity
         meta=np.array({
             "decimate": args.decimate,
             "smooth": args.smooth,

@@ -86,9 +86,11 @@ def online_predict_update_smse(
     Xn, Yn, hps, x_dim,
     nearest_k=4, max_experts=80, max_data_per_expert=50, timescale=0.05,
     warmup=200,
+    print_each=False,
+    stats=None,              # 新增：用于反标准化
 ):
     """
-    逐样本在线：前 warmup 个点仅入模不计误差；之后先预测再更新。
+    逐样本在线预测+更新，打印标准化和物理单位下的预测/真值。
     返回：model, y_pred_std(N,1), smse_std_curve(N,), final_smse_std
     """
     model = SkyGP_rBCM(
@@ -96,47 +98,73 @@ def online_predict_update_smse(
         max_data_per_expert=max_data_per_expert,
         nearest_k=nearest_k, max_experts=max_experts,
         replacement=False,
-        pretrained_params=hps,   # (sf, sn, ls) —— 标准化空间
+        pretrained_params=hps,
         timescale=timescale,
     )
 
     N = len(Xn)
     y_pred_std = np.zeros((N, 1), dtype=np.float32)
 
-    # 全局方差（标准化空间里通常≈1）
     var_global_std = float(np.var(Yn[:, 0], ddof=1))
     if var_global_std < 1e-12:
         var_global_std = 1e-12
 
-    # 逐前缀 SMSE（标准化）
     smse_std_curve = np.zeros(N, dtype=np.float64)
     sum_sq_err_std = 0.0
+
+    # 若有 stats，则预取反标准化参数
+    if stats is not None:
+        _, _, Ym, Ys = stats
+        Ym, Ys = float(Ym[0]), float(Ys[0])
 
     for i in tqdm(range(N), desc="Online predict+update"):
         x = Xn[i].reshape(-1)
         y = Yn[i].reshape(-1)
 
         if i < warmup:
-            # 冷启动阶段：只入模，不计误差
             model.add_point(x, y)
-            smse_std_curve[i] = 0.0 if i == 0 else smse_std_curve[i-1]
+            smse_std_curve[i] = 0.0 if i == 0 else smse_std_curve[i - 1]
+            if print_each:
+                if stats is not None:
+                    y_real = y[0] * Ys + Ym
+                    tqdm.write(f"[warmup {i:5d}] y_true = {y_real:10.6f} Nm (std={y[0]:.6f})")
+                else:
+                    tqdm.write(f"[warmup {i:5d}] y_true_std = {y[0]:.6f}")
             continue
 
-        # 1) 先预测（不含当前样本）
+        # --- 预测 ---
         mu, _ = model.predict(x)
         y_pred_std[i, 0] = mu[0]
-        # 2) 立刻增量加入该样本
+
+        # --- 打印 ---
+        if print_each:
+            err_std = mu[0] - y[0]
+            if stats is not None:
+                y_pred_real = mu[0] * Ys + Ym
+                y_true_real = y[0] * Ys + Ym
+                err_real = y_pred_real - y_true_real
+                tqdm.write(
+                    f"[step {i:5d}] y_pred = {y_pred_real:10.6f} Nm | y_true = {y_true_real:10.6f} Nm | err = {err_real:9.6f} Nm"
+                )
+            else:
+                tqdm.write(
+                    f"[step {i:5d}] y_pred_std = {mu[0]:.6f} | y_true_std = {y[0]:.6f} | err_std = {err_std:.6f}"
+                )
+
+        # --- 更新 ---
         model.add_point(x, y)
-        # 3) 更新逐前缀 SMSE（分母用全局方差）
+
+        # --- SMSE ---
         err_i = float(y_pred_std[i, 0] - Yn[i, 0])
         sum_sq_err_std += err_i * err_i
         t_eff = (i - warmup + 1)
         mse_t = sum_sq_err_std / t_eff
-        # smse_std_curve[i] = mse_t / var_global_std
-        smse_std_curve[i] = mse_t
+        smse_std_curve[i] = mse_t  # 若要真SMSE, 可除以 var_global_std
 
     final_smse_std = float(smse_std_curve[-1])
     return model, y_pred_std, smse_std_curve, final_smse_std
+
+
 
 
 # ---------------- Main ----------------
@@ -154,7 +182,7 @@ if __name__ == "__main__":
 
         # 2) 拟合全局超参（标准化空间）
         hps = fit_global_hparams(
-            Xn, Yn, max_pts_hparam=2000, iters=600, lr=0.02
+            Xn, Yn, max_pts_hparam=2000, iters=200, lr=0.02
         )
 
         # 3) 在线预测 + 增量更新 + 标准化 SMSE（分母=全局方差）
@@ -162,7 +190,7 @@ if __name__ == "__main__":
         model, y_pred_std, smse_std_curve, final_smse_std = online_predict_update_smse(
             Xn, Yn, hps=hps, x_dim=Xn.shape[1],
             nearest_k=2, max_experts=80, max_data_per_expert=50, timescale=0.05,
-            warmup=warmup,
+            warmup=warmup,print_each=True
         )
 
         # 4) 原单位下 SMSE（同样用全局方差；与标准化逻辑一致）
@@ -195,3 +223,46 @@ if __name__ == "__main__":
                 "warmup": warmup,
             }, f)
         print(f"✔ saved gp_models/joint{j}.pkl ({X.shape[0]} samples)")
+
+        # 读取额外列
+        C = data[f"C{j}"].astype(np.float64)  # tau_cmd
+        M = data[f"M{j}"].astype(np.float64)  # tau_measured
+        G = data[f"G{j}"].astype(np.float64)  # gravity
+
+        # 反标准化预测残差（Nm）
+        y_pred_real = destandardize(y_pred_std[:, 0], stats)
+        y_true_real = Y[:, 0].astype(np.float64)
+
+        # 计算预测的关节力矩
+        tau_pred_with_g = C + G + y_pred_real      # 和 tau_measured 对比
+        tau_pred_no_g   = C + y_pred_real          # 和 (tau_measured - gravity) 对比（可选）
+
+        # 画图（含重力版本，通常更直观）
+        # 画图（含重力，对比 tau_measured / 预测力矩 / 指令力矩）
+        plt.figure(figsize=(10,4))
+        plt.plot(M,                label="tau_measured",                    linewidth=1.5)
+        plt.plot(tau_pred_with_g,  label="tau_pred = tau_cmd + g + y_pred", linewidth=1.5)
+        plt.plot(C + G,            label="tau_cmd + g",                      linewidth=1.0, linestyle="--")  # ← 指令（含重力）
+        plt.plot(C,                label="tau_cmd (no g)",                   linewidth=1.0, linestyle=":")   # ← 你要的 tau_cmd
+        plt.xlabel("Sample index")
+        plt.ylabel("Torque [Nm]")
+        plt.title(f"Joint {j} — Measured vs Predicted Torque")
+        plt.grid(True); plt.legend()
+        out_png_torque = f"gp_models/joint{j}_tau_pred_vs_measured.png"
+        plt.tight_layout(); plt.savefig(out_png_torque, dpi=200, bbox_inches='tight'); plt.close()
+        print(f"🖼 saved {out_png_torque}")
+
+
+        # 去重力对比（sanity check）：(measured - g) / (command + y_pred) / command
+        plt.figure(figsize=(10,4))
+        plt.plot(M - G,           label="tau_measured - gravity", linewidth=1.5)
+        plt.plot(tau_pred_no_g,   label="tau_cmd + y_pred",        linewidth=1.5)
+        plt.plot(C,               label="tau_cmd",                 linewidth=1.0, linestyle="--")  # ← 你要的 tau_cmd
+        plt.xlabel("Sample index")
+        plt.ylabel("Torque [Nm]")
+        plt.title(f"Joint {j} — (Measured - g) vs (Command + y_pred)")
+        plt.grid(True); plt.legend()
+        out_png_torque2 = f"gp_models/joint{j}_tau_pred_vs_measured_minus_g.png"
+        plt.tight_layout(); plt.savefig(out_png_torque2, dpi=200, bbox_inches='tight'); plt.close()
+        print(f"🖼 saved {out_png_torque2}")
+

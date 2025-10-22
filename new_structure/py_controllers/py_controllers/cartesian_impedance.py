@@ -107,7 +107,8 @@ class CartesianImpedanceController(Node):
         self.gravity_history = []
         self.q_history = []
         self.dq_history = []
-
+        self.dq_des_joint_history = []   # desired joint velocity
+        self.ddq_des_joint_history = []  # desired joint acceleration
         # set signal handler
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
@@ -204,6 +205,23 @@ class CartesianImpedanceController(Node):
             # get x and dx
             x = o_t_f[:3, 3]            # 3x1 position, only x-y-z
             dx = zero_jacobian @ dq     # 6x1 velocity
+
+            # === 映射任务空间期望到关节空间的期望速度/加速度 ===
+            # 任务空间只用前5维（你的控制是5 DoF：3平移+2姿态约束）
+            dx_des_5  = self.dx_des[:5]
+            ddx_des_5 = self.ddx_des[:5]
+
+            # dq_des (joint) = J^+ * dx_des
+            dq_des_joint = jacobian_pinv @ dx_des_5
+
+            # ddq_des (joint) = J^+ * (ddx_des - dJ * dq)
+            # 数值防护：dt很小时 dJ 可能抖；已按你代码用差分得到 djacobian
+            ddq_des_joint = jacobian_pinv @ (ddx_des_5 - djacobian @ dq)
+
+            # 记录（仅当开启录数时）
+            if self.data_recording_enabled:
+                self.dq_des_joint_history.append(dq_des_joint.tolist())
+                self.ddq_des_joint_history.append(ddq_des_joint.tolist())
             # ddx = zero_jacobian @ ddq + dzero_jacobian @ dq
 
             rotation_matrix = o_t_f[:3, :3]     # 3x3 rotation matrix
@@ -311,43 +329,76 @@ class CartesianImpedanceController(Node):
         if not self.tau_history:
             self.get_logger().warning('No data to save - tau_history is empty')
             return
-            
+
         try:
             filename = 'cartesian_impedance_controller_data.csv'
-            
+
+            # 计算可用的最小长度，避免某些列表短导致越界
+            series_list = [
+                self.time_history,
+                self.tau_history,
+                self.x_history,
+                self.x_des_history,
+                self.dx_history,
+                self.dx_des_history,
+                self.tau_measured_history,
+                self.gravity_history,
+                self.q_history,
+                self.dq_history,
+                self.dq_des_joint_history,
+                self.ddq_des_joint_history,
+            ]
+            min_len = min(len(s) for s in series_list)
+
             with open(filename, 'w', newline='') as csvfile:
                 writer = csv.writer(csvfile)
-                
+
                 header = ['Time(s)']
-                header.extend([f'tau_{i+1}' for i in range(len(self.tau_history[0]))])
+                n_j = len(self.tau_history[0])  # 通常是7
+                header.extend([f'tau_{i+1}' for i in range(n_j)])
                 header.extend(['x_actual', 'y_actual', 'z_actual'])
                 header.extend(['x_desired', 'y_desired', 'z_desired'])
                 header.extend(['dx_actual', 'dy_actual', 'dz_actual'])
                 header.extend(['dx_desired', 'dy_desired', 'dz_desired'])
-                header.extend([f'tau_measured_{i+1}' for i in range(len(self.tau_history[0]))])
-                header.extend([f'gravity_{i+1}' for i in range(len(self.tau_history[0]))])
-                header.extend([f'joint_pos_{i+1}' for i in range(7)])   
+                header.extend([f'tau_measured_{i+1}' for i in range(n_j)])
+                header.extend([f'gravity_{i+1}' for i in range(n_j)])
+                header.extend([f'joint_pos_{i+1}' for i in range(7)])
                 header.extend([f'joint_vel_{i+1}' for i in range(7)])
+                header.extend([f'dq_des_joint_{i+1}' for i in range(7)])
+                header.extend([f'ddq_des_joint_{i+1}' for i in range(7)])
                 writer.writerow(header)
-                
-                for i, t in enumerate(self.time_history):
-                    row = [t]
+
+                for i in range(min_len):
+                    row = [self.time_history[i]]
                     row.extend(self.tau_history[i])
                     row.extend(self.x_history[i][:3])
                     row.extend(self.x_des_history[i][:3])
-                    row.extend(self.dx_history[i])
-                    row.extend(self.dx_des_history[i])
+                    row.extend(self.dx_history[i])           # 已是3维
+                    row.extend(self.dx_des_history[i])       # 已是3维
                     row.extend(self.tau_measured_history[i])
                     row.extend(self.gravity_history[i])
-                    row.extend(self.q_history[i])       
-                    row.extend(self.dq_history[i])       
+                    row.extend(self.q_history[i])
+                    row.extend(self.dq_history[i])
+
+                    # 防御性处理：如果某次未记录到 dq_des/ddq_des，填零
+                    if i < len(self.dq_des_joint_history):
+                        row.extend(self.dq_des_joint_history[i])
+                    else:
+                        row.extend([0.0]*7)
+
+                    if i < len(self.ddq_des_joint_history):
+                        row.extend(self.ddq_des_joint_history[i])
+                    else:
+                        row.extend([0.0]*7)
+
                     writer.writerow(row)
-                    
-            self.get_logger().info(f'Successfully saved {len(self.tau_history)} data points to {filename}')
-            
+
+            self.get_logger().info(f'Successfully saved {min_len} data points to {filename}')
+
         except Exception as e:
             self.get_logger().error(f'Error when saving data: {str(e)}')
             self.get_logger().error(f'Traceback: {traceback.format_exc()}')
+
 
 def main(args=None):
     rclpy.init(args=args)
