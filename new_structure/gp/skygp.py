@@ -62,11 +62,19 @@ class SkyGP_rBCM:
     # ---------- 核函数与参数 ----------
 
     def kernel_np(self, X1, X2, lengthscale, sigma_f):
-        # X1: (D, N1), X2: (D, N2)
-        X1_scaled = X1 / lengthscale[:, None]
-        X2_scaled = X2 / lengthscale[:, None]
+        # 统一形状
+        X1 = np.asarray(X1).reshape(self.x_dim, -1)   # (D, N1)
+        X2 = np.asarray(X2).reshape(self.x_dim, -1)   # (D, N2)
+        ls = np.asarray(lengthscale, dtype=float).reshape(-1)
+        if ls.size == 1 and self.x_dim > 1:           # 标量 -> 广播到每一维
+            ls = np.repeat(ls, self.x_dim)
+        elif ls.size != self.x_dim:                   # 容错：尺寸不对也广播
+            ls = np.broadcast_to(ls, (self.x_dim,))
+        X1_scaled = X1 / ls[:, None]
+        X2_scaled = X2 / ls[:, None]
         dists = np.sum((X1_scaled[:, :, None] - X2_scaled[:, None, :]) ** 2, axis=0)
-        return sigma_f**2 * np.exp(-0.5 * dists)
+        return float(sigma_f) ** 2 * np.exp(-0.5 * dists)
+
 
     def _set_or_guess_hparams(self, X, Y):
         """若没给超参，就用启发式估计：lengthscale=各维中位间距；outputscale=std(Y)；noise=0.05*std(Y)+eps"""
@@ -100,21 +108,23 @@ class SkyGP_rBCM:
             outputscale, noise, lengthscale = self.pretrained_params
             log_sigma_f = np.log(np.atleast_1d(outputscale).flatten())
             log_sigma_n = np.log(np.atleast_1d(noise).flatten())
-            lengthscale = np.asarray(lengthscale)
-            if lengthscale.ndim == 2 and lengthscale.shape[1] == self.y_dim:
-                log_lengthscale = np.log(lengthscale)
-            else:
-                log_lengthscale = np.log(lengthscale.squeeze())
+
+            ls = np.asarray(lengthscale, dtype=float).reshape(-1)
+            if ls.size == 1 and self.x_dim > 1:
+                ls = np.repeat(ls, self.x_dim)
+            # y_dim==1 时用 (D,)；多输出时你可以扩成 (D, y_dim)
+            log_lengthscale = np.log(ls)
         else:
             log_sigma_f = np.log(np.ones(self.y_dim))
             log_sigma_n = np.log(np.ones(self.y_dim) * 0.01)
-            log_lengthscale = np.log(np.ones((self.x_dim,)) if self.y_dim == 1 else np.ones((self.x_dim, self.y_dim)))
+            log_lengthscale = np.log(np.ones((self.x_dim,)))
 
         self.model_params[model_id] = {
             "log_sigma_f": log_sigma_f,
             "log_sigma_n": log_sigma_n,
             "log_lengthscale": log_lengthscale,
         }
+
 
     # ---------- 专家管理 ----------
 
@@ -370,6 +380,7 @@ class SkyGP_rBCM:
             norm_dist = np.inf
 
         search_k = int(min(self.max_experts, max(1, np.exp(norm_dist / self.timescale))))
+        # search_k = self.max_experts
         n_experts = len(self.expert_centers)
 
         if self.last_expert_idx is None:

@@ -41,34 +41,104 @@ def make_ddq_from_dq(dq_series, dt):
     k = 5 if len(ddq) >= 5 else (len(ddq) // 2 * 2 + 1)  # 奇数核
     return medfilt(ddq, kernel_size=max(3, k))
 
-def build_xy(df, dt=0.001, use_vel=False, fs=None, lp_tau=6.0, median_k=5):
+# def build_xy(df, dt=0.001, use_vel=False, fs=None, lp_tau=6.0, median_k=5):
+#     X_list, Y_list = [], []
+#     for j in range(1, 8):
+#         q  = df[f"joint_pos_{j}"].values
+#         dq = df.get(f"joint_vel_{j}", pd.Series(np.zeros_like(q))).values
+#         ddq = make_ddq_from_dq(pd.Series(dq), dt)
+
+#         tau_cmd = df[f"tau_{j}"].values
+#         tau_meas = df[f"tau_measured_{j}"].values
+#         g = df[f"gravity_{j}"].values
+
+#         # 残差力矩
+#         y = tau_meas - g - tau_cmd
+
+#         # 对 y 做去尖 + 低通
+#         y = median_despike(y, k=median_k)
+#         if lp_tau and lp_tau > 0 and fs and fs > 0:
+#             y = butter_lowpass_filtfilt(y, fs=fs, fc=lp_tau, order=4)
+
+#         x = np.stack([q, ddq] if not use_vel else [q, dq, ddq], axis=1)
+#         # x = q.reshape(-1, 1)
+
+#         y_med, y_std = np.median(y), np.std(y) if np.std(y) > 0 else 1.0
+#         m = np.abs(y - y_med) < 5 * y_std
+
+#         X_list.append(x[m].astype(np.float32))
+#         Y_list.append(y[m].astype(np.float32)[:, None])
+#     return X_list, Y_list
+
+def build_xy(
+    df,
+    dt=0.001,
+    use_vel=False,
+    fs=None,
+    lp_tau=6.0,
+    median_k=5,
+    direction="positive",      # "positive" | "negative" | "all"
+    dir_by="tau_cmd",          # "tau_cmd" | "dq"
+    eps=1e-9,
+):
+    """
+    direction: 选择正/负/全部样本
+    dir_by:    用哪个量判方向（tau_cmd 或 dq）
+    """
     X_list, Y_list = [], []
     for j in range(1, 8):
         q  = df[f"joint_pos_{j}"].values
         dq = df.get(f"joint_vel_{j}", pd.Series(np.zeros_like(q))).values
         ddq = make_ddq_from_dq(pd.Series(dq), dt)
 
-        tau_cmd = df[f"tau_{j}"].values
+        tau_cmd  = df[f"tau_{j}"].values
         tau_meas = df[f"tau_measured_{j}"].values
-        g = df[f"gravity_{j}"].values
+        g        = df[f"gravity_{j}"].values
 
         # 残差力矩
         y = tau_meas - g - tau_cmd
 
-        # 对 y 做去尖 + 低通
+        # 方向掩码
+        if dir_by == "tau_cmd":
+            s = tau_cmd
+        elif dir_by == "dq":
+            s = dq
+        else:
+            raise ValueError("dir_by must be 'tau_cmd' or 'dq'")
+
+        if direction == "positive":
+            m_dir = s > eps
+        elif direction == "negative":
+            m_dir = s < -eps
+        elif direction == "all":
+            m_dir = np.ones_like(s, dtype=bool)
+        else:
+            raise ValueError("direction must be 'positive' | 'negative' | 'all'")
+
+        # 去尖 +（可选）低通
         y = median_despike(y, k=median_k)
         if lp_tau and lp_tau > 0 and fs and fs > 0:
             y = butter_lowpass_filtfilt(y, fs=fs, fc=lp_tau, order=4)
 
-        # x = np.stack([q, ddq] if not use_vel else [q, dq, ddq], axis=1)
-        x = np.stack([q])
+        # 5σ 剔除异常
+        y_med = np.median(y)
+        y_std = np.std(y) if np.std(y) > 0 else 1.0
+        m_robust = np.abs(y - y_med) < 5 * y_std
 
-        y_med, y_std = np.median(y), np.std(y) if np.std(y) > 0 else 1.0
-        m = np.abs(y - y_med) < 5 * y_std
+        # 组合掩码
+        m = m_dir & m_robust
 
+        # # 组特征
+        # if use_vel:
+        #     x = np.stack([q, dq, ddq], axis=1)   # (N,3)
+        # else:
+        #     x = np.stack([q, ddq], axis=1)       # (N,2)
+
+        x = q.reshape(-1, 1)
         X_list.append(x[m].astype(np.float32))
         Y_list.append(y[m].astype(np.float32)[:, None])
     return X_list, Y_list
+
 
 def butter_lowpass_filtfilt(x, fs, fc, order=4):
     """
@@ -127,7 +197,7 @@ def save_per_joint_plots(X_list, Y_list, out_npz_path, use_vel=False):
         if use_vel:
             q, dq, ddq = X[:, 0], X[:, 1], X[:, 2]
         else:
-            q, ddq = X[:, 0], X[:, 1]
+            q = X[:, 0]
 
         fig, axes = plt.subplots(1, 2 + (1 if use_vel else 0), figsize=(12, 4))
         if not isinstance(axes, np.ndarray):
@@ -149,20 +219,20 @@ def save_per_joint_plots(X_list, Y_list, out_npz_path, use_vel=False):
         ax.grid(True)
         ax.legend(loc='best', fontsize=9)
 
-        # 2) ddq vs y
-        ax = axes[1]
-        ax.scatter(ddq, Y, s=8, alpha=0.5)
-        A = np.vstack([ddq, np.ones_like(ddq)]).T
-        a, b = np.linalg.lstsq(A, Y, rcond=None)[0]
-        xfit = np.linspace(ddq.min(), ddq.max(), 200)
-        yfit = a * xfit + b
-        ax.plot(xfit, yfit, linewidth=2, label=f'fit: y={a:.3f}x+{b:.3f}')
-        corr = np.corrcoef(ddq, Y)[0, 1]
-        ax.set_title(f'Joint {j+1}: ddq vs y (corr={corr:.3f})')
-        ax.set_xlabel('ddq [rad/s^2]')
-        ax.set_ylabel('Residual torque y [Nm]')
-        ax.grid(True)
-        ax.legend(loc='best', fontsize=9)
+        # # 2) ddq vs y
+        # ax = axes[1]
+        # ax.scatter(ddq, Y, s=8, alpha=0.5)
+        # A = np.vstack([ddq, np.ones_like(ddq)]).T
+        # a, b = np.linalg.lstsq(A, Y, rcond=None)[0]
+        # xfit = np.linspace(ddq.min(), ddq.max(), 200)
+        # yfit = a * xfit + b
+        # ax.plot(xfit, yfit, linewidth=2, label=f'fit: y={a:.3f}x+{b:.3f}')
+        # corr = np.corrcoef(ddq, Y)[0, 1]
+        # ax.set_title(f'Joint {j+1}: ddq vs y (corr={corr:.3f})')
+        # ax.set_xlabel('ddq [rad/s^2]')
+        # ax.set_ylabel('Residual torque y [Nm]')
+        # ax.grid(True)
+        # ax.legend(loc='best', fontsize=9)
 
         # 3) 可选：dq vs y
         if use_vel:
@@ -204,6 +274,10 @@ def main():
     ap.add_argument("--sg-window", type=int, default=9,   help="Savitzky-Golay 窗口(奇数)")
     ap.add_argument("--sg-poly", type=int, default=3,     help="Savitzky-Golay 多项式阶数")
     ap.add_argument("--median-k", type=int, default=5,    help="中值滤波核(奇数)")
+    ap.add_argument("--direction", choices=["positive", "negative", "all"], default="positive",
+                help="选择样本方向（默认只用正向）")
+    ap.add_argument("--dir-by", choices=["tau_cmd", "dq"], default="tau_cmd",
+                    help="用哪一列判方向（默认 tau_cmd）")
 
     args = ap.parse_args()
 
@@ -216,8 +290,11 @@ def main():
 
     # 3) 构建 X/Y
     fs = 1.0 / eff_dt
-    X_list, Y_list = build_xy(df, dt=eff_dt, use_vel=args.use_vel, fs=fs,
-                            lp_tau=args.lp_tau, median_k=args.median_k)
+    X_list, Y_list = build_xy(  
+        df, dt=eff_dt, use_vel=args.use_vel, fs=fs,
+        lp_tau=args.lp_tau, median_k=args.median_k,
+        direction=args.direction, dir_by=args.dir_by
+    )
 
     # 4) 保存
     np.savez(

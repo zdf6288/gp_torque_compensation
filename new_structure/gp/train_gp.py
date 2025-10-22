@@ -1,40 +1,197 @@
-import numpy as np, pickle, os
+# train_gp.py —— 在线预测 + 增量学习 + SMSE（全局方差作分母，无滑动窗口）
+import os
+import pickle
+import numpy as np
+import matplotlib.pyplot as plt
+from tqdm import tqdm
+
 from skygp import SkyGP_rBCM
 from hyperparam_training import fit_hparams_gpytorch
 
+
+# ---------------- Utils ----------------
 def standardize(X, Y):
-    Xm, Xs = X.mean(0), X.std(0); Xs[Xs<1e-9]=1.0
-    Ym, Ys = Y.mean(0), Y.std(0); Ys[Ys<1e-9]=1.0
-    Xn = (X - Xm)/Xs; Yn = (Y - Ym)/Ys
+    Xm, Xs = X.mean(0), X.std(0); Xs[Xs < 1e-9] = 1.0
+    Ym, Ys = Y.mean(0), Y.std(0); Ys[Ys < 1e-9] = 1.0
+    Xn = (X - Xm) / Xs
+    Yn = (Y - Ym) / Ys
     return Xn.astype(np.float32), Yn.astype(np.float32), (Xm, Xs, Ym, Ys)
 
-def train_one_joint(X, Y, x_dim, max_pts_hparam=1000):
-    # 1) 用 GPyTorch 在子集上学全局超参（和你的脚本一致）
-    Xh = X if len(X)<=max_pts_hparam else X[np.random.choice(len(X), max_pts_hparam, replace=False)]
-    Yh = Y if len(Y)<=max_pts_hparam else Y[np.random.choice(len(Y), max_pts_hparam, replace=False)]
+def destandardize(y_std_vec, stats):
+    """y 标准化值 -> 原单位"""
+    _, _, Ym, Ys = stats
+    return y_std_vec * Ys[0] + Ym[0]
+
+def plot_curve(curve, out_png, title="SMSE vs #Samples"):
+    plt.figure(figsize=(7,4.2))
+    x = np.arange(1, len(curve)+1)
+    plt.plot(x, curve, linewidth=2)
+    plt.xlabel("Number of samples (prefix)")
+    plt.ylabel("SMSE")
+    plt.title(title)
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(out_png, dpi=200, bbox_inches='tight')
+    plt.close()
+
+def smse_curve_from_preds(y_true, y_pred, warmup=0):
+    """
+    计算逐前缀 SMSE，分母使用全局方差（稳定）。
+    前 warmup 个点只沿用上一值（首点为 0），不计误差。
+    """
+    y_true = np.asarray(y_true).reshape(-1)
+    y_pred = np.asarray(y_pred).reshape(-1)
+    N = len(y_true)
+    curve = np.zeros(N, dtype=np.float64)
+
+    var_global = float(np.var(y_true, ddof=1))
+    if var_global < 1e-12:
+        var_global = 1e-12
+
+    sum_sq = 0.0
+    for i in range(N):
+        if i < warmup:
+            curve[i] = 0.0 if i == 0 else curve[i-1]
+            continue
+        err = float(y_pred[i] - y_true[i])
+        sum_sq += err * err
+        t_eff = i - warmup + 1
+        mse_t = sum_sq / t_eff
+        curve[i] = mse_t / var_global
+    return curve
+
+
+# --------------- Hparam fit ---------------
+def fit_global_hparams(Xn, Yn, max_pts_hparam=2000, iters=600, lr=0.05):
+    """
+    在标准化后的数据上拟合超参（子采样加速）。
+    返回 (sigma_f, sigma_n, lengthscale)
+    """
+    N = len(Xn)
+    if N > max_pts_hparam:
+        idx = np.random.choice(N, max_pts_hparam, replace=False)
+        Xh, Yh = Xn[idx], Yn[idx, 0]
+    else:
+        Xh, Yh = Xn, Yn[:, 0]
     outputscale, noise, lengthscale = fit_hparams_gpytorch(
-        Xh.astype(np.float32), Yh[:,0].astype(np.float32),
+        Xh.astype(np.float32), Yh.astype(np.float32),
         max_points=min(max_pts_hparam, len(Xh)),
-        iters=300, lr=0.1, use_cuda_if_available=True, print_every=50
+        iters=iters, lr=lr, use_cuda_if_available=True, print_every=100
     )
-    # 2) 构建并离线填充专家
+    return outputscale, noise, lengthscale
+
+
+# --------------- Online train & eval ---------------
+def online_predict_update_smse(
+    Xn, Yn, hps, x_dim,
+    nearest_k=4, max_experts=80, max_data_per_expert=50, timescale=0.05,
+    warmup=200,
+):
+    """
+    逐样本在线：前 warmup 个点仅入模不计误差；之后先预测再更新。
+    返回：model, y_pred_std(N,1), smse_std_curve(N,), final_smse_std
+    """
     model = SkyGP_rBCM(
         x_dim=x_dim, y_dim=1,
-        max_data_per_expert=64, nearest_k=3, max_experts=16,
+        max_data_per_expert=max_data_per_expert,
+        nearest_k=nearest_k, max_experts=max_experts,
         replacement=False,
-        pretrained_params=(outputscale, noise, lengthscale),
-        timescale=0.05,
+        pretrained_params=hps,   # (sf, sn, ls) —— 标准化空间
+        timescale=timescale,
     )
-    model.offline_pretrain(X, Y, optimize_hparams=False, show_progress=True)
-    return model, (outputscale, noise, lengthscale)
 
+    N = len(Xn)
+    y_pred_std = np.zeros((N, 1), dtype=np.float32)
+
+    # 全局方差（标准化空间里通常≈1）
+    var_global_std = float(np.var(Yn[:, 0], ddof=1))
+    if var_global_std < 1e-12:
+        var_global_std = 1e-12
+
+    # 逐前缀 SMSE（标准化）
+    smse_std_curve = np.zeros(N, dtype=np.float64)
+    sum_sq_err_std = 0.0
+
+    for i in tqdm(range(N), desc="Online predict+update"):
+        x = Xn[i].reshape(-1)
+        y = Yn[i].reshape(-1)
+
+        if i < warmup:
+            # 冷启动阶段：只入模，不计误差
+            model.add_point(x, y)
+            smse_std_curve[i] = 0.0 if i == 0 else smse_std_curve[i-1]
+            continue
+
+        # 1) 先预测（不含当前样本）
+        mu, _ = model.predict(x)
+        y_pred_std[i, 0] = mu[0]
+        # 2) 立刻增量加入该样本
+        model.add_point(x, y)
+        # 3) 更新逐前缀 SMSE（分母用全局方差）
+        err_i = float(y_pred_std[i, 0] - Yn[i, 0])
+        sum_sq_err_std += err_i * err_i
+        t_eff = (i - warmup + 1)
+        mse_t = sum_sq_err_std / t_eff
+        # smse_std_curve[i] = mse_t / var_global_std
+        smse_std_curve[i] = mse_t
+
+    final_smse_std = float(smse_std_curve[-1])
+    return model, y_pred_std, smse_std_curve, final_smse_std
+
+
+# ---------------- Main ----------------
 if __name__ == "__main__":
     data = np.load("gp_train_data_per_joint.npz", allow_pickle=True)
     os.makedirs("gp_models", exist_ok=True)
-    for j in range(1,8):
-        X = data[f"X{j}"]; Y = data[f"Y{j}"]
-        Xn, Yn, stats = standardize(X, Y)  # 重要：标准化并保存
-        model, hps = train_one_joint(Xn, Yn, x_dim=Xn.shape[1])
+
+    # 选择关节（示例：只跑第5个；可改为 range(1,8)）
+    for j in range(5, 6):
+        X = data[f"X{j}"]        # (N, D)
+        Y = data[f"Y{j}"]        # (N, 1)
+
+        # 1) 标准化
+        Xn, Yn, stats = standardize(X, Y)
+
+        # 2) 拟合全局超参（标准化空间）
+        hps = fit_global_hparams(
+            Xn, Yn, max_pts_hparam=2000, iters=600, lr=0.02
+        )
+
+        # 3) 在线预测 + 增量更新 + 标准化 SMSE（分母=全局方差）
+        warmup = 50
+        model, y_pred_std, smse_std_curve, final_smse_std = online_predict_update_smse(
+            Xn, Yn, hps=hps, x_dim=Xn.shape[1],
+            nearest_k=2, max_experts=80, max_data_per_expert=50, timescale=0.05,
+            warmup=warmup,
+        )
+
+        # 4) 原单位下 SMSE（同样用全局方差；与标准化逻辑一致）
+        y_pred_real = destandardize(y_pred_std[:, 0], stats)
+        y_true_real = Y[:, 0].astype(np.float64)
+        smse_real_curve = smse_curve_from_preds(y_true_real, y_pred_real, warmup=warmup)
+        final_smse_real = float(smse_real_curve[-1])
+
+        print(f"[joint {j}] SMSE (std space, prefix)  = {final_smse_std:.6f}")
+        print(f"[joint {j}] SMSE (real unit, prefix) = {final_smse_real:.6f}")
+
+        # 5) 画图并保存
+        out_png_std  = f"gp_models/joint{j}_smse_std.png"
+        out_png_real = f"gp_models/joint{j}_smse_real.png"
+        plot_curve(smse_std_curve,  out_png_std,  title=f"Joint {j} - SMSE (standardized, global var)")
+        plot_curve(smse_real_curve, out_png_real, title=f"Joint {j} - SMSE (real unit, global var)")
+        print(f"🖼 saved {out_png_std} & {out_png_real}")
+
+        # 6) 存档
         with open(f"gp_models/joint{j}.pkl", "wb") as f:
-            pickle.dump({"model":model, "stats":stats, "hps":hps}, f)
-        print(f"✔ saved gp_models/joint{j}.joblib ({X.shape[0]} samples)")
+            pickle.dump({
+                "model": model,
+                "stats": stats,                # (Xm, Xs, Ym, Ys)
+                "hps_std": hps,                # (sf, sn, ls) —— 标准化空间
+                "smse_std_curve": smse_std_curve,
+                "smse_real_curve": smse_real_curve,
+                "final_smse_std": final_smse_std,
+                "final_smse_real": final_smse_real,
+                "y_pred_std": y_pred_std,      # 逐样本预测（标准化）
+                "warmup": warmup,
+            }, f)
+        print(f"✔ saved gp_models/joint{j}.pkl ({X.shape[0]} samples)")
