@@ -29,7 +29,7 @@ class SkyGP_rBCM:
         max_experts=8,
         replacement=False,
         pretrained_params=None,  # (outputscale, noise, lengthscale)
-        timescale=0.03,
+        timescale=0.0,
     ):
         self.x_dim = x_dim
         self.y_dim = y_dim

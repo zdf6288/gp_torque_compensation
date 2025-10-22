@@ -11,9 +11,8 @@ import signal
 import csv
 import traceback
 import sys
-
-def vee(mat):
-    return np.array([mat[2, 1], mat[0, 2], mat[1, 0]])
+import os, pickle
+import importlib.util
 
 class CartesianImpedanceController(Node):
     
@@ -114,6 +113,28 @@ class CartesianImpedanceController(Node):
         signal.signal(signal.SIGTERM, self.signal_handler)
         self._signal_handled = False                # flag to avoid repeated data saving
 
+        # === GP ===
+        self.gp_models = {}     # j: {'model':..., 'stats':(Xm,Xs,Ym,Ys), 'x_dim':D}
+        self.gp_ready = False
+        self.gp_use_features = ("q", "dq_des", "ddq_des")
+        self._load_gp_models(dir_path="./new_structure/gp/gp_models")
+
+        # 预测节流（你已有）
+        self.use_gp = True
+        self.gp_stride = 10
+        self._step = 0
+        self.y_hat_last = np.zeros(7, dtype=float)
+        self.y_hat_max_age = 0.2
+        self._y_hat_stamp = None
+
+        # === 在线学习配置 ===
+        self.gp_update_stride = 10           # 每 N 步才增量加入一次数据
+        self.gp_update_warmup_s = 1.0        # 启动后 1 秒内不更新，先稳态
+        self.gp_update_y_clip = 10.0         # 训练用残差的幅值上限（Nm）
+        self.gp_update_min_motion = 1e-4     # 运动太小（|dq| + |ddq_des|）时不更新，避免噪声
+
+
+
     def taskCommandCallback(self, msg):
         """callback function for /task_space_command subscriber"""
         self.task_command_received = True
@@ -131,6 +152,7 @@ class CartesianImpedanceController(Node):
             # initialize t_initial, get t_elapsed, t_last and dt
             # initialize q_initial, get q, dq and ddq
             t_now = self.get_clock().now()
+            self._step += 1
             q = np.array(msg.position)
             dq = np.array(msg.velocity)
             if self.t_initial is None:
@@ -245,12 +267,100 @@ class CartesianImpedanceController(Node):
                     @ jacobian_pinv @ dx[:5]
                 - jacobian_t @ pd_term[:5]
             )
-            tau_residual = tau_measured - tau - gravity_measured
-            print("tau_residual", tau_residual)
 
             tau_nullspace = ((np.eye(7) - zero_jacobian_pinv @ zero_jacobian) 
                 @ (self.kpn_gains * (self.q_des - q) + self.dpn_gains * (self.dq_des - dq)))
             tau = tau + tau_nullspace
+            tau_residual = tau_measured - tau - gravity_measured
+            print("tau_residual:",tau_residual)
+
+            # === GP ===
+            # === 在线学习：把本时刻残差加入 GP ===
+            if self.gp_ready and self.use_gp:
+                try:
+                    # 暖机 & 步进节流
+                    age_s = (self.get_clock().now() - self.t_initial).nanoseconds / 1e9
+                    if (self._step % self.gp_update_stride) == 0 and age_s >= self.gp_update_warmup_s:
+
+                        # 逐关节（这里只更新 1~6 关节；第7关节你目前不学）
+                        for j in range(1, 7):
+                            pack = self.gp_models.get(j)
+                            if pack is None:
+                                continue
+                            model = pack["model"]
+                            Xm, Xs, Ym, Ys = pack["stats"]
+                            x_dim = pack["x_dim"]
+
+                            # 1) 组输入特征（必须与离线训练一致）
+                            if x_dim == 3:
+                                x = np.array([q[j-1], dq_des_joint[j-1], ddq_des_joint[j-1]], dtype=np.float32)
+                            elif x_dim == 2:
+                                x = np.array([q[j-1], ddq_des_joint[j-1]], dtype=np.float32)
+                            else:  # x_dim == 1
+                                x = np.array([q[j-1]], dtype=np.float32)
+
+                            # # 小运动过滤（避免停滞时的高噪声标注）
+                            # motion_mag = abs(dq[j-1]) + (abs(ddq_des_joint[j-1]) if x_dim >= 2 else 0.0)
+                            # if motion_mag < self.gp_update_min_motion:
+                            #     continue
+
+                            # 2) 输出残差（物理单位）+ 限幅，避免异常污染模型
+                            y = float(tau_residual[j-1])
+                            if not np.isfinite(y):
+                                continue
+                            y = np.clip(y, -self.gp_update_y_clip, self.gp_update_y_clip)
+
+                            # 3) 标准化
+                            Xm = np.asarray(Xm, dtype=np.float32)
+                            Xs = np.asarray(Xs, dtype=np.float32); Xs[Xs < 1e-9] = 1.0
+                            if Xm.shape[0] < x_dim or Xs.shape[0] < x_dim:
+                                continue
+                            x_std = (x - Xm[:x_dim]) / Xs[:x_dim]
+
+                            Ym = float(np.asarray(Ym)[0]); Ys = float(np.asarray(Ys)[0]) if float(np.asarray(Ys)[0]) != 0.0 else 1.0
+                            y_std = (y - Ym) / Ys
+
+                            if not (np.all(np.isfinite(x_std)) and np.isfinite(y_std)):
+                                continue
+
+                            # 4) 增量加入
+                            model.add_point(x_std, np.array([y_std], dtype=np.float32))
+
+                except Exception as e:
+                    self.get_logger().error(f"[GP] online update failed: {e}")
+
+            if self.gp_ready:
+                # === GP (decimated & cached) ===
+                y_hat = np.zeros(7, dtype=float)
+                if getattr(self, "use_gp", True) and self.gp_ready:
+                    use_cache = True
+                    if (self._step % self.gp_stride) == 0:
+                        # 本次重新计算
+                        try:
+                            y_new = self._gp_predict_residual(q, dq_des_joint, ddq_des_joint)
+                            if np.all(np.isfinite(y_new)):
+                                # 限幅
+                                y_new = np.clip(y_new, -5.0, 5.0)
+                                if np.linalg.norm(y_new) > 12.0:
+                                    y_new = y_new * (12.0 / (np.linalg.norm(y_new) + 1e-9))
+                                self.y_hat_last = y_new
+                                self._y_hat_stamp = t_now
+                                use_cache = False
+                            else:
+                                self.get_logger().warn("[GP] y_hat NaN/Inf, keep cache")
+                        except Exception as e:
+                            self.get_logger().error(f"[GP] predict failed: {e} (keep cache)")
+                    # 使用缓存（检查是否过期）
+                    if self._y_hat_stamp is not None:
+                        age = (t_now - self._y_hat_stamp).nanoseconds / 1e9
+                        if age <= self.y_hat_max_age:
+                            y_hat = self.y_hat_last.copy()
+                        else:
+                            # 过期则置零，避免旧预测“拖尾”
+                            self.get_logger().warn("[GP] y_hat cache expired")
+                    # 叠加
+                    print("yhat:",y_hat)
+                    tau = tau + y_hat
 
             tau = self.filter_beta * tau + (1 - self.filter_beta) * self.tau_buffer
             self.tau_buffer = tau.copy()
@@ -323,6 +433,111 @@ class CartesianImpedanceController(Node):
         except Exception as e:
             self.get_logger().error(f'Error in signal handler: {str(e)}')
             self._signal_handled = False
+    
+    def _load_gp_models(self, dir_path="./new_structure/gp/gp_models"):
+        """加载离线训练好的每关节GP：gp_models/joint{j}.pkl"""
+        # 打印当前工作目录和 dir_path 的绝对路径，方便调试
+        if not self._ensure_skygp_import():
+            self.get_logger().error("[GP] skygp import failed; pickle loading will likely fail.")
+
+        cwd = os.getcwd()
+        abs_dir = os.path.abspath(dir_path)
+        self.get_logger().info(f"[GP] 当前工作目录: {cwd}")
+        self.get_logger().info(f"[GP] 模型目录绝对路径: {abs_dir}")
+
+        loaded = 0
+        for j in range(1, 7):
+            p = os.path.join(dir_path, f"joint{j}.pkl")
+            abs_p = os.path.abspath(p)
+            self.get_logger().info(f"[GP] 尝试加载模型: {abs_p}")
+
+            if not os.path.isfile(p):
+                self.get_logger().warn(f"[GP] model file not found: {abs_p}")
+                continue
+
+            try:
+                with open(p, "rb") as f:
+                    pack = pickle.load(f)
+                model = pack.get("model", None)
+                stats = pack.get("stats", None)  # (Xm, Xs, Ym, Ys)
+                if model is None or stats is None:
+                    self.get_logger().warn(f"[GP] bad model pack: {abs_p}")
+                    continue
+
+                Xm, Xs, _, _ = stats
+                x_dim = int(np.asarray(Xm).shape[0])
+                self.gp_models[j] = {"model": model, "stats": stats, "x_dim": x_dim}
+                loaded += 1
+                self.get_logger().info(f"[GP] 成功加载关节{j}模型 ({x_dim}维输入) 来自: {abs_p}")
+            except Exception as e:
+                self.get_logger().error(f"[GP] fail loading {abs_p}: {e}")
+
+        self.gp_ready = (loaded > 0)
+        self.get_logger().info(f"[GP] 共加载 {loaded} 个模型. ready={self.gp_ready}")
+
+    def _gp_predict_residual(self, q, dq_des_joint, ddq_des_joint):
+        if not self.gp_ready:
+            return np.zeros(7, dtype=float)
+        y_hat = np.zeros(7, dtype=float)  # 第7维默认0
+        for j in range(1, 7):  # 只预测1~6
+            pack = self.gp_models.get(j, None)
+            if pack is None:
+                continue
+            model = pack["model"]
+            Xm, Xs, Ym, Ys = pack["stats"]
+            x_dim = pack["x_dim"]
+
+            if x_dim == 3:
+                x = np.array([q[j-1], dq_des_joint[j-1], ddq_des_joint[j-1]], dtype=np.float32)
+            elif x_dim == 2:
+                x = np.array([q[j-1], ddq_des_joint[j-1]], dtype=np.float32)
+            elif x_dim == 1:
+                x = np.array([q[j-1]], dtype=np.float32)
+            else:
+                continue
+
+            Xm = np.asarray(Xm, dtype=np.float32)
+            Xs = np.asarray(Xs, dtype=np.float32); Xs[Xs < 1e-9] = 1.0
+            assert Xm.shape[0] >= x_dim and Xs.shape[0] >= x_dim, "[GP] stats shape mismatch with x_dim"
+            x_std = (x - Xm[:x_dim]) / Xs[:x_dim]
+
+            mu_std, _ = model.predict(x_std)
+            mu_std = float(mu_std[0])
+
+            Ym = float(np.asarray(Ym)[0]); Ys = float(np.asarray(Ys)[0])
+            y_hat[j-1] = mu_std * Ys + Ym
+
+        return y_hat
+
+    def _ensure_skygp_import(self):
+        """
+        确保在当前进程中有名为 'skygp' 的模块，
+        路径指向 repo 里的 /new_structure/gp/skygp.py
+        """
+        # 以当前脚本为基准，找到 gp/skygp.py
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        skygp_path = os.path.abspath(os.path.join(
+            script_dir, "..","..", "..", "new_structure","gp", "skygp.py"
+        ))
+
+        if not os.path.isfile(skygp_path):
+            self.get_logger().error(f"[GP] skygp.py not found at: {skygp_path}")
+            return False
+
+        # 如果已加载则跳过
+        if "skygp" in sys.modules:
+            return True
+
+        try:
+            spec = importlib.util.spec_from_file_location("skygp", skygp_path)
+            skygp_mod = importlib.util.module_from_spec(spec)
+            sys.modules["skygp"] = skygp_mod   # 关键：模块名必须叫 'skygp'
+            spec.loader.exec_module(skygp_mod)
+            self.get_logger().info(f"[GP] skygp loaded from: {skygp_path}")
+            return True
+        except Exception as e:
+            self.get_logger().error(f"[GP] failed to import skygp from {skygp_path}: {e}")
+            return False
     
     def save_data_to_file(self):
         """save data to CSV file"""

@@ -84,7 +84,7 @@ def fit_global_hparams(Xn, Yn, max_pts_hparam=2000, iters=600, lr=0.05):
 # --------------- Online train & eval ---------------
 def online_predict_update_smse(
     Xn, Yn, hps, x_dim,
-    nearest_k=4, max_experts=80, max_data_per_expert=50, timescale=0.05,
+    nearest_k=4, max_experts=80, max_data_per_expert=50, timescale=0.0,
     warmup=200,
     print_each=False,
     stats=None,              # 新增：用于反标准化
@@ -173,7 +173,7 @@ if __name__ == "__main__":
     os.makedirs("gp_models", exist_ok=True)
 
     # 选择关节（示例：只跑第5个；可改为 range(1,8)）
-    for j in range(5, 6):
+    for j in range(1,7):
         X = data[f"X{j}"]        # (N, D)
         Y = data[f"Y{j}"]        # (N, 1)
 
