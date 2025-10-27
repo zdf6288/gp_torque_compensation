@@ -8,6 +8,11 @@ import argparse
 import sys
 import os
 
+def cols_1to7(df, prefix):
+    # prefix 末尾自己带下划线，如 'tau_', 'tau_measured_', 'gravity_', 'y_hat_', 'tau_residual_'
+    return [f'{prefix}{i}' for i in range(1, 8) if f'{prefix}{i}' in df.columns]
+
+
 def plot_data_from_csv(csv_filename):
     """plot data from CSV file"""
     if not os.path.exists(csv_filename):
@@ -17,7 +22,7 @@ def plot_data_from_csv(csv_filename):
     try:
         df = pd.read_csv(csv_filename)
 
-                # -------------------------------
+        # -------------------------------
         # 子采样 + 平滑组合处理
         # -------------------------------
 
@@ -40,8 +45,6 @@ def plot_data_from_csv(csv_filename):
         
         time_history = df['Time(s)'].values
         
-        tau_columns = [col for col in df.columns if col.startswith('tau_') and not col.startswith('tau_measured_')]
-        tau_history_array = df[tau_columns].values
         
         x_history = df[['x_actual', 'y_actual', 'z_actual']].values
         x_des_history = df[['x_desired', 'y_desired', 'z_desired']].values
@@ -49,11 +52,18 @@ def plot_data_from_csv(csv_filename):
         dx_history = df[['dx_actual', 'dy_actual', 'dz_actual']].values
         dx_des_history = df[['dx_desired', 'dy_desired', 'dz_desired']].values
 
-        tau_measured_columns = [col for col in df.columns if col.startswith('tau_measured_')]
-        tau_measured_history_array = df[tau_measured_columns].values
+        # 严格取 1..7，且顺序正确
+        tau_cols = cols_1to7(df, 'tau_')
+        meas_cols = cols_1to7(df, 'tau_measured_')
+        grav_cols = cols_1to7(df, 'gravity_')
 
-        gravity_columns = [col for col in df.columns if col.startswith('gravity_')]
-        gravity_history_array = df[gravity_columns].values
+        if len(tau_cols) != 7 or len(meas_cols) != 7 or len(grav_cols) != 7:
+            print('Error: expected 7 columns for tau_/tau_measured_/gravity_.')
+            return
+
+        tau_history_array          = df[tau_cols].values
+        tau_measured_history_array = df[meas_cols].values
+        gravity_history_array      = df[grav_cols].values
         
         fig, axes = plt.subplots(3, 3, figsize=(18, 14))
         fig.suptitle('Cartesian Impedance Controller Data', fontsize=14)
@@ -271,6 +281,62 @@ def plot_data_from_csv(csv_filename):
         print(f'Figure saved as {out2}')
     else:
         print('Skip joint position vs torque error plot: missing joint_pos_* columns or torque data.')
+
+    # ===== 新增：逐关节 y_hat vs tau_residual 对比图 =====
+    yhat_cols = cols_1to7(df, 'y_hat_')
+    res_cols  = cols_1to7(df, 'tau_residual_')
+
+    if len(yhat_cols) == 7 and len(res_cols) == 7:
+        YH = df[yhat_cols].values      # shape [N,7]
+        TR = df[res_cols].values       # shape [N,7]
+
+        fig3, axes3 = plt.subplots(3, 3, figsize=(18, 14))
+        fig3.suptitle('Per-Joint: y_hat vs tau_residual', fontsize=14)
+
+        # 把 3x3 的 axes 拉平成列表，前7个用来画图，最后2个留空
+        ax_list = [ax for row in axes3 for ax in row]
+
+        print('\n=== y_hat vs tau_residual statistics ===')
+        for j in range(7):
+            ax = ax_list[j]
+            yh = YH[:, j]
+            tr = TR[:, j]
+
+            # 时间序列对比
+            ax.plot(time_history, tr, label='tau_residual', linewidth=1.8)
+            ax.plot(time_history, yh, label='y_hat', linestyle='--', linewidth=1.8)
+
+            # 剩余误差（残差-补偿）可视化（可选）
+            rem = tr - yh
+            ax.plot(time_history, rem, label='residual - y_hat', linewidth=1.0, alpha=0.8)
+
+            ax.set_title(f'Joint {j+1}')
+            ax.set_xlabel('Time (s)')
+            ax.set_ylabel('Torque (Nm)')
+            ax.grid(True)
+            ax.legend()
+
+            # 数值统计
+            # 只在有限值上统计，避免 NaN/Inf 影响结果
+            mask = np.isfinite(tr) & np.isfinite(yh)
+            if mask.sum() >= 2:
+                corr = np.corrcoef(tr[mask], yh[mask])[0, 1]
+                mse  = np.mean((tr[mask] - yh[mask])**2)
+                mae  = np.mean(np.abs(tr[mask] - yh[mask]))
+                print(f'Joint {j+1}: corr={corr:.4f}, MSE={mse:.6f}, MAE={mae:.6f}')
+            else:
+                print(f'Joint {j+1}: insufficient finite samples for stats')
+
+        # 多出的第8/9个子图清空
+        ax_list[7].axis('off')
+        ax_list[8].axis('off')
+
+        plt.tight_layout()
+        out3 = csv_filename.replace('.csv', '_yhat_vs_residual.png')
+        fig3.savefig(out3, dpi=300, bbox_inches='tight')
+        print(f'Figure saved as {out3}')
+    else:
+        print('Skip y_hat vs tau_residual plot: missing columns y_hat_* or tau_residual_*')
 
 
 

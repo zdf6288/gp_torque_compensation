@@ -13,6 +13,7 @@ import traceback
 import sys
 import os, pickle
 import importlib.util
+import threading, time
 
 class CartesianImpedanceController(Node):
     
@@ -113,11 +114,25 @@ class CartesianImpedanceController(Node):
         signal.signal(signal.SIGTERM, self.signal_handler)
         self._signal_handled = False                # flag to avoid repeated data saving
 
+
         # === GP ===
+        self.q = np.zeros(7)
+        self.dq_des_joint = np.zeros(7)
+        self.ddq_des_joint = np.zeros(7)
+        self.tau_residual = np.zeros(7)
+
+        # === Asychronous GP ===
+        self._gp_lock = threading.Lock()
+        self._gp_thread = None
+        self._gp_stop = False
+        self._gp_yhat = np.zeros(7, dtype=float)
+        self._gp_thread_period = 0.002  # 后台线程循环周期 (s) → 2ms ≈ 500Hz
+
         self.gp_models = {}     # j: {'model':..., 'stats':(Xm,Xs,Ym,Ys), 'x_dim':D}
         self.gp_ready = False
         self.gp_use_features = ("q", "dq_des", "ddq_des")
         self._load_gp_models(dir_path="./new_structure/gp/gp_models")
+        self._start_gp_thread()
 
         # 预测节流（你已有）
         self.use_gp = True
@@ -128,10 +143,10 @@ class CartesianImpedanceController(Node):
         self._y_hat_stamp = None
 
         # === 在线学习配置 ===
-        self.gp_update_stride = 10           # 每 N 步才增量加入一次数据
-        self.gp_update_warmup_s = 1.0        # 启动后 1 秒内不更新，先稳态
         self.gp_update_y_clip = 10.0         # 训练用残差的幅值上限（Nm）
-        self.gp_update_min_motion = 1e-4     # 运动太小（|dq| + |ddq_des|）时不更新，避免噪声
+
+        self.y_hat_history = []          # 记录每次控制回路使用的 y_hat (7,)
+        self.tau_residual_history = []   # 记录 tau_residual (7,)
 
 
 
@@ -154,6 +169,7 @@ class CartesianImpedanceController(Node):
             t_now = self.get_clock().now()
             self._step += 1
             q = np.array(msg.position)
+            self.q = q
             dq = np.array(msg.velocity)
             if self.t_initial is None:
                 self.t_initial = t_now
@@ -235,10 +251,11 @@ class CartesianImpedanceController(Node):
 
             # dq_des (joint) = J^+ * dx_des
             dq_des_joint = jacobian_pinv @ dx_des_5
-
+            self.dq_des_joint = dq_des_joint
             # ddq_des (joint) = J^+ * (ddx_des - dJ * dq)
             # 数值防护：dt很小时 dJ 可能抖；已按你代码用差分得到 djacobian
             ddq_des_joint = jacobian_pinv @ (ddx_des_5 - djacobian @ dq)
+            self.ddq_des_joint = ddq_des_joint
 
             # 记录（仅当开启录数时）
             if self.data_recording_enabled:
@@ -271,101 +288,27 @@ class CartesianImpedanceController(Node):
             tau_nullspace = ((np.eye(7) - zero_jacobian_pinv @ zero_jacobian) 
                 @ (self.kpn_gains * (self.q_des - q) + self.dpn_gains * (self.dq_des - dq)))
             tau = tau + tau_nullspace
-            tau_residual = tau_measured - tau - gravity_measured
-            print("tau_residual:",tau_residual)
-
-            # === GP ===
-            # === 在线学习：把本时刻残差加入 GP ===
-            if self.gp_ready and self.use_gp:
-                try:
-                    # 暖机 & 步进节流
-                    age_s = (self.get_clock().now() - self.t_initial).nanoseconds / 1e9
-                    if (self._step % self.gp_update_stride) == 0 and age_s >= self.gp_update_warmup_s:
-
-                        # 逐关节（这里只更新 1~6 关节；第7关节你目前不学）
-                        for j in range(1, 7):
-                            pack = self.gp_models.get(j)
-                            if pack is None:
-                                continue
-                            model = pack["model"]
-                            Xm, Xs, Ym, Ys = pack["stats"]
-                            x_dim = pack["x_dim"]
-
-                            # 1) 组输入特征（必须与离线训练一致）
-                            if x_dim == 3:
-                                x = np.array([q[j-1], dq_des_joint[j-1], ddq_des_joint[j-1]], dtype=np.float32)
-                            elif x_dim == 2:
-                                x = np.array([q[j-1], ddq_des_joint[j-1]], dtype=np.float32)
-                            else:  # x_dim == 1
-                                x = np.array([q[j-1]], dtype=np.float32)
-
-                            # # 小运动过滤（避免停滞时的高噪声标注）
-                            # motion_mag = abs(dq[j-1]) + (abs(ddq_des_joint[j-1]) if x_dim >= 2 else 0.0)
-                            # if motion_mag < self.gp_update_min_motion:
-                            #     continue
-
-                            # 2) 输出残差（物理单位）+ 限幅，避免异常污染模型
-                            y = float(tau_residual[j-1])
-                            if not np.isfinite(y):
-                                continue
-                            y = np.clip(y, -self.gp_update_y_clip, self.gp_update_y_clip)
-
-                            # 3) 标准化
-                            Xm = np.asarray(Xm, dtype=np.float32)
-                            Xs = np.asarray(Xs, dtype=np.float32); Xs[Xs < 1e-9] = 1.0
-                            if Xm.shape[0] < x_dim or Xs.shape[0] < x_dim:
-                                continue
-                            x_std = (x - Xm[:x_dim]) / Xs[:x_dim]
-
-                            Ym = float(np.asarray(Ym)[0]); Ys = float(np.asarray(Ys)[0]) if float(np.asarray(Ys)[0]) != 0.0 else 1.0
-                            y_std = (y - Ym) / Ys
-
-                            if not (np.all(np.isfinite(x_std)) and np.isfinite(y_std)):
-                                continue
-
-                            # 4) 增量加入
-                            model.add_point(x_std, np.array([y_std], dtype=np.float32))
-
-                except Exception as e:
-                    self.get_logger().error(f"[GP] online update failed: {e}")
-
-            if self.gp_ready:
-                # === GP (decimated & cached) ===
-                y_hat = np.zeros(7, dtype=float)
-                if getattr(self, "use_gp", True) and self.gp_ready:
-                    use_cache = True
-                    if (self._step % self.gp_stride) == 0:
-                        # 本次重新计算
-                        try:
-                            y_new = self._gp_predict_residual(q, dq_des_joint, ddq_des_joint)
-                            if np.all(np.isfinite(y_new)):
-                                # 限幅
-                                y_new = np.clip(y_new, -5.0, 5.0)
-                                if np.linalg.norm(y_new) > 12.0:
-                                    y_new = y_new * (12.0 / (np.linalg.norm(y_new) + 1e-9))
-                                self.y_hat_last = y_new
-                                self._y_hat_stamp = t_now
-                                use_cache = False
-                            else:
-                                self.get_logger().warn("[GP] y_hat NaN/Inf, keep cache")
-                        except Exception as e:
-                            self.get_logger().error(f"[GP] predict failed: {e} (keep cache)")
-                    # 使用缓存（检查是否过期）
-                    if self._y_hat_stamp is not None:
-                        age = (t_now - self._y_hat_stamp).nanoseconds / 1e9
-                        if age <= self.y_hat_max_age:
-                            y_hat = self.y_hat_last.copy()
-                        else:
-                            # 过期则置零，避免旧预测“拖尾”
-                            self.get_logger().warn("[GP] y_hat cache expired")
-                    # 叠加
-                    print("yhat:",y_hat)
-                    tau = tau + y_hat
 
             tau = self.filter_beta * tau + (1 - self.filter_beta) * self.tau_buffer
             self.tau_buffer = tau.copy()
             tau = np.clip(tau, -50.0, 50.0)
-            
+
+            tau_residual = tau_measured - tau - gravity_measured
+            self.tau_residual = tau_residual
+            print("tau_residual:",tau_residual)
+
+            # === 主控制回路 ===
+            with self._gp_lock:
+                if not self._gp_stop:
+                    y_hat = np.copy(self._gp_yhat)
+                    print("yhat:",y_hat)
+            tau = tau + y_hat
+
+            # --- 记录 y_hat / tau_residual（与其他数据一起） ---
+            if self.data_recording_enabled:
+                self.y_hat_history.append(y_hat.tolist())
+                self.tau_residual_history.append(tau_residual.tolist())
+
             # publish on topic /effort_command
             self.effort_msg.efforts = tau.tolist()
             self.effort_publisher.publish(self.effort_msg)
@@ -475,39 +418,139 @@ class CartesianImpedanceController(Node):
         self.gp_ready = (loaded > 0)
         self.get_logger().info(f"[GP] 共加载 {loaded} 个模型. ready={self.gp_ready}")
 
-    def _gp_predict_residual(self, q, dq_des_joint, ddq_des_joint):
-        if not self.gp_ready:
+    def _start_gp_thread(self):
+        """启动 GP 异步预测+更新线程"""
+        if self._gp_thread is not None:
+            return  # 已经启动过
+        self._gp_stop = False
+
+        def gp_loop():
+            self.get_logger().info("[GP] background thread started.")
+            while not self._gp_stop and rclpy.ok():
+                t0 = time.time()
+                try:
+                    with self._gp_lock:
+                        # 复制当前状态（防止线程间冲突）
+                        q = np.copy(self.q)
+                        dq_des_joint = np.copy(self.dq_des_joint)
+                        ddq_des_joint = np.copy(self.ddq_des_joint)
+                        tau_residual = np.copy(self.tau_residual)
+                    # === 执行预测 + 在线更新 ===
+                    y_hat = self._gp_predict_and_update(q, dq_des_joint, ddq_des_joint, tau_residual)
+                    # 存储预测结果
+                    with self._gp_lock:
+                        self._gp_yhat = y_hat
+                except Exception as e:
+                    self.get_logger().error(f"[GP] thread error: {e}")
+                # 控制频率
+                dt = time.time() - t0
+                sleep_t = max(0.0, self._gp_thread_period - dt)
+                time.sleep(sleep_t)
+            self.get_logger().info("[GP] background thread stopped.")
+
+        self._gp_thread = threading.Thread(target=gp_loop, daemon=True)
+        self._gp_thread.start()
+    
+    def _stop_gp_thread(self):
+        self._gp_stop = True
+        if self._gp_thread is not None:
+            self._gp_thread.join(timeout=1.0)
+            self._gp_thread = None
+
+    def _gp_predict_and_update(self, q, dq_des_joint, ddq_des_joint, tau_residual):
+        """后台线程中调用：预测 + 在线更新（每次循环一次，带详细debug输出）"""
+        if self._gp_stop:
+            return
+        if not self.gp_ready or not self.use_gp:
             return np.zeros(7, dtype=float)
-        y_hat = np.zeros(7, dtype=float)  # 第7维默认0
-        for j in range(1, 7):  # 只预测1~6
-            pack = self.gp_models.get(j, None)
+
+        y_hat = np.zeros(7, dtype=float)
+
+        for j in range(1, 7):
+            pack = self.gp_models.get(j)
             if pack is None:
+                self.get_logger().warn(f"[GP-debug] joint {j}: no model pack")
                 continue
+
             model = pack["model"]
             Xm, Xs, Ym, Ys = pack["stats"]
             x_dim = pack["x_dim"]
 
+            # === 1. 构造输入 ===
             if x_dim == 3:
                 x = np.array([q[j-1], dq_des_joint[j-1], ddq_des_joint[j-1]], dtype=np.float32)
             elif x_dim == 2:
                 x = np.array([q[j-1], ddq_des_joint[j-1]], dtype=np.float32)
-            elif x_dim == 1:
-                x = np.array([q[j-1]], dtype=np.float32)
             else:
+                x = np.array([q[j-1]], dtype=np.float32)
+
+            if not np.all(np.isfinite(x)):
+                self.get_logger().warn(f"[GP-debug] joint {j}: invalid x = {x}")
                 continue
 
             Xm = np.asarray(Xm, dtype=np.float32)
-            Xs = np.asarray(Xs, dtype=np.float32); Xs[Xs < 1e-9] = 1.0
-            assert Xm.shape[0] >= x_dim and Xs.shape[0] >= x_dim, "[GP] stats shape mismatch with x_dim"
+            Xs = np.asarray(Xs, dtype=np.float32)
+            Ym = float(np.asarray(Ym)[0])
+            Ys = float(np.asarray(Ys)[0]) if float(np.asarray(Ys)[0]) != 0.0 else 1.0
+            # Xs[Xs < 1e-9] = 1.0
+
+            # 标准化
             x_std = (x - Xm[:x_dim]) / Xs[:x_dim]
+            # x_std = np.clip(x_std, -5.0, 5.0)
 
-            mu_std, _ = model.predict(x_std)
-            mu_std = float(mu_std[0])
+            # === 2. 预测 ===
+            try:
+                mu_std, _ = model.predict(x_std)
+                mu_std = float(mu_std[0])
+            except Exception as e:
+                self.get_logger().error(f"[GP-debug] joint {j}: predict failed: {e}")
+                continue
 
-            Ym = float(np.asarray(Ym)[0]); Ys = float(np.asarray(Ys)[0])
-            y_hat[j-1] = mu_std * Ys + Ym
+            if not np.isfinite(mu_std):
+                self.get_logger().warn(f"[GP-debug] joint {j}: mu_std not finite ({mu_std}) → set 0")
+                mu_std = 0.0
+
+            y_pred = mu_std * Ys + Ym
+            # y_pred_clipped = np.clip(y_pred, -5.0, 5.0)
+            y_hat[j-1] = y_pred
+
+            # # === 打印预测调试信息 ===
+            # self.get_logger().info(
+            #     f"[GP-debug] joint {j}: "
+            #     f"x={x}, x_std={np.round(x_std,3)}, mu_std={mu_std:.4f}, "
+            #     f"y_pred_raw={y_pred:.4f}, y_pred_clip={y_pred_clipped:.4f}, "
+            #     f"Ys={Ys:.4f}, Ym={Ym:.4f}"
+            # )
+
+            # === 3. 在线更新 ===
+            y_real = float(tau_residual[j-1])
+            if not np.isfinite(y_real):
+                self.get_logger().warn(f"[GP-debug] joint {j}: invalid y_real={y_real}")
+                continue
+            y_std = (y_real - Ym) / Ys
+
+            if np.isfinite(y_std):
+                try:
+                    model.add_point(x_std, np.array([y_std], dtype=np.float32))
+                    self.get_logger().info(
+                        f"[GP-debug] joint {j}: update ok (y_real={y_real:.4f}, y_std={y_std:.4f})"
+                    )
+                except Exception as e:
+                    self.get_logger().error(f"[GP-debug] joint {j}: add_point failed: {e}")
+            else:
+                self.get_logger().warn(f"[GP-debug] joint {j}: skip update (non-finite y_std={y_std})")
+
+        # # 限幅
+        # norm6 = np.linalg.norm(y_hat[:6])
+        # if norm6 > 12.0:
+        #     y_hat[:6] *= (12.0 / (norm6 + 1e-9))
+        #     self.get_logger().warn(f"[GP-debug] y_hat norm={norm6:.3f} → clipped")
+
+        # self.get_logger().info(f"[GP-debug] final y_hat={np.round(y_hat,4)}")
 
         return y_hat
+
+
 
     def _ensure_skygp_import(self):
         """
@@ -562,7 +605,10 @@ class CartesianImpedanceController(Node):
                 self.dq_history,
                 self.dq_des_joint_history,
                 self.ddq_des_joint_history,
+                self.y_hat_history,            # <--- 新增
+                self.tau_residual_history,     # <--- 新增
             ]
+
             min_len = min(len(s) for s in series_list)
 
             with open(filename, 'w', newline='') as csvfile:
@@ -581,6 +627,8 @@ class CartesianImpedanceController(Node):
                 header.extend([f'joint_vel_{i+1}' for i in range(7)])
                 header.extend([f'dq_des_joint_{i+1}' for i in range(7)])
                 header.extend([f'ddq_des_joint_{i+1}' for i in range(7)])
+                header.extend([f'y_hat_{i+1}' for i in range(7)])           # <--- 新增
+                header.extend([f'tau_residual_{i+1}' for i in range(7)])    # <--- 新增
                 writer.writerow(header)
 
                 for i in range(min_len):
@@ -605,6 +653,17 @@ class CartesianImpedanceController(Node):
                         row.extend(self.ddq_des_joint_history[i])
                     else:
                         row.extend([0.0]*7)
+                    
+                    # y_hat & tau_residual 新增（也做缺省保护）
+                    if i < len(self.y_hat_history):
+                        row.extend(self.y_hat_history[i])
+                    else:
+                        row.extend([0.0]*7)
+
+                    if i < len(self.tau_residual_history):
+                        row.extend(self.tau_residual_history[i])
+                    else:
+                        row.extend([0.0]*7)
 
                     writer.writerow(row)
 
@@ -621,7 +680,8 @@ def main(args=None):
     
     try:
         rclpy.spin(cartesian_impedance_node)
-    except KeyboardInterrupt:
+    except KeyboardInterrupt:   
+        cartesian_impedance_node._stop_gp_thread
         cartesian_impedance_node.get_logger().info('Received keyboard interrupt, saving data...')
     except Exception as e:
         cartesian_impedance_node.get_logger().error(f'Error when running program: {str(e)}')
@@ -630,13 +690,13 @@ def main(args=None):
             # save data to file only if signal handler has not been executed
             if not cartesian_impedance_node._signal_handled:
                 cartesian_impedance_node.get_logger().info('Signal handler not executed, saving data to file...')
+                cartesian_impedance_node._stop_gp_thread
                 cartesian_impedance_node.save_data_to_file()
             else:
                 cartesian_impedance_node.get_logger().info('Signal handler executed, data already saved, skipping...')
                 
         except Exception as e:
             cartesian_impedance_node.get_logger().error(f'Error when saving data: {str(e)}')
-        
         cartesian_impedance_node.destroy_node()
         rclpy.shutdown()
 

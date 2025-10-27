@@ -113,27 +113,6 @@ def fit_hparams_gpytorch(X, y, max_points=1000, iters=300, lr=0.1,
                 ls0 = model.covar_module.base_kernel.lengthscale.detach().view(-1)[0].item()
                 print(f"[GPyTorch opt P1] iter {i:4d} | nll {loss.item():.4f} | sf^2 {sf2:.4g} | sn^2 {sn2:.4g} | ls0 {ls0:.4g}")
 
-    # LBFGS 收尾（可选）
-    # try:
-    #     optimizer_lbfgs = torch.optim.LBFGS(model.parameters(), lr=0.2, max_iter=iters - adam_iters,
-    #                                         line_search_fn="strong_wolfe")
-
-    #     def closure():
-    #         optimizer_lbfgs.zero_grad(set_to_none=True)
-    #         with jitter_ctx:
-    #             out = model(tx)
-    #             loss = -mll(out, ty)
-    #         if not torch.isfinite(loss):
-    #             raise FloatingPointError("loss is not finite")
-    #         loss.backward()
-    #         return loss
-
-    #     with chol_ctx:
-    #         loss_lbfgs = optimizer_lbfgs.step(closure)
-    #         if print_every:
-    #             print(f"[GPyTorch opt P2] final nll {loss_lbfgs:.4f}")
-    # except Exception as e:
-    #     print(f"[WARN] LBFGS failed ({e}); using Adam-only params.")
 
     # 导出参数
     model.eval(); likelihood.eval()

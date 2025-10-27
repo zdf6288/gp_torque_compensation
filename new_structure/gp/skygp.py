@@ -380,7 +380,8 @@ class SkyGP_rBCM:
             norm_dist = np.inf
 
         search_k = int(min(self.max_experts, max(1, np.exp(norm_dist / self.timescale))))
-        # search_k = self.max_experts
+        # print("search_k:",search_k)
+        search_k = 20
         n_experts = len(self.expert_centers)
 
         if self.last_expert_idx is None:
