@@ -289,10 +289,6 @@ class CartesianImpedanceController(Node):
                 @ (self.kpn_gains * (self.q_des - q) + self.dpn_gains * (self.dq_des - dq)))
             tau = tau + tau_nullspace
 
-            tau = self.filter_beta * tau + (1 - self.filter_beta) * self.tau_buffer
-            self.tau_buffer = tau.copy()
-            tau = np.clip(tau, -50.0, 50.0)
-
             tau_residual = tau_measured - tau - gravity_measured
             self.tau_residual = tau_residual
             print("tau_residual:",tau_residual)
@@ -302,7 +298,7 @@ class CartesianImpedanceController(Node):
                 if not self._gp_stop:
                     y_hat = np.copy(self._gp_yhat)
                     print("yhat:",y_hat)
-            tau = tau + y_hat
+            tau = tau - y_hat
 
             # --- 记录 y_hat / tau_residual（与其他数据一起） ---
             if self.data_recording_enabled:
@@ -500,8 +496,9 @@ class CartesianImpedanceController(Node):
 
             # === 2. 预测 ===
             try:
-                mu_std, _ = model.predict(x_std)
+                mu_std, var_std = model.predict(x_std)
                 mu_std = float(mu_std[0])
+                sigma_std = float(np.sqrt(var_std[0])) if np.all(np.isfinite(var_std)) else 0.0
             except Exception as e:
                 self.get_logger().error(f"[GP-debug] joint {j}: predict failed: {e}")
                 continue
@@ -510,9 +507,24 @@ class CartesianImpedanceController(Node):
                 self.get_logger().warn(f"[GP-debug] joint {j}: mu_std not finite ({mu_std}) → set 0")
                 mu_std = 0.0
 
+            # === 标准化反变换 ===
             y_pred = mu_std * Ys + Ym
-            # y_pred_clipped = np.clip(y_pred, -5.0, 5.0)
-            y_hat[j-1] = y_pred
+            sigma = sigma_std * Ys   # 方差反变换
+
+            # === 基于方差的置信加权 ===
+            alpha = 0.5  # <-- 可调参数，越大抑制越强
+            w = 1.0 / (1.0 + alpha * sigma**2)
+            # w = 1.0
+            y_pred_weighted = y_pred * w
+
+            # === 存入结果 ===
+            y_hat[j-1] = y_pred_weighted
+
+            # 额外打印调试信息
+            self.get_logger().info(
+                f"[GP-debug] joint {j}: μ={y_pred:.3f}, σ={sigma:.3f}, w={w:.3f} → weighted={y_pred_weighted:.3f}"
+            )
+
 
             # # === 打印预测调试信息 ===
             # self.get_logger().info(

@@ -79,7 +79,7 @@ if __name__ == "__main__":
         hps = fit_global_hparams(
             Xn, Yn,
             max_pts_hparam=2000,   # 子采样加速上限
-            iters=300,             # 迭代步数（按需调）
+            iters=600,             # 迭代步数（按需调）
             lr=0.03,               # 学习率（按需调）
             print_every=100
         )
@@ -93,7 +93,7 @@ if __name__ == "__main__":
         # 3) 构建 rBCM，并用全量数据离线灌入（不优化超参）
         model = build_rBCM(
             x_dim=Xn.shape[1], hps=hps,
-            max_data_per_expert=64, nearest_k=3, max_experts=64,
+            max_data_per_expert=64, nearest_k=4, max_experts=64,
             replacement=False, timescale=0.03
         )
 
