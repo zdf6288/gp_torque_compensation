@@ -1,0 +1,9 @@
+# Request
+float32[7] q
+float32[7] dq_des_joint
+float32[7] ddq_des_joint
+float32[7] tau_residual
+
+---
+# Response
+float32[7] y_hat

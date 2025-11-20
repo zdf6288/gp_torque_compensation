@@ -30,6 +30,7 @@ setup(
                 'trajectory_publisher = py_controllers.trajectory_publisher:main',
                 'trajectory_eclipse_publisher = py_controllers.trajectory_eclipse_publisher:main',
                 'trajectory_publisher_lambda = py_controllers.trajectory_publisher_lambda:main', 
+                'gp_server = py_controllers.gp_server:main',
             ],
         },
 )

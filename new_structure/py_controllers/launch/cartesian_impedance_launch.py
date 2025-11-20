@@ -63,6 +63,13 @@ def generate_launch_description():
         ),
         Node(
             package='py_controllers',
+            executable='gp_server',          # 和 setup.py 里 entry_points 名字一致
+            name='gp_server',
+            output='screen',
+        ),
+
+        Node(
+            package='py_controllers',
             executable='cartesian_impedance',
             name='cartesian_impedance',
             output='screen',

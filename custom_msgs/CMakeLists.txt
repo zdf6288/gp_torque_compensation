@@ -24,6 +24,7 @@ set(msg_files
 set(srv_files
   "srv/JointPositionAdjust.srv"
   "srv/GPPredict.srv"
+  "srv/AsyncGPpredict.srv"
 )
 
 rosidl_generate_interfaces(${PROJECT_NAME}

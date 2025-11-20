@@ -4,6 +4,7 @@ import rclpy
 from rclpy.node import Node
 from custom_msgs.msg import StateParameter, EffortCommand, TaskSpaceCommand
 from custom_msgs.srv import JointPositionAdjust
+from custom_msgs.srv import AsyncGPpredict
 from std_msgs.msg import Bool
 import numpy as np
 from scipy.spatial.transform import Rotation
@@ -121,33 +122,33 @@ class CartesianImpedanceController(Node):
         self.ddq_des_joint = np.zeros(7)
         self.tau_residual = np.zeros(7)
 
-        # === Asychronous GP ===
-        self._gp_lock = threading.Lock()
-        self._gp_thread = None
-        self._gp_stop = False
-        self._gp_yhat = np.zeros(7, dtype=float)
-        self._gp_thread_period = 0.002  # 后台线程循环周期 (s) → 2ms ≈ 500Hz
+        self.gp_counter = 0
+        self.y_hat_filtered = np.zeros(7)
+        self.y_hat_alpha = 0.05   # 越小越平滑，0.01~0.1 合理      
+        self.tau_filtered = np.zeros(7) 
 
-        self.gp_models = {}     # j: {'model':..., 'stats':(Xm,Xs,Ym,Ys), 'x_dim':D}
-        self.gp_ready = False
-        self.gp_use_features = ("q", "dq_des", "ddq_des")
-        self._load_gp_models(dir_path="./new_structure/gp/gp_models")
-        self._start_gp_thread()
-
-        # 预测节流（你已有）
-        self.use_gp = True
-        self.gp_stride = 10
-        self._step = 0
-        self.y_hat_last = np.zeros(7, dtype=float)
-        self.y_hat_max_age = 0.2
-        self._y_hat_stamp = None
-
-        # === 在线学习配置 ===
+        # 预测节流（你已有）from
         self.gp_update_y_clip = 10.0         # 训练用残差的幅值上限（Nm）
 
         self.y_hat_history = []          # 记录每次控制回路使用的 y_hat (7,)
+        self.tau_residual_filtered = np.zeros(7)  # 滤波后的 tau_residual (7,)
         self.tau_residual_history = []   # 记录 tau_residual (7,)
 
+
+        # GP service client
+        self.gp_client = self.create_client(AsyncGPpredict, '/gp_predict')
+        self.use_gp = True
+        
+        self._gp_lock = threading.Lock()
+        self._latest_y_hat = np.zeros(7, dtype=float)
+        self._gp_warned = False  # 避免一直刷 warn
+
+        # 不要 while 死等，只尝试一次
+        if not self.gp_client.wait_for_service(timeout_sec=2.0):
+            self.get_logger().warn('/gp_predict service not available at start, GP disabled')
+            self.use_gp = False
+        else:
+            self.get_logger().info('/gp_predict service is ready')
 
 
     def taskCommandCallback(self, msg):
@@ -167,7 +168,6 @@ class CartesianImpedanceController(Node):
             # initialize t_initial, get t_elapsed, t_last and dt
             # initialize q_initial, get q, dq and ddq
             t_now = self.get_clock().now()
-            self._step += 1
             q = np.array(msg.position)
             self.q = q
             dq = np.array(msg.velocity)
@@ -289,21 +289,54 @@ class CartesianImpedanceController(Node):
                 @ (self.kpn_gains * (self.q_des - q) + self.dpn_gains * (self.dq_des - dq)))
             tau = tau + tau_nullspace
 
+            # === 计算残差 ===
             tau_residual = tau_measured - tau - gravity_measured
-            self.tau_residual = tau_residual
-            print("tau_residual:",tau_residual)
+            self.tau_residual_filtered = (
+                0.02 * tau_residual + 0.98 * self.tau_residual_filtered
+            )
+            print("tau_residual:", tau_residual)
 
-            # === 主控制回路 ===
+            # 1) 先取用「最近一次」的 y_hat （如果没有就全 0）
             with self._gp_lock:
-                if not self._gp_stop:
-                    y_hat = np.copy(self._gp_yhat)
-                    print("yhat:",y_hat)
+                raw = self._latest_y_hat.copy()
+
+            # 指数低通滤波
+            self.y_hat_filtered = (
+                self.y_hat_alpha * raw
+                + (1 - self.y_hat_alpha) * self.y_hat_filtered
+            )
+
+            y_hat = self.y_hat_filtered
+
+
+            # 2) 再异步发一个新的 request，结果回来后更新缓存
+            if self.use_gp and self.gp_client.service_is_ready():
+                req = AsyncGPpredict.Request()
+                req.q = self.q.astype(np.float32).tolist()
+                req.dq_des_joint = self.dq_des_joint.astype(np.float32).tolist()
+                req.ddq_des_joint = self.ddq_des_joint.astype(np.float32).tolist()
+                req.tau_residual = self.tau_residual_filtered.astype(np.float32).tolist()
+
+                self.gp_counter += 1
+                if self.gp_counter % 10 == 0:   # 控制周期 1kHz → 每10次发一次 → 100Hz
+                    future = self.gp_client.call_async(req)
+                    future.add_done_callback(self._gp_response_callback)
+            else:
+                if self.use_gp and not self._gp_warned:
+                    self.get_logger().warn("[Controller] /gp_predict not ready; use y_hat=0")
+                    self._gp_warned = True
+
+
+            # 把 GP 的输出减掉
             tau = tau - y_hat
+            # self.tau_filtered = self.y_hat_alpha * tau + (1 - self.y_hat_alpha) * self.tau_filtered
+            # tau = self.tau_filtered
+
 
             # --- 记录 y_hat / tau_residual（与其他数据一起） ---
             if self.data_recording_enabled:
-                self.y_hat_history.append(y_hat.tolist())
-                self.tau_residual_history.append(tau_residual.tolist())
+                self.y_hat_history.append(self.y_hat_filtered.tolist())
+                self.tau_residual_history.append(self.tau_residual_filtered.tolist())
 
             # publish on topic /effort_command
             self.effort_msg.efforts = tau.tolist()
@@ -324,6 +357,21 @@ class CartesianImpedanceController(Node):
 
         except Exception as e:
             self.get_logger().error(f'Parameter error: {str(e)}')
+
+    def _gp_response_callback(self, future):
+        try:
+            resp = future.result()
+            if resp is None:
+                return
+            y_hat = np.array(resp.y_hat, dtype=float)
+            if y_hat.shape != (7,):
+                self.get_logger().warn(f"[Controller] GP returned wrong size y_hat: {y_hat.shape}")
+                return
+            with self._gp_lock:
+                self._latest_y_hat = y_hat
+        except Exception as e:
+            self.get_logger().warn(f"[Controller] GP response error: {e}")
+
 
     def start_trajectory(self):
         """start trajectory by calling the joint position adjust service"""
@@ -361,17 +409,24 @@ class CartesianImpedanceController(Node):
             self.trajectory_started = False             # reset flag to retry
 
     def signal_handler(self, signum, frame):
-        """signal handler, call save data function when program is interrupted"""
+        if self._signal_handled:
+            return
+        self._signal_handled = True
+
+        self.get_logger().info(f"Received signal {signum}, saving data...")
+
+        # 2. 保存数据
         try:
-            if self._signal_handled:
-                return
-            self._signal_handled = True
-            self.get_logger().info(f'Received signal {signum}, saving data...')
             self.save_data_to_file()
-            self.get_logger().info(f'Signal handler completed successfully')
-        except Exception as e:
-            self.get_logger().error(f'Error in signal handler: {str(e)}')
-            self._signal_handled = False
+        except:
+            pass
+
+        # 3. 停止节点
+        rclpy.shutdown()
+
+        # 4. 直接退出程序
+        os._exit(0)
+
     
     def _load_gp_models(self, dir_path="./new_structure/gp/gp_models"):
         """加载离线训练好的每关节GP：gp_models/joint{j}.pkl"""
@@ -413,45 +468,6 @@ class CartesianImpedanceController(Node):
 
         self.gp_ready = (loaded > 0)
         self.get_logger().info(f"[GP] 共加载 {loaded} 个模型. ready={self.gp_ready}")
-
-    def _start_gp_thread(self):
-        """启动 GP 异步预测+更新线程"""
-        if self._gp_thread is not None:
-            return  # 已经启动过
-        self._gp_stop = False
-
-        def gp_loop():
-            self.get_logger().info("[GP] background thread started.")
-            while not self._gp_stop and rclpy.ok():
-                t0 = time.time()
-                try:
-                    with self._gp_lock:
-                        # 复制当前状态（防止线程间冲突）
-                        q = np.copy(self.q)
-                        dq_des_joint = np.copy(self.dq_des_joint)
-                        ddq_des_joint = np.copy(self.ddq_des_joint)
-                        tau_residual = np.copy(self.tau_residual)
-                    # === 执行预测 + 在线更新 ===
-                    y_hat = self._gp_predict_and_update(q, dq_des_joint, ddq_des_joint, tau_residual)
-                    # 存储预测结果
-                    with self._gp_lock:
-                        self._gp_yhat = y_hat
-                except Exception as e:
-                    self.get_logger().error(f"[GP] thread error: {e}")
-                # 控制频率
-                dt = time.time() - t0
-                sleep_t = max(0.0, self._gp_thread_period - dt)
-                time.sleep(sleep_t)
-            self.get_logger().info("[GP] background thread stopped.")
-
-        self._gp_thread = threading.Thread(target=gp_loop, daemon=True)
-        self._gp_thread.start()
-    
-    def _stop_gp_thread(self):
-        self._gp_stop = True
-        if self._gp_thread is not None:
-            self._gp_thread.join(timeout=1.0)
-            self._gp_thread = None
 
     def _gp_predict_and_update(self, q, dq_des_joint, ddq_des_joint, tau_residual):
         """后台线程中调用：预测 + 在线更新（每次循环一次，带详细debug输出）"""
@@ -524,15 +540,6 @@ class CartesianImpedanceController(Node):
             self.get_logger().info(
                 f"[GP-debug] joint {j}: μ={y_pred:.3f}, σ={sigma:.3f}, w={w:.3f} → weighted={y_pred_weighted:.3f}"
             )
-
-
-            # # === 打印预测调试信息 ===
-            # self.get_logger().info(
-            #     f"[GP-debug] joint {j}: "
-            #     f"x={x}, x_std={np.round(x_std,3)}, mu_std={mu_std:.4f}, "
-            #     f"y_pred_raw={y_pred:.4f}, y_pred_clip={y_pred_clipped:.4f}, "
-            #     f"Ys={Ys:.4f}, Ym={Ym:.4f}"
-            # )
 
             # === 3. 在线更新 ===
             y_real = float(tau_residual[j-1])
@@ -693,7 +700,6 @@ def main(args=None):
     try:
         rclpy.spin(cartesian_impedance_node)
     except KeyboardInterrupt:   
-        cartesian_impedance_node._stop_gp_thread
         cartesian_impedance_node.get_logger().info('Received keyboard interrupt, saving data...')
     except Exception as e:
         cartesian_impedance_node.get_logger().error(f'Error when running program: {str(e)}')
@@ -702,7 +708,6 @@ def main(args=None):
             # save data to file only if signal handler has not been executed
             if not cartesian_impedance_node._signal_handled:
                 cartesian_impedance_node.get_logger().info('Signal handler not executed, saving data to file...')
-                cartesian_impedance_node._stop_gp_thread
                 cartesian_impedance_node.save_data_to_file()
             else:
                 cartesian_impedance_node.get_logger().info('Signal handler executed, data already saved, skipping...')
