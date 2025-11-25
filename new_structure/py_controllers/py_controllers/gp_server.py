@@ -10,7 +10,7 @@ class GPServer(Node):
         super().__init__('gp_server')
         self.get_logger().info("[GPServer] starting...")
 
-        self.declare_parameter('model_dir', './src/new_structure/gp/gp_models')
+        self.declare_parameter('model_dir', './new_structure/gp/gp_models')
         self.model_dir = self.get_parameter('model_dir').value
 
         self.gp_models = {}
@@ -62,7 +62,7 @@ class GPServer(Node):
 
         # 1) 以当前工作目录为基准：<ws>/src/new_structure/gp/skygp.py
         cwd = os.getcwd()
-        candidates.append(os.path.join(cwd, "src", "new_structure", "gp", "skygp.py"))
+        candidates.append(os.path.join(cwd, "new_structure", "gp", "skygp.py"))
 
         # 2) 以安装后的 gp_server.py 为基准，再往上回到 src 目录
         script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -169,7 +169,7 @@ class GPServer(Node):
             y_pred = mu_std * Ys + Ym
             sigma = sigma_std * Ys
 
-            alpha = 0.5
+            alpha = 0
             w = 1.0 / (1.0 + alpha * sigma**2)
             y_pred_weighted = y_pred * w
             y_hat[j-1] = y_pred_weighted

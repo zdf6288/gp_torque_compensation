@@ -86,7 +86,7 @@ def main():
 
     parser.add_argument("--data", default="gp_train_data_per_joint_no_filter.npz",
                         help="输入的训练数据 npz 文件")
-    parser.add_argument("--joint", default="6",
+    parser.add_argument("--joint", default="all",
                         help="'all' 或 指定关节编号 (1..7)")
     parser.add_argument("--iters", type=int, default=800,
                         help="超参优化迭代次数")

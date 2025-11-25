@@ -307,7 +307,7 @@ class CartesianImpedanceController(Node):
             )
 
             y_hat = self.y_hat_filtered
-
+            print("yhat:=",y_hat)
 
             # 2) 再异步发一个新的 request，结果回来后更新缓存
             if self.use_gp and self.gp_client.service_is_ready():
