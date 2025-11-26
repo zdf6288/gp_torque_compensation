@@ -94,32 +94,102 @@ class GPServer(Node):
             return False
 
 
-    def _load_gp_models(self, dir_path):
-        # 基本就是你原来的 _load_gp_models
-        self.get_logger().info(f"[GP] loading models from: {os.path.abspath(dir_path)}")
+    def _load_gp_models(self, dir_path=None):
+        """
+        从 dir_path 下加载 joint1.pkl ... joint6.pkl，
+        并在加载后按关节覆盖 SkyGP_rBCM 的一些运行参数。
+        """
+        if dir_path is None:
+            dir_path = self.model_dir
+
+        abs_dir = os.path.abspath(dir_path)
+        self.get_logger().info(f"[GP] loading models from: {abs_dir}")
+
+        # ===== 按关节定制 GP 参数（你可以自己改这些值） =====
+        # key = 关节号（1..6），"default" 为所有关节的默认配置
+        per_joint_cfg = {
+            "default": dict(
+                max_data_per_expert=500,
+                nearest_k=2,
+                max_experts=100,
+                timescale=0.03,
+            ),
+            # 举例：如果你想让 6 号关节忘得快一点、专家少一点，可以单独改：
+            6: dict(
+                max_data_per_expert=50,
+                nearest_k=2,
+                max_experts=50,
+                timescale=0.05,
+            ),
+        }
+
         loaded = 0
+        self.gp_models = {}
+
         for j in range(1, 7):
             p = os.path.join(dir_path, f"joint{j}.pkl")
+            abs_p = os.path.abspath(p)
             if not os.path.isfile(p):
-                self.get_logger().warn(f"[GP] model file not found: {os.path.abspath(p)}")
+                self.get_logger().warn(f"[GP] model file not found: {abs_p}")
                 continue
+
             try:
                 with open(p, "rb") as f:
                     pack = pickle.load(f)
-                model = pack.get("model", None)
-                stats = pack.get("stats", None)
-                if model is None or stats is None:
-                    self.get_logger().warn(f"[GP] bad model pack: {p}")
-                    continue
-                Xm, Xs, _, _ = stats
-                x_dim = int(np.asarray(Xm).shape[0])
-                self.gp_models[j] = {"model": model, "stats": stats, "x_dim": x_dim}
-                loaded += 1
-                self.get_logger().info(f"[GP] joint{j} model loaded, x_dim={x_dim}")
             except Exception as e:
-                self.get_logger().error(f"[GP] fail loading {p}: {e}")
+                self.get_logger().error(f"[GP] fail loading {abs_p}: {e}")
+                continue
+
+            model = pack.get("model", None)
+            stats = pack.get("stats", None)  # (Xm, Xs, Ym, Ys)
+            if model is None or stats is None:
+                self.get_logger().warn(f"[GP] bad model pack: {abs_p}")
+                continue
+
+            try:
+                Xm, Xs, Ym, Ys = stats
+                x_dim = int(np.asarray(Xm).shape[0])
+            except Exception as e:
+                self.get_logger().error(f"[GP] invalid stats in {abs_p}: {e}")
+                continue
+
+            # ===== 在这里覆盖 SkyGP_rBCM 的参数 =====
+            cfg = per_joint_cfg.get(j, per_joint_cfg["default"])
+            try:
+                # 只有在模型里确实有这些属性时才改，避免旧版本崩溃
+                if hasattr(model, "max_data_per_expert"):
+                    model.max_data_per_expert = int(cfg["max_data_per_expert"])
+                if hasattr(model, "nearest_k"):
+                    model.nearest_k = int(cfg["nearest_k"])
+                if hasattr(model, "max_experts"):
+                    model.max_experts = int(cfg["max_experts"])
+                if hasattr(model, "timescale"):
+                    model.timescale = float(cfg["timescale"])
+
+                self.get_logger().info(
+                    f"[GP] joint{j} loaded: x_dim={x_dim}, "
+                    f"max_data_per_expert={getattr(model, 'max_data_per_expert', 'NA')}, "
+                    f"nearest_k={getattr(model, 'nearest_k', 'NA')}, "
+                    f"max_experts={getattr(model, 'max_experts', 'NA')}, "
+                    f"timescale={getattr(model, 'timescale', 'NA')}"
+                )
+            except Exception as e:
+                self.get_logger().warn(
+                    f"[GP] joint{j}: override model params failed: {e}"
+                )
+
+            # 存到字典里备用
+            self.gp_models[j] = {
+                "model": model,
+                "stats": stats,
+                "x_dim": x_dim,
+            }
+            loaded += 1
+
         self.gp_ready = (loaded > 0)
         self.get_logger().info(f"[GP] total loaded: {loaded}, ready={self.gp_ready}")
+
+
 
     def _gp_predict_and_update(self, q, dq_des_joint, ddq_des_joint, tau_residual):
         # 基本照搬你现有的版本，只是去掉 self.q 等共享变量，直接用函数参数

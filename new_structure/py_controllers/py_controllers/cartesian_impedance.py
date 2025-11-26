@@ -318,7 +318,7 @@ class CartesianImpedanceController(Node):
                 req.tau_residual = self.tau_residual_filtered.astype(np.float32).tolist()
 
                 self.gp_counter += 1
-                if self.gp_counter % 10 == 0:   # 控制周期 1kHz → 每10次发一次 → 100Hz
+                if self.gp_counter % 1 == 0:   # 控制周期 1kHz → 每10次发一次 → 100Hz
                     future = self.gp_client.call_async(req)
                     future.add_done_callback(self._gp_response_callback)
             else:
