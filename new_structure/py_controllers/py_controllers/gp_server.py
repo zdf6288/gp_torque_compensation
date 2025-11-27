@@ -4,6 +4,7 @@ from rclpy.node import Node
 import numpy as np
 import os, sys, pickle, importlib.util
 from custom_msgs.srv import AsyncGPpredict   # 刚才定义的 srv
+import copy
 
 class GPServer(Node):
     def __init__(self):
@@ -33,21 +34,25 @@ class GPServer(Node):
         self.get_logger().info("[GPServer] service /gp_predict ready")
 
     def gp_predict_callback(self, request, response):
+        """
+        输入：
+        - q
+        - dq_des_joint / ddq_des_joint           （当前期望关节）
+        - dq_des_joint_future / ddq_des_joint_future  （未来期望关节）
+        - tau_residual
+        输出：
+        - y_hat[7]：slow + fast 融合后的补偿
+        """
         try:
-            q = np.array(request.q, dtype=np.float32)
-            dq_des_joint = np.array(request.dq_des_joint, dtype=np.float32)
-            ddq_des_joint = np.array(request.ddq_des_joint, dtype=np.float32)
+            q          = np.array(request.q, dtype=np.float32)
+            dq_now     = np.array(request.dq_des_joint, dtype=np.float32)
+            ddq_now    = np.array(request.ddq_des_joint, dtype=np.float32)
+            dq_future  = np.array(request.dq_des_joint_future, dtype=np.float32)
+            ddq_future = np.array(request.ddq_des_joint_future, dtype=np.float32)
             tau_residual = np.array(request.tau_residual, dtype=np.float32)
 
-            dq_des_joint_future = np.array(request.dq_des_joint_future, dtype=np.float32)
-            ddq_des_joint_future = np.array(request.ddq_des_joint_future, dtype=np.float32)
-
-            # 用「未来特征」做预测（当前特征你可以只用于分析或不用）
-            y_hat = self._gp_predict_and_update(
-                q,
-                dq_des_joint_future,
-                ddq_des_joint_future,
-                tau_residual
+            y_hat = self._gp_predict_and_update_twofeatures(
+                q, dq_now, ddq_now, dq_future, ddq_future, tau_residual
             )
             response.y_hat = y_hat.astype(np.float32).tolist()
         except Exception as e:
@@ -55,8 +60,6 @@ class GPServer(Node):
             response.y_hat = [0.0]*7
 
         return response
-
-
 
     # ==== 把你原来的这三个函数基本原样搬进来 ====
     def _ensure_skygp_import(self):
@@ -105,11 +108,14 @@ class GPServer(Node):
             self.get_logger().error(f"[GP] failed to import skygp from {skygp_path}: {e}")
             return False
 
-
     def _load_gp_models(self, dir_path=None):
         """
-        从 dir_path 下加载 joint1.pkl ... joint6.pkl，
-        并在加载后按关节覆盖 SkyGP_rBCM 的一些运行参数。
+        对每个关节 j：
+        - 只加载一个 joint{j}.pkl
+        - 从里边的 model deepcopy 出两份：
+            - slow：带延迟 GP（用未来关节特征）
+            - fast：无延迟 GP（用当前关节特征）
+        - stats (Xm, Xs, Ym, Ys) 两个模型共享
         """
         if dir_path is None:
             dir_path = self.model_dir
@@ -117,16 +123,15 @@ class GPServer(Node):
         abs_dir = os.path.abspath(dir_path)
         self.get_logger().info(f"[GP] loading models from: {abs_dir}")
 
-        # ===== 按关节定制 GP 参数（你可以自己改这些值） =====
-        # key = 关节号（1..6），"default" 为所有关节的默认配置
-        per_joint_cfg = {
+        # 按关节 + 模型类型（slow/fast）定制运行参数
+        # 你可以根据需要调这些
+        per_joint_cfg_slow = {
             "default": dict(
                 max_data_per_expert=500,
                 nearest_k=2,
                 max_experts=100,
                 timescale=0.03,
             ),
-            # 举例：如果你想让 6 号关节忘得快一点、专家少一点，可以单独改：
             6: dict(
                 max_data_per_expert=50,
                 nearest_k=2,
@@ -135,8 +140,23 @@ class GPServer(Node):
             ),
         }
 
+        per_joint_cfg_fast = {
+            "default": dict(
+                max_data_per_expert=100,   # 小模型记得少一点，更新快
+                nearest_k=2,
+                max_experts=50,
+                timescale=0.02,           # timescale 小一点，forget 更快
+            ),
+            6: dict(
+                max_data_per_expert=50,
+                nearest_k=2,
+                max_experts=30,
+                timescale=0.03,
+            ),
+        }
+
         loaded = 0
-        self.gp_models = {}
+        self.gp_models = {}     # gp_models[j] = {"slow": {...}, "fast": {...}}
 
         for j in range(1, 7):
             p = os.path.join(dir_path, f"joint{j}.pkl")
@@ -152,9 +172,9 @@ class GPServer(Node):
                 self.get_logger().error(f"[GP] fail loading {abs_p}: {e}")
                 continue
 
-            model = pack.get("model", None)
+            model_base = pack.get("model", None)
             stats = pack.get("stats", None)  # (Xm, Xs, Ym, Ys)
-            if model is None or stats is None:
+            if model_base is None or stats is None:
                 self.get_logger().warn(f"[GP] bad model pack: {abs_p}")
                 continue
 
@@ -165,41 +185,125 @@ class GPServer(Node):
                 self.get_logger().error(f"[GP] invalid stats in {abs_p}: {e}")
                 continue
 
-            # ===== 在这里覆盖 SkyGP_rBCM 的参数 =====
-            cfg = per_joint_cfg.get(j, per_joint_cfg["default"])
+            self.gp_models[j] = {}
+
+            # === 1) 生成 slow 实例 ===
+            cfg_slow = per_joint_cfg_slow.get(j, per_joint_cfg_slow["default"])
             try:
-                # 只有在模型里确实有这些属性时才改，避免旧版本崩溃
-                if hasattr(model, "max_data_per_expert"):
-                    model.max_data_per_expert = int(cfg["max_data_per_expert"])
-                if hasattr(model, "nearest_k"):
-                    model.nearest_k = int(cfg["nearest_k"])
-                if hasattr(model, "max_experts"):
-                    model.max_experts = int(cfg["max_experts"])
-                if hasattr(model, "timescale"):
-                    model.timescale = float(cfg["timescale"])
+                model_slow = copy.deepcopy(model_base)
+                if hasattr(model_slow, "max_data_per_expert"):
+                    model_slow.max_data_per_expert = int(cfg_slow["max_data_per_expert"])
+                if hasattr(model_slow, "nearest_k"):
+                    model_slow.nearest_k = int(cfg_slow["nearest_k"])
+                if hasattr(model_slow, "max_experts"):
+                    model_slow.max_experts = int(cfg_slow["max_experts"])
+                if hasattr(model_slow, "timescale"):
+                    model_slow.timescale = float(cfg_slow["timescale"])
 
+                self.gp_models[j]["slow"] = {
+                    "model": model_slow,
+                    "stats": stats,
+                    "x_dim": x_dim,
+                }
                 self.get_logger().info(
-                    f"[GP] joint{j} loaded: x_dim={x_dim}, "
-                    f"max_data_per_expert={getattr(model, 'max_data_per_expert', 'NA')}, "
-                    f"nearest_k={getattr(model, 'nearest_k', 'NA')}, "
-                    f"max_experts={getattr(model, 'max_experts', 'NA')}, "
-                    f"timescale={getattr(model, 'timescale', 'NA')}"
+                    f"[GP] joint{j} slow loaded: x_dim={x_dim}, "
+                    f"max_data_per_expert={getattr(model_slow, 'max_data_per_expert', 'NA')}, "
+                    f"nearest_k={getattr(model_slow, 'nearest_k', 'NA')}, "
+                    f"max_experts={getattr(model_slow, 'max_experts', 'NA')}, "
+                    f"timescale={getattr(model_slow, 'timescale', 'NA')}"
                 )
+                loaded += 1
             except Exception as e:
-                self.get_logger().warn(
-                    f"[GP] joint{j}: override model params failed: {e}"
-                )
+                self.get_logger().error(f"[GP] joint{j} slow init failed: {e}")
 
-            # 存到字典里备用
-            self.gp_models[j] = {
-                "model": model,
-                "stats": stats,
-                "x_dim": x_dim,
-            }
-            loaded += 1
+            # === 2) 生成 fast 实例 ===
+            cfg_fast = per_joint_cfg_fast.get(j, per_joint_cfg_fast["default"])
+            try:
+                model_fast = copy.deepcopy(model_base)
+                if hasattr(model_fast, "max_data_per_expert"):
+                    model_fast.max_data_per_expert = int(cfg_fast["max_data_per_expert"])
+                if hasattr(model_fast, "nearest_k"):
+                    model_fast.nearest_k = int(cfg_fast["nearest_k"])
+                if hasattr(model_fast, "max_experts"):
+                    model_fast.max_experts = int(cfg_fast["max_experts"])
+                if hasattr(model_fast, "timescale"):
+                    model_fast.timescale = float(cfg_fast["timescale"])
+
+                self.gp_models[j]["fast"] = {
+                    "model": model_fast,
+                    "stats": stats,
+                    "x_dim": x_dim,
+                }
+                self.get_logger().info(
+                    f"[GP] joint{j} fast loaded: x_dim={x_dim}, "
+                    f"max_data_per_expert={getattr(model_fast, 'max_data_per_expert', 'NA')}, "
+                    f"nearest_k={getattr(model_fast, 'nearest_k', 'NA')}, "
+                    f"max_experts={getattr(model_fast, 'max_experts', 'NA')}, "
+                    f"timescale={getattr(model_fast, 'timescale', 'NA')}"
+                )
+                loaded += 1
+            except Exception as e:
+                self.get_logger().error(f"[GP] joint{j} fast init failed: {e}")
 
         self.gp_ready = (loaded > 0)
-        self.get_logger().info(f"[GP] total loaded: {loaded}, ready={self.gp_ready}")
+        self.get_logger().info(f"[GP] total GP instances (slow+fast): {loaded}, ready={self.gp_ready}")
+
+    def _predict_one_model(self, pack, q_j, dq_j, ddq_j, y_real):
+        """
+        对单个 (某关节的 slow 或 fast) 模型：
+          输入：q_j, dq_j, ddq_j, y_real
+          输出：y_pred, var_est
+        """
+        model = pack["model"]
+        Xm, Xs, Ym, Ys = pack["stats"]
+        x_dim = pack["x_dim"]
+
+        # 1) 构造输入 x
+        if x_dim == 3:
+            x = np.array([q_j, dq_j, ddq_j], dtype=np.float32)
+        elif x_dim == 2:
+            x = np.array([q_j, ddq_j], dtype=np.float32)
+        else:
+            x = np.array([q_j], dtype=np.float32)
+
+        if not np.all(np.isfinite(x)):
+            return 0.0, 1.0
+
+        Xm = np.asarray(Xm, dtype=np.float32)
+        Xs = np.asarray(Xs, dtype=np.float32)
+        Ym = float(np.asarray(Ym)[0])
+        Ys_val = float(np.asarray(Ys)[0])
+        Ys = Ys_val if Ys_val != 0.0 else 1.0
+
+        x_std = (x - Xm[:x_dim]) / Xs[:x_dim]
+
+        try:
+            mu_std_vec, var_std_vec = model.predict(x_std.astype(np.float32))
+            mu_std = float(mu_std_vec[0])
+            var_std = float(var_std_vec[0])
+        except Exception as e:
+            self.get_logger().error(f"[GP] predict failed: {e}")
+            return 0.0, 1.0
+
+        if not np.isfinite(mu_std) or not np.isfinite(var_std) or var_std <= 0.0:
+            return 0.0, 1.0
+
+        # 反标准化
+        y_pred = mu_std * Ys + Ym
+        var_est = var_std * (Ys ** 2)
+
+        # 在线更新（只在中心点）
+        if np.isfinite(y_real):
+            y_std = (y_real - Ym) / Ys
+            if np.isfinite(y_std):
+                try:
+                    model.add_point(x_std.astype(np.float32),
+                                    np.array([y_std], dtype=np.float32))
+                except Exception as e:
+                    self.get_logger().error(f"[GP] add_point failed: {e}")
+
+        return y_pred, var_est
+
 
     def _gp_predict_and_update(self, q, dq_des_joint, ddq_des_joint, tau_residual):
         """
@@ -333,6 +437,83 @@ class GPServer(Node):
 
         return y_hat
 
+    def _gp_predict_and_update_twofeatures(
+        self,
+        q, dq_now, ddq_now,
+        dq_future, ddq_future,
+        tau_residual
+    ):
+        """
+        对每个关节：
+          - slow 模型用未来特征 (dq_future, ddq_future)
+          - fast 模型用当前特征 (dq_now, ddq_now)
+          - 对 slow / fast 的预测按方差加权融合
+          - 在线更新分别在各自模型上做
+        """
+        if not self.gp_ready or not self.use_gp:
+            return np.zeros(7, dtype=float)
+
+        y_hat = np.zeros(7, dtype=float)
+
+        for j in range(1, 7):
+            packs = self.gp_models.get(j, {})
+            pack_slow = packs.get("slow", None)
+            pack_fast = packs.get("fast", None)
+
+            if pack_slow is None and pack_fast is None:
+                continue
+
+            q_j   = float(q[j-1])
+            y_real = float(tau_residual[j-1])
+
+            preds = []
+            vars_ = []
+
+            # ---- slow: 未来特征 ----
+            if pack_slow is not None:
+                y_slow, v_slow = self._predict_one_model(
+                    pack_slow,
+                    q_j,
+                    float(dq_future[j-1]),
+                    float(ddq_future[j-1]),
+                    y_real
+                )
+                preds.append(y_slow)
+                vars_.append(max(v_slow, 1e-6))
+
+            # ---- fast: 当前特征 ----
+            if pack_fast is not None:
+                y_fast, v_fast = self._predict_one_model(
+                    pack_fast,
+                    q_j,
+                    float(dq_now[j-1]),
+                    float(ddq_now[j-1]),
+                    y_real
+                )
+                preds.append(y_fast)
+                vars_.append(max(v_fast, 1e-6))
+
+            preds = np.array(preds, dtype=float)
+            vars_ = np.array(vars_, dtype=float)
+
+            if preds.size == 1:
+                y_hat_j = preds[0]
+            else:
+                inv_vars = 1.0 / vars_
+                w_sum = np.sum(inv_vars)
+                if w_sum <= 0.0 or not np.isfinite(w_sum):
+                    y_hat_j = np.mean(preds)
+                else:
+                    y_hat_j = float(np.sum(preds * inv_vars) / w_sum)
+
+            y_hat[j-1] = y_hat_j
+
+        # 数值保护 + 限幅
+        y_hat = np.nan_to_num(y_hat, nan=0.0, posinf=0.0, neginf=0.0)
+        y_hat = np.clip(y_hat, -10.0, 10.0)  # 每个关节 ±10Nm，可自己调
+
+        return y_hat
+
 
     def _gp_response_callback(self, future):
         """GP service 异步响应回调：更新 self._latest_y_hat"""
@@ -353,7 +534,6 @@ class GPServer(Node):
         except Exception as e:
             # 这里不需要太吓人，只是调试信息
             self.get_logger().warn(f"[Controller] GP response error: {e}")
-
 
 def main(args=None):
     rclpy.init(args=args)
