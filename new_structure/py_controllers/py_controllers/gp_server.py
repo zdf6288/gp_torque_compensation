@@ -17,6 +17,12 @@ class GPServer(Node):
         self.gp_ready = False
         self.use_gp = True
 
+        # 多点采样参数：在 state 附近采样 n 个点做预测并融合
+        self.declare_parameter('gp_n_samples', 5)         # 每个关节输入附近的采样点数（不含中心）
+        self.declare_parameter('gp_sample_radius', 0.3)   # 采样半径（在标准化后空间里）
+        self.n_samples = int(self.get_parameter('gp_n_samples').value)
+        self.sample_radius = float(self.get_parameter('gp_sample_radius').value)
+
         # 先确保 skygp 导入
         self._ensure_skygp_import()
         # 加载离线训练的模型
@@ -27,24 +33,30 @@ class GPServer(Node):
         self.get_logger().info("[GPServer] service /gp_predict ready")
 
     def gp_predict_callback(self, request, response):
-        """
-        每次 controller 调用时：
-        输入：q, dq_des_joint, ddq_des_joint, tau_residual
-        输出：y_hat[7]
-        """
         try:
             q = np.array(request.q, dtype=np.float32)
             dq_des_joint = np.array(request.dq_des_joint, dtype=np.float32)
             ddq_des_joint = np.array(request.ddq_des_joint, dtype=np.float32)
             tau_residual = np.array(request.tau_residual, dtype=np.float32)
 
-            y_hat = self._gp_predict_and_update(q, dq_des_joint, ddq_des_joint, tau_residual)
+            dq_des_joint_future = np.array(request.dq_des_joint_future, dtype=np.float32)
+            ddq_des_joint_future = np.array(request.ddq_des_joint_future, dtype=np.float32)
+
+            # 用「未来特征」做预测（当前特征你可以只用于分析或不用）
+            y_hat = self._gp_predict_and_update(
+                q,
+                dq_des_joint_future,
+                ddq_des_joint_future,
+                tau_residual
+            )
             response.y_hat = y_hat.astype(np.float32).tolist()
         except Exception as e:
             self.get_logger().error(f"[GPServer] error in callback: {e}")
             response.y_hat = [0.0]*7
 
         return response
+
+
 
     # ==== 把你原来的这三个函数基本原样搬进来 ====
     def _ensure_skygp_import(self):
@@ -189,14 +201,24 @@ class GPServer(Node):
         self.gp_ready = (loaded > 0)
         self.get_logger().info(f"[GP] total loaded: {loaded}, ready={self.gp_ready}")
 
-
-
     def _gp_predict_and_update(self, q, dq_des_joint, ddq_des_joint, tau_residual):
-        # 基本照搬你现有的版本，只是去掉 self.q 等共享变量，直接用函数参数
+        """
+        对每个关节：
+          - 构造输入 x (维度 x_dim)
+          - 在 x_std 附近采样 n 个扰动点 x_std_k
+          - 对每个 x_std_k 调用 model.predict
+          - 用方差加权平均融合成一个预测 y_hat[j-1]
+          - 用真实残差 tau_residual[j-1] 在中心点 x_std 做在线更新
+        """
         if not self.gp_ready or not self.use_gp:
             return np.zeros(7, dtype=float)
 
         y_hat = np.zeros(7, dtype=float)
+
+        # 多点采样配置
+        n_samples = max(self.n_samples, 0)
+        radius = float(self.sample_radius)
+
         for j in range(1, 7):
             pack = self.gp_models.get(j)
             if pack is None:
@@ -205,13 +227,13 @@ class GPServer(Node):
             Xm, Xs, Ym, Ys = pack["stats"]
             x_dim = pack["x_dim"]
 
-            # 构造输入
+            # ===== 1) 构造输入 x（当前 "state"） =====
             if x_dim == 3:
-                x = np.array([q[j-1], dq_des_joint[j-1], ddq_des_joint[j-1]], dtype=np.float32)
+                x = np.array([q[j - 1], dq_des_joint[j - 1], ddq_des_joint[j - 1]], dtype=np.float32)
             elif x_dim == 2:
-                x = np.array([q[j-1], ddq_des_joint[j-1]], dtype=np.float32)
+                x = np.array([q[j - 1], ddq_des_joint[j - 1]], dtype=np.float32)
             else:
-                x = np.array([q[j-1]], dtype=np.float32)
+                x = np.array([q[j - 1]], dtype=np.float32)
 
             if not np.all(np.isfinite(x)):
                 self.get_logger().warn(f"[GP] joint {j}: invalid x={x}")
@@ -220,42 +242,97 @@ class GPServer(Node):
             Xm = np.asarray(Xm, dtype=np.float32)
             Xs = np.asarray(Xs, dtype=np.float32)
             Ym = float(np.asarray(Ym)[0])
-            Ys = float(np.asarray(Ys)[0]) if float(np.asarray(Ys)[0]) != 0.0 else 1.0
+            Ys_val = float(np.asarray(Ys)[0])
+            Ys = Ys_val if Ys_val != 0.0 else 1.0
 
-            x_std = (x - Xm[:x_dim]) / Xs[:x_dim]
+            # 标准化中心点
+            x_std_center = (x - Xm[:x_dim]) / Xs[:x_dim]
 
-            try:
-                mu_std, var_std = model.predict(x_std)
-                mu_std = float(mu_std[0])
-                sigma_std = float(np.sqrt(var_std[0])) if np.all(np.isfinite(var_std)) else 0.0
-            except Exception as e:
-                self.get_logger().error(f"[GP] joint {j}: predict failed: {e}")
+            # ===== 2) 构造采样点（标准化空间） =====
+            # 第一个就是中心点本身
+            samples = [x_std_center]
+
+            # if n_samples > 0 and radius > 0.0:
+            #     # 在单位高斯中采样，然后缩放到给定半径
+            #     for _ in range(n_samples):
+            #         # 标准正态扰动
+            #         delta = np.random.normal(loc=0.0, scale=1.0, size=x_dim).astype(np.float32)
+            #         # 归一化到单位球，再乘半径，避免太大的跳动
+            #         norm = np.linalg.norm(delta)
+            #         if norm < 1e-6:
+            #             continue
+            #         delta = delta / norm * radius
+            #         samples.append(x_std_center + delta)
+
+            mus_std = []
+            vars_std = []
+
+            # ===== 3) 对所有采样点调用 GP 预测 =====
+            for x_std in samples:
+                try:
+                    mu_std_vec, var_std_vec = model.predict(x_std.astype(np.float32))
+                    # 预测返回的是向量，这里只对单输出 y_dim=1 情况取 [0]
+                    mu_std = float(mu_std_vec[0])
+                    var_std = float(var_std_vec[0])
+                except Exception as e:
+                    self.get_logger().error(f"[GP] joint {j}: predict failed at sample: {e}")
+                    continue
+
+                if not np.isfinite(mu_std) or not np.isfinite(var_std) or var_std <= 0.0:
+                    # 非法结果直接丢掉
+                    continue
+
+                mus_std.append(mu_std)
+                vars_std.append(var_std)
+
+            if len(mus_std) == 0:
+                # 所有采样点都失败，就算了，给 0 输出
+                self.get_logger().warn(f"[GP] joint {j}: all samples invalid, use 0")
+                y_hat[j - 1] = 0.0
                 continue
 
-            if not np.isfinite(mu_std):
-                self.get_logger().warn(f"[GP] joint {j}: non-finite mu_std={mu_std}")
-                mu_std = 0.0
+            mus_std = np.array(mus_std, dtype=float)
+            vars_std = np.array(vars_std, dtype=float)
 
-            y_pred = mu_std * Ys + Ym
-            sigma = sigma_std * Ys
+            # ===== 4) 方差加权平均（precision weighting）融合多个样本 =====
+            inv_vars = 1.0 / vars_std
+            weight_sum = np.sum(inv_vars)
+            if weight_sum <= 0.0 or not np.isfinite(weight_sum):
+                mu_std_comb = np.mean(mus_std)
+            else:
+                mu_std_comb = float(np.sum(mus_std * inv_vars) / weight_sum)
 
-            alpha = 0
-            w = 1.0 / (1.0 + alpha * sigma**2)
-            y_pred_weighted = y_pred * w
-            y_hat[j-1] = y_pred_weighted
+            # 如果你想要一个总方差也可以：
+            # var_std_comb = 1.0 / weight_sum   （这里暂时没用到）
 
-            # 在线更新
-            y_real = float(tau_residual[j-1])
+            # 把标准化预测还原到物理量空间
+            y_pred = mu_std_comb * Ys + Ym
+
+            # 这里如果你还想用 sigma 做置信度加权，可以再算一次：
+            # sigma_std_comb = np.sqrt(var_std_comb)
+            # sigma_comb = sigma_std_comb * Ys
+            # alpha = 0.0  # 你之前的权重参数
+            # w = 1.0 / (1.0 + alpha * sigma_comb**2)
+            # y_pred_weighted = y_pred * w
+            # 目前为了简单就直接用 y_pred：
+            y_hat[j - 1] = y_pred
+
+            # ===== 5) 在线更新：用真实残差在中心点更新 =====
+            y_real = float(tau_residual[j - 1])
             if not np.isfinite(y_real):
                 continue
+
             y_std = (y_real - Ym) / Ys
             if np.isfinite(y_std):
                 try:
-                    model.add_point(x_std, np.array([y_std], dtype=np.float32))
+                    # 只在中心点 x_std_center 更新，保持“附近平均预测”的光滑性
+                    model.add_point(x_std_center.astype(np.float32),
+                                    np.array([y_std], dtype=np.float32))
                 except Exception as e:
                     self.get_logger().error(f"[GP] joint {j}: add_point failed: {e}")
 
         return y_hat
+
 
     def _gp_response_callback(self, future):
         """GP service 异步响应回调：更新 self._latest_y_hat"""

@@ -5,6 +5,8 @@ from rclpy.node import Node
 from custom_msgs.msg import StateParameter, EffortCommand, TaskSpaceCommand
 from custom_msgs.srv import JointPositionAdjust
 from custom_msgs.srv import AsyncGPpredict
+from custom_msgs.srv import GetFutureTrajectory
+
 from std_msgs.msg import Bool
 import numpy as np
 from scipy.spatial.transform import Rotation
@@ -143,6 +145,8 @@ class CartesianImpedanceController(Node):
         self._latest_y_hat = np.zeros(7, dtype=float)
         self._gp_warned = False  # 避免一直刷 warn
 
+        # 只在轨迹真正开始之后再用 GP（由 /data_recording_enabled 控制）
+        self.gp_active = False
         # 不要 while 死等，只尝试一次
         if not self.gp_client.wait_for_service(timeout_sec=2.0):
             self.get_logger().warn('/gp_predict service not available at start, GP disabled')
@@ -150,6 +154,19 @@ class CartesianImpedanceController(Node):
         else:
             self.get_logger().info('/gp_predict service is ready')
 
+        # 未来轨迹 service client
+        self.future_traj_client = self.create_client(
+            GetFutureTrajectory,
+            '/future_task_space'
+        )
+        self.future_delay = self.declare_parameter(
+            'future_delay', 0.06  # 默认 60 ms
+        ).value
+
+        # 存最新一次未来轨迹
+        self._latest_future_traj = None   # dict: {"x_des": np.array(6,), "dx_des": ..., "ddx_des": ...}
+        self._future_traj_counter = 0
+        self._future_traj_warned = False
 
     def taskCommandCallback(self, msg):
         """callback function for /task_space_command subscriber"""
@@ -161,7 +178,35 @@ class CartesianImpedanceController(Node):
     def dataRecordingCallback(self, msg):
         """callback function for /data_recording_enabled subscriber"""
         self.data_recording_enabled = msg.data
-        
+
+        # 当 TrajectoryPublisher 认为“transition 完成”时，会发 True
+        if msg.data and not self.gp_active:
+            self.gp_active = True
+            self.get_logger().info("[Controller] Data recording enabled -> GP compensation ACTIVATED")
+        elif not msg.data and self.gp_active:
+            # 如果你希望停轨迹时也关掉 GP，可以顺便关掉
+            self.gp_active = False
+            self.get_logger().info("[Controller] Data recording disabled -> GP compensation DEACTIVATED")
+
+    def _future_traj_response_callback(self, future):
+        try:
+            res = future.result()
+        except Exception as e:
+            self.get_logger().error(f"[Controller] /future_task_space call failed: {e}")
+            return
+
+        x_f  = np.array(res.x_des, dtype=float)
+        dx_f = np.array(res.dx_des, dtype=float)
+        ddx_f = np.array(res.ddx_des, dtype=float)
+
+        self._latest_future_traj = {
+            "x_des": x_f,
+            "dx_des": dx_f,
+            "ddx_des": ddx_f,
+        }
+        # 调试时可以看看
+        # self.get_logger().debug(f"Got future traj: x={x_f[:3]}")
+
     def stateParameterCallback(self, msg):
         """callback function for /state_parameter subscriber"""
         try:
@@ -305,33 +350,62 @@ class CartesianImpedanceController(Node):
                 self.y_hat_alpha * raw
                 + (1 - self.y_hat_alpha) * self.y_hat_filtered
             )
-
             y_hat = self.y_hat_filtered
-            print("yhat:=",y_hat)
+
+            # === 异步请求未来轨迹（给 GP 用），比如 100Hz 请求一次 ===
+            if self.future_traj_client.service_is_ready():
+                self._future_traj_counter += 1
+                if self._future_traj_counter % 10 == 0:
+                    req_ft = GetFutureTrajectory.Request()
+                    req_ft.t_delay = float(self.future_delay)  # 例如 0.06
+                    future_ft = self.future_traj_client.call_async(req_ft)
+                    future_ft.add_done_callback(self._future_traj_response_callback)
+            else:
+                if not self._future_traj_warned:
+                    self.get_logger().warn("[Controller] /future_task_space not ready; GP will没有未来轨迹信息")
+                    self._future_traj_warned = True
 
             # 2) 再异步发一个新的 request，结果回来后更新缓存
-            if self.use_gp and self.gp_client.service_is_ready():
+            if self.gp_active and self.use_gp and self.gp_client.service_is_ready():
                 req = AsyncGPpredict.Request()
+
+                # 当前的关节特征（保持原来逻辑）
                 req.q = self.q.astype(np.float32).tolist()
                 req.dq_des_joint = self.dq_des_joint.astype(np.float32).tolist()
                 req.ddq_des_joint = self.ddq_des_joint.astype(np.float32).tolist()
                 req.tau_residual = self.tau_residual_filtered.astype(np.float32).tolist()
 
+                # === 重点：用「未来轨迹」算「未来关节空间特征」 ===
+                if self._latest_future_traj is not None:
+                    x_f  = self._latest_future_traj["x_des"]   # 6
+                    dx_f = self._latest_future_traj["dx_des"]  # 6
+                    ddx_f = self._latest_future_traj["ddx_des"]# 6
+
+                    # 任务空间只用前5维（和上面一致：3平移 + 2姿态）
+                    dx_f_5  = dx_f[:5]
+                    ddx_f_5 = ddx_f[:5]
+
+                    # 注意：这里我们用“当前的 J 和 dJ”来近似未来时刻的映射
+                    dq_des_joint_future  = jacobian_pinv @ dx_f_5
+                    ddq_des_joint_future = jacobian_pinv @ (ddx_f_5 - djacobian @ dq)
+
+                    req.dq_des_joint_future  = dq_des_joint_future.astype(np.float32).tolist()
+                    req.ddq_des_joint_future = ddq_des_joint_future.astype(np.float32).tolist()
+                else:
+                    # 没有未来轨迹时就发 0
+                    req.dq_des_joint_future  = [0.0]*7
+                    req.ddq_des_joint_future = [0.0]*7
+
                 self.gp_counter += 1
-                if self.gp_counter % 1 == 0:   # 控制周期 1kHz → 每10次发一次 → 100Hz
+                if self.gp_counter % 1 == 0:
                     future = self.gp_client.call_async(req)
                     future.add_done_callback(self._gp_response_callback)
-            else:
-                if self.use_gp and not self._gp_warned:
-                    self.get_logger().warn("[Controller] /gp_predict not ready; use y_hat=0")
-                    self._gp_warned = True
-
 
             # 把 GP 的输出减掉
-            tau = tau - y_hat
+            if self.gp_active:
+                tau = tau - y_hat
             # self.tau_filtered = self.y_hat_alpha * tau + (1 - self.y_hat_alpha) * self.tau_filtered
             # tau = self.tau_filtered
-
 
             # --- 记录 y_hat / tau_residual（与其他数据一起） ---
             if self.data_recording_enabled:
@@ -357,6 +431,37 @@ class CartesianImpedanceController(Node):
 
         except Exception as e:
             self.get_logger().error(f'Parameter error: {str(e)}')
+
+    def future_callback(self, future):
+        try:
+            res = future.result()
+        except Exception as e:
+            self.get_logger().error(f'Future traj service call failed: {e}')
+            return
+
+        x_f = np.array(res.x_des, dtype=float)
+        dx_f = np.array(res.dx_des, dtype=float)
+        ddx_f = np.array(res.ddx_des, dtype=float)
+
+        # 打包发送给 GP server  
+        packet = {
+            "x_des": x_f.tolist(),
+            "dx_des": dx_f.tolist(),
+            "ddx_des": ddx_f.tolist(),
+        }
+        self.send_to_gp_server(packet)
+
+    def send_to_gp_server(self, packet: dict):
+        """
+        真正发给 GP server 的接口，你自己实现：
+          - socket 发送 json
+          - ROS2 topic/service
+          - 其他通信方式
+        """
+        # 调试时可以先打印
+        # self.get_logger().info(f"GP packet: {packet}")
+        pass
+
 
     def _gp_response_callback(self, future):
         try:
@@ -566,10 +671,7 @@ class CartesianImpedanceController(Node):
         #     self.get_logger().warn(f"[GP-debug] y_hat norm={norm6:.3f} → clipped")
 
         # self.get_logger().info(f"[GP-debug] final y_hat={np.round(y_hat,4)}")
-
         return y_hat
-
-
 
     def _ensure_skygp_import(self):
         """

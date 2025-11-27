@@ -4,6 +4,9 @@ float32[7] dq_des_joint
 float32[7] ddq_des_joint
 float32[7] tau_residual
 
+# 未来对应的关节期望（例如 t_delay 秒之后）
+float32[7] dq_des_joint_future
+float32[7] ddq_des_joint_future
 ---
 # Response
 float32[7] y_hat

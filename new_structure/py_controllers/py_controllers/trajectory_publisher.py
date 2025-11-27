@@ -3,10 +3,11 @@
 import rclpy
 from rclpy.node import Node
 from custom_msgs.msg import TaskSpaceCommand, StateParameter
-from custom_msgs.srv import JointPositionAdjust
+from custom_msgs.srv import JointPositionAdjust, GetFutureTrajectory
 from std_msgs.msg import Header, Bool
 import numpy as np
 import time
+from rclpy.duration import Duration
 
 
 class TrajectoryPublisher(Node):
@@ -32,6 +33,13 @@ class TrajectoryPublisher(Node):
         self.joint_position_service = self.create_service(
             JointPositionAdjust, '/joint_position_adjust', self.joint_position_callback)
         
+        self.future_traj_srv = self.create_service(
+            GetFutureTrajectory,
+            '/future_task_space',
+            self.future_traj_callback
+        )
+
+
         # circle trajectory parameters
         self.declare_parameter('circle_radius', 0.05)   # circle radius (meter)
         self.declare_parameter('circle_frequency', 0.1) # circle motion frequency (Hz)
@@ -101,6 +109,23 @@ class TrajectoryPublisher(Node):
             
         return response
     
+    def future_traj_callback(self, request, response):
+        t_delay = float(request.t_delay)
+        future = self.get_future_task_space(t_delay)  # 你刚才写好的函数
+
+        if future is None:
+            # trajectory not ready
+            response.x_des = [0.0]*6
+            response.dx_des = [0.0]*6
+            response.ddx_des = [0.0]*6
+            return response
+
+        x_des, dx_des, ddx_des = future
+        response.x_des = x_des
+        response.dx_des = dx_des
+        response.ddx_des = ddx_des
+        return response
+
     def stateCallback(self, msg):
         """callback function of /state_parameter subscriber"""
         if not self.trajectory_enabled:
@@ -229,6 +254,103 @@ class TrajectoryPublisher(Node):
             self.get_logger().error(f'Error in trajectory publisher: {str(e)}')
             self.get_logger().error(f'Current state: transition_complete={self.transition_complete}, elapsed_time={elapsed_time}')
 
+    def get_future_task_space(self, t_delay):
+        """
+        计算 t_delay 秒之后的期望 (x, dx, ddx)，不改变当前节点内部状态。
+
+        返回:
+            (x_des, dx_des, ddx_des)
+            其中每个都是长度 6 的 list:
+            [x, y, z, roll, pitch, yaw] / 对应的一阶 / 二阶
+        """
+        # 还没启用轨迹或者还没收到初始位姿，就没法算未来轨迹
+        if not self.trajectory_enabled or not self.robot_initial_received:
+            return None
+
+        # 当前 ROS 时间
+        now = self.get_clock().now()
+        # 未来的 ROS 时间
+        future_time = now + Duration(seconds=float(t_delay))
+
+        x = y = z = 0.0
+        dx = dy = dz = 0.0
+        ddx = ddy = ddz = 0.0
+
+        # 有/没有平滑过渡两种情况分开
+        if self.use_transition:
+            # 还没开始 transition（一般是还没在 stateCallback 里记录初始位姿）
+            if self.transition_start_time is None:
+                return None
+
+            # 相对于 transition 开始的时间
+            transition_elapsed = (future_time - self.transition_start_time).nanoseconds / 1e9
+
+            if 0.0 <= transition_elapsed < self.transition_duration:
+                # —— 还在 5 次多项式过渡阶段 —— #
+                t = transition_elapsed / self.transition_duration
+                s = 10*t**3 - 15*t**4 + 6*t**5
+
+                x = self.robot_initial_x + s * (self.trajectory_start_x - self.robot_initial_x)
+                y = self.robot_initial_y + s * (self.trajectory_start_y - self.robot_initial_y)
+                z = self.robot_initial_z + s * (self.trajectory_start_z - self.robot_initial_z)
+
+                ds_dt = (30*t**2 - 60*t**3 + 30*t**4) / self.transition_duration
+                d2s_dt2 = (60*t - 180*t**2 + 120*t**3) / (self.transition_duration**2)
+
+                dx = ds_dt * (self.trajectory_start_x - self.robot_initial_x)
+                dy = ds_dt * (self.trajectory_start_y - self.robot_initial_y)
+                dz = ds_dt * (self.trajectory_start_z - self.robot_initial_z)
+
+                ddx = d2s_dt2 * (self.trajectory_start_x - self.robot_initial_x)
+                ddy = d2s_dt2 * (self.trajectory_start_y - self.robot_initial_y)
+                ddz = d2s_dt2 * (self.trajectory_start_z - self.robot_initial_z)
+
+            else:
+                # —— 已经过渡完，进入圆轨迹 —— #
+                # 圆轨迹的时间从 transition 结束时刻算起：
+                t_circle = transition_elapsed - self.transition_duration
+                if t_circle < 0.0:
+                    t_circle = 0.0
+
+                omega = 2.0 * np.pi * self.frequency
+
+                x = self.center_x + self.radius * np.cos(omega * t_circle)
+                y = self.center_y + self.radius * np.sin(omega * t_circle)
+                z = self.center_z
+
+                dx = -self.radius * omega * np.sin(omega * t_circle)
+                dy =  self.radius * omega * np.cos(omega * t_circle)
+                dz = 0.0
+
+                ddx = -self.radius * omega**2 * np.cos(omega * t_circle)
+                ddy = -self.radius * omega**2 * np.sin(omega * t_circle)
+                ddz = 0.0
+
+        else:
+            # —— 没有过渡，直接圆轨迹，从 start_time 开始 —— #
+            elapsed_time = (future_time - self.start_time).nanoseconds / 1e9
+            if elapsed_time < 0.0:
+                elapsed_time = 0.0
+
+            omega = 2.0 * np.pi * self.frequency
+
+            x = self.center_x + self.radius * np.cos(omega * elapsed_time)
+            y = self.center_y + self.radius * np.sin(omega * elapsed_time)
+            z = self.center_z
+
+            dx = -self.radius * omega * np.sin(omega * elapsed_time)
+            dy =  self.radius * omega * np.cos(omega * elapsed_time)
+            dz = 0.0
+
+            ddx = -self.radius * omega**2 * np.cos(omega * elapsed_time)
+            ddy = -self.radius * omega**2 * np.sin(omega * elapsed_time)
+            ddz = 0.0
+
+        x_des  = [x,  y,  z,  0.0, 0.0, 0.0]
+        dx_des = [dx, dy, dz, 0.0, 0.0, 0.0]
+        ddx_des = [ddx, ddy, ddz, 0.0, 0.0, 0.0]
+
+        return x_des, dx_des, ddx_des
 
 def main(args=None):
     rclpy.init(args=args)
