@@ -160,7 +160,7 @@ class CartesianImpedanceController(Node):
             '/future_task_space'
         )
         self.future_delay = self.declare_parameter(
-            'future_delay', 0.06  # 默认 60 ms
+            'future_delay', 0.0  # 默认 60 ms
         ).value
 
         # 存最新一次未来轨迹
@@ -367,6 +367,7 @@ class CartesianImpedanceController(Node):
 
             # 2) 再异步发一个新的 request，结果回来后更新缓存
             if self.gp_active and self.use_gp and self.gp_client.service_is_ready():
+                self.get_logger().info("[Controller] calling /gp_predict ...")   # <<< 加这一行
                 req = AsyncGPpredict.Request()
 
                 # 当前的关节特征（保持原来逻辑）
@@ -573,105 +574,6 @@ class CartesianImpedanceController(Node):
 
         self.gp_ready = (loaded > 0)
         self.get_logger().info(f"[GP] 共加载 {loaded} 个模型. ready={self.gp_ready}")
-
-    def _gp_predict_and_update(self, q, dq_des_joint, ddq_des_joint, tau_residual):
-        """后台线程中调用：预测 + 在线更新（每次循环一次，带详细debug输出）"""
-        if self._gp_stop:
-            return
-        if not self.gp_ready or not self.use_gp:
-            return np.zeros(7, dtype=float)
-
-        y_hat = np.zeros(7, dtype=float)
-
-        for j in range(1, 7):
-            pack = self.gp_models.get(j)
-            if pack is None:
-                self.get_logger().warn(f"[GP-debug] joint {j}: no model pack")
-                continue
-
-            model = pack["model"]
-            Xm, Xs, Ym, Ys = pack["stats"]
-            x_dim = pack["x_dim"]
-
-            # === 1. 构造输入 ===
-            if x_dim == 3:
-                x = np.array([q[j-1], dq_des_joint[j-1], ddq_des_joint[j-1]], dtype=np.float32)
-            elif x_dim == 2:
-                x = np.array([q[j-1], ddq_des_joint[j-1]], dtype=np.float32)
-            else:
-                x = np.array([q[j-1]], dtype=np.float32)
-
-            if not np.all(np.isfinite(x)):
-                self.get_logger().warn(f"[GP-debug] joint {j}: invalid x = {x}")
-                continue
-
-            Xm = np.asarray(Xm, dtype=np.float32)
-            Xs = np.asarray(Xs, dtype=np.float32)
-            Ym = float(np.asarray(Ym)[0])
-            Ys = float(np.asarray(Ys)[0]) if float(np.asarray(Ys)[0]) != 0.0 else 1.0
-            # Xs[Xs < 1e-9] = 1.0
-
-            # 标准化
-            x_std = (x - Xm[:x_dim]) / Xs[:x_dim]
-            # x_std = np.clip(x_std, -5.0, 5.0)
-
-            # === 2. 预测 ===
-            try:
-                mu_std, var_std = model.predict(x_std)
-                mu_std = float(mu_std[0])
-                sigma_std = float(np.sqrt(var_std[0])) if np.all(np.isfinite(var_std)) else 0.0
-            except Exception as e:
-                self.get_logger().error(f"[GP-debug] joint {j}: predict failed: {e}")
-                continue
-
-            if not np.isfinite(mu_std):
-                self.get_logger().warn(f"[GP-debug] joint {j}: mu_std not finite ({mu_std}) → set 0")
-                mu_std = 0.0
-
-            # === 标准化反变换 ===
-            y_pred = mu_std * Ys + Ym
-            sigma = sigma_std * Ys   # 方差反变换
-
-            # === 基于方差的置信加权 ===
-            alpha = 0.5  # <-- 可调参数，越大抑制越强
-            w = 1.0 / (1.0 + alpha * sigma**2)
-            # w = 1.0
-            y_pred_weighted = y_pred * w
-
-            # === 存入结果 ===
-            y_hat[j-1] = y_pred_weighted
-
-            # 额外打印调试信息
-            self.get_logger().info(
-                f"[GP-debug] joint {j}: μ={y_pred:.3f}, σ={sigma:.3f}, w={w:.3f} → weighted={y_pred_weighted:.3f}"
-            )
-
-            # === 3. 在线更新 ===
-            y_real = float(tau_residual[j-1])
-            if not np.isfinite(y_real):
-                self.get_logger().warn(f"[GP-debug] joint {j}: invalid y_real={y_real}")
-                continue
-            y_std = (y_real - Ym) / Ys
-
-            if np.isfinite(y_std):
-                try:
-                    model.add_point(x_std, np.array([y_std], dtype=np.float32))
-                    self.get_logger().info(
-                        f"[GP-debug] joint {j}: update ok (y_real={y_real:.4f}, y_std={y_std:.4f})"
-                    )
-                except Exception as e:
-                    self.get_logger().error(f"[GP-debug] joint {j}: add_point failed: {e}")
-            else:
-                self.get_logger().warn(f"[GP-debug] joint {j}: skip update (non-finite y_std={y_std})")
-
-        # # 限幅
-        # norm6 = np.linalg.norm(y_hat[:6])
-        # if norm6 > 12.0:
-        #     y_hat[:6] *= (12.0 / (norm6 + 1e-9))
-        #     self.get_logger().warn(f"[GP-debug] y_hat norm={norm6:.3f} → clipped")
-
-        # self.get_logger().info(f"[GP-debug] final y_hat={np.round(y_hat,4)}")
-        return y_hat
 
     def _ensure_skygp_import(self):
         """

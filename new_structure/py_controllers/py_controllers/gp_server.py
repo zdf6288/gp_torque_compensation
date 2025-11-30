@@ -5,6 +5,7 @@ import numpy as np
 import os, sys, pickle, importlib.util
 from custom_msgs.srv import AsyncGPpredict   # 刚才定义的 srv
 import copy
+import csv
 
 class GPServer(Node):
     def __init__(self):
@@ -33,6 +34,15 @@ class GPServer(Node):
         self.srv = self.create_service(AsyncGPpredict, '/gp_predict', self.gp_predict_callback)
         self.get_logger().info("[GPServer] service /gp_predict ready")
 
+        # === 日志缓存：方便之后存成 CSV 画图 ===
+        self.enable_logging = True
+        self.log_time = []           # 每次 service 调用的时间戳（秒）
+        self.log_y_slow = []         # 每次调用: 7 维 slow 预测
+        self.log_y_fast = []         # 每次调用: 7 维 fast 预测
+        self.log_y_hat = []          # 每次调用: 7 维 融合后 y_hat
+        self.log_tau_residual = []   # 每次调用: 7 维 真实残差
+
+
     def gp_predict_callback(self, request, response):
         """
         输入：
@@ -51,9 +61,10 @@ class GPServer(Node):
             ddq_future = np.array(request.ddq_des_joint_future, dtype=np.float32)
             tau_residual = np.array(request.tau_residual, dtype=np.float32)
 
-            y_hat = self._gp_predict_and_update_twofeatures(
-                q, dq_now, ddq_now, dq_future, ddq_future, tau_residual
-            )
+            # y_hat = self._gp_predict_and_update_twofeatures(
+            #     q, dq_now, ddq_now, dq_future, ddq_future, tau_residual
+            # )
+            y_hat = self._gp_predict_and_update(q,dq_now,ddq_now,tau_residual)
             response.y_hat = y_hat.astype(np.float32).tolist()
         except Exception as e:
             self.get_logger().error(f"[GPServer] error in callback: {e}")
@@ -132,27 +143,27 @@ class GPServer(Node):
                 max_experts=100,
                 timescale=0.03,
             ),
-            6: dict(
-                max_data_per_expert=50,
-                nearest_k=2,
-                max_experts=50,
-                timescale=0.05,
-            ),
+            # 6: dict(
+            #     max_data_per_expert=50,
+            #     nearest_k=2,
+            #     max_experts=50,
+            #     timescale=0.05,
+            # ),
         }
 
         per_joint_cfg_fast = {
             "default": dict(
-                max_data_per_expert=100,   # 小模型记得少一点，更新快
+                max_data_per_expert=50,   # 小模型记得少一点，更新快
                 nearest_k=2,
                 max_experts=50,
                 timescale=0.02,           # timescale 小一点，forget 更快
             ),
-            6: dict(
-                max_data_per_expert=50,
-                nearest_k=2,
-                max_experts=30,
-                timescale=0.03,
-            ),
+            # 6: dict(
+            #     max_data_per_expert=50,
+            #     nearest_k=2,
+            #     max_experts=30,
+            #     timescale=0.03,
+            # ),
         }
 
         loaded = 0
@@ -304,14 +315,12 @@ class GPServer(Node):
 
         return y_pred, var_est
 
-
     def _gp_predict_and_update(self, q, dq_des_joint, ddq_des_joint, tau_residual):
         """
         对每个关节：
+          - 只使用 slow GP 模型 (未来特征版本结构相同，只是这里用的是当前 dq/ddq)
           - 构造输入 x (维度 x_dim)
-          - 在 x_std 附近采样 n 个扰动点 x_std_k
-          - 对每个 x_std_k 调用 model.predict
-          - 用方差加权平均融合成一个预测 y_hat[j-1]
+          - 在中心点 x_std 上做一次预测
           - 用真实残差 tau_residual[j-1] 在中心点 x_std 做在线更新
         """
         if not self.gp_ready or not self.use_gp:
@@ -319,19 +328,19 @@ class GPServer(Node):
 
         y_hat = np.zeros(7, dtype=float)
 
-        # 多点采样配置
-        n_samples = max(self.n_samples, 0)
-        radius = float(self.sample_radius)
-
         for j in range(1, 7):
-            pack = self.gp_models.get(j)
+            # 只拿 slow 模型
+            packs = self.gp_models.get(j, {})
+            pack = packs.get("slow", None)
             if pack is None:
+                self.get_logger().warn(f"[GP] joint {j}: no slow model, use 0")
                 continue
+
             model = pack["model"]
             Xm, Xs, Ym, Ys = pack["stats"]
             x_dim = pack["x_dim"]
 
-            # ===== 1) 构造输入 x（当前 "state"） =====
+            # 1) 构造输入 x（当前关节状态）
             if x_dim == 3:
                 x = np.array([q[j - 1], dq_des_joint[j - 1], ddq_des_joint[j - 1]], dtype=np.float32)
             elif x_dim == 2:
@@ -349,79 +358,27 @@ class GPServer(Node):
             Ys_val = float(np.asarray(Ys)[0])
             Ys = Ys_val if Ys_val != 0.0 else 1.0
 
-            # 标准化中心点
-            x_std_center = (x - Xm[:x_dim]) / Xs[:x_dim]
+            # 2) 标准化
+            x_std = (x - Xm[:x_dim]) / Xs[:x_dim]
 
-            # ===== 2) 构造采样点（标准化空间） =====
-            # 第一个就是中心点本身
-            samples = [x_std_center]
-
-            # if n_samples > 0 and radius > 0.0:
-            #     # 在单位高斯中采样，然后缩放到给定半径
-            #     for _ in range(n_samples):
-            #         # 标准正态扰动
-            #         delta = np.random.normal(loc=0.0, scale=1.0, size=x_dim).astype(np.float32)
-            #         # 归一化到单位球，再乘半径，避免太大的跳动
-            #         norm = np.linalg.norm(delta)
-            #         if norm < 1e-6:
-            #             continue
-            #         delta = delta / norm * radius
-            #         samples.append(x_std_center + delta)
-
-            mus_std = []
-            vars_std = []
-
-            # ===== 3) 对所有采样点调用 GP 预测 =====
-            for x_std in samples:
-                try:
-                    mu_std_vec, var_std_vec = model.predict(x_std.astype(np.float32))
-                    # 预测返回的是向量，这里只对单输出 y_dim=1 情况取 [0]
-                    mu_std = float(mu_std_vec[0])
-                    var_std = float(var_std_vec[0])
-                except Exception as e:
-                    self.get_logger().error(f"[GP] joint {j}: predict failed at sample: {e}")
-                    continue
-
-                if not np.isfinite(mu_std) or not np.isfinite(var_std) or var_std <= 0.0:
-                    # 非法结果直接丢掉
-                    continue
-
-                mus_std.append(mu_std)
-                vars_std.append(var_std)
-
-            if len(mus_std) == 0:
-                # 所有采样点都失败，就算了，给 0 输出
-                self.get_logger().warn(f"[GP] joint {j}: all samples invalid, use 0")
-                y_hat[j - 1] = 0.0
+            # 3) 预测
+            try:
+                mu_std_vec, var_std_vec = model.predict(x_std.astype(np.float32))
+                mu_std = float(mu_std_vec[0])
+                var_std = float(var_std_vec[0])
+            except Exception as e:
+                self.get_logger().error(f"[GP] joint {j}: predict failed: {e}")
                 continue
 
-            mus_std = np.array(mus_std, dtype=float)
-            vars_std = np.array(vars_std, dtype=float)
+            if (not np.isfinite(mu_std)) or (not np.isfinite(var_std)) or var_std <= 0.0:
+                self.get_logger().warn(f"[GP] joint {j}: invalid predict (mu={mu_std}, var={var_std}), use 0")
+                continue
 
-            # ===== 4) 方差加权平均（precision weighting）融合多个样本 =====
-            inv_vars = 1.0 / vars_std
-            weight_sum = np.sum(inv_vars)
-            if weight_sum <= 0.0 or not np.isfinite(weight_sum):
-                mu_std_comb = np.mean(mus_std)
-            else:
-                mu_std_comb = float(np.sum(mus_std * inv_vars) / weight_sum)
-
-            # 如果你想要一个总方差也可以：
-            # var_std_comb = 1.0 / weight_sum   （这里暂时没用到）
-
-            # 把标准化预测还原到物理量空间
-            y_pred = mu_std_comb * Ys + Ym
-
-            # 这里如果你还想用 sigma 做置信度加权，可以再算一次：
-            # sigma_std_comb = np.sqrt(var_std_comb)
-            # sigma_comb = sigma_std_comb * Ys
-            # alpha = 0.0  # 你之前的权重参数
-            # w = 1.0 / (1.0 + alpha * sigma_comb**2)
-            # y_pred_weighted = y_pred * w
-            # 目前为了简单就直接用 y_pred：
+            # 4) 反标准化
+            y_pred = mu_std * Ys + Ym
             y_hat[j - 1] = y_pred
 
-            # ===== 5) 在线更新：用真实残差在中心点更新 =====
+            # 5) 在线更新
             y_real = float(tau_residual[j - 1])
             if not np.isfinite(y_real):
                 continue
@@ -429,13 +386,13 @@ class GPServer(Node):
             y_std = (y_real - Ym) / Ys
             if np.isfinite(y_std):
                 try:
-                    # 只在中心点 x_std_center 更新，保持“附近平均预测”的光滑性
-                    model.add_point(x_std_center.astype(np.float32),
+                    model.add_point(x_std.astype(np.float32),
                                     np.array([y_std], dtype=np.float32))
                 except Exception as e:
                     self.get_logger().error(f"[GP] joint {j}: add_point failed: {e}")
 
         return y_hat
+
 
     def _gp_predict_and_update_twofeatures(
         self,
@@ -449,11 +406,14 @@ class GPServer(Node):
           - fast 模型用当前特征 (dq_now, ddq_now)
           - 对 slow / fast 的预测按方差加权融合
           - 在线更新分别在各自模型上做
+          - 同时把 slow / fast / 融合 / 真实值 存一行日志
         """
         if not self.gp_ready or not self.use_gp:
             return np.zeros(7, dtype=float)
 
         y_hat = np.zeros(7, dtype=float)
+        y_slow_all = np.zeros(7, dtype=float)
+        y_fast_all = np.zeros(7, dtype=float)
 
         for j in range(1, 7):
             packs = self.gp_models.get(j, {})
@@ -478,6 +438,7 @@ class GPServer(Node):
                     float(ddq_future[j-1]),
                     y_real
                 )
+                y_slow_all[j-1] = y_slow
                 preds.append(y_slow)
                 vars_.append(max(v_slow, 1e-6))
 
@@ -490,6 +451,7 @@ class GPServer(Node):
                     float(ddq_now[j-1]),
                     y_real
                 )
+                y_fast_all[j-1] = y_fast
                 preds.append(y_fast)
                 vars_.append(max(v_fast, 1e-6))
 
@@ -512,7 +474,17 @@ class GPServer(Node):
         y_hat = np.nan_to_num(y_hat, nan=0.0, posinf=0.0, neginf=0.0)
         y_hat = np.clip(y_hat, -10.0, 10.0)  # 每个关节 ±10Nm，可自己调
 
+        # ====== 日志记录，一次 service 调用一行 ======
+        if self.enable_logging:
+            t_now = self.get_clock().now().nanoseconds / 1e9
+            self.log_time.append(t_now)
+            self.log_y_slow.append(y_slow_all.tolist())
+            self.log_y_fast.append(y_fast_all.tolist())
+            self.log_y_hat.append(y_hat.tolist())
+            self.log_tau_residual.append(tau_residual.astype(float).tolist())
+
         return y_hat
+
 
 
     def _gp_response_callback(self, future):
@@ -535,12 +507,79 @@ class GPServer(Node):
             # 这里不需要太吓人，只是调试信息
             self.get_logger().warn(f"[Controller] GP response error: {e}")
 
+    def save_logs_to_csv(self, filename="gp_debug_log.csv"):
+        """
+        把 slow / fast / y_hat / tau_residual 全部写到一个 CSV 里：
+        每一行对应一次 service 调用：
+          [time,
+           slow_1..7,
+           fast_1..7,
+           y_hat_1..7,
+           tau_residual_1..7]
+        """
+        if not self.log_time:
+            self.get_logger().warn("[GP] no log data to save")
+            return
+
+        try:
+            n = len(self.log_time)
+            # 防御：取各 list 的最小长度
+            n = min(
+                n,
+                len(self.log_y_slow),
+                len(self.log_y_fast),
+                len(self.log_y_hat),
+                len(self.log_tau_residual),
+            )
+
+            with open(filename, "w", newline="") as f:
+                writer = csv.writer(f)
+                header = ["time"]
+                header += [f"y_slow_{i+1}" for i in range(7)]
+                header += [f"y_fast_{i+1}" for i in range(7)]
+                header += [f"y_hat_{i+1}" for i in range(7)]
+                header += [f"tau_residual_{i+1}" for i in range(7)]
+                writer.writerow(header)
+
+                for k in range(n):
+                    row = [self.log_time[k]]
+                    row += self.log_y_slow[k]
+                    row += self.log_y_fast[k]
+                    row += self.log_y_hat[k]
+                    row += self.log_tau_residual[k]
+                    writer.writerow(row)
+
+            self.get_logger().info(f"[GP] logs saved to {filename}, {n} rows")
+        except Exception as e:
+            self.get_logger().error(f"[GP] failed to save logs: {e}")
+
 def main(args=None):
     rclpy.init(args=args)
     node = GPServer()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        node.get_logger().info("[GPServer] keyboard interrupt")
+    finally:
+        # 退出前保存日志
+        try:
+            node.save_logs_to_csv("gp_debug_log.csv")
+        except Exception as e:
+            # 这里 context 可能已经被 shutdown 了，所以不要再用 logger 打太多
+            print(f"[GPServer] save_logs_to_csv error: {e}")
+
+        # 安全销毁节点 + shutdown（避免重复 shutdown）
+        try:
+            node.destroy_node()
+        except Exception as e:
+            print(f"[GPServer] destroy_node error: {e}")
+
+        try:
+            if rclpy.ok():
+                rclpy.shutdown()
+        except Exception as e:
+            # 如果已经 shutdown 过了，就忽略这个错误
+            print(f"[GPServer] rclpy.shutdown error: {e}")
 
 if __name__ == '__main__':
     main()

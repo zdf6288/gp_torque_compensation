@@ -374,14 +374,14 @@ class SkyGP_rBCM:
         raw_ls = self.model_params[self.expert_creation_order[0]]["log_lengthscale"]
         lengthscale_ref = np.exp(raw_ls[:, 0]) if np.ndim(raw_ls) == 2 else np.exp(raw_ls)
 
-        # if self.last_x is not None:
-        #     norm_dist = np.linalg.norm((x_query - self.last_x) / lengthscale_ref)
-        # else:
-        #     norm_dist = np.inf
+        if self.last_x is not None:
+            norm_dist = np.linalg.norm((x_query - self.last_x) / lengthscale_ref)
+        else:
+            norm_dist = np.inf
 
-        # search_k = int(min(self.max_experts, max(1, np.exp(norm_dist / self.timescale))))
+        search_k = int(min(self.max_experts, max(1, np.exp(norm_dist / self.timescale))))
         # # print("search_k:",search_k)
-        search_k = 1
+        search_k = 4
         n_experts = len(self.expert_centers)
 
         if self.last_expert_idx is None:

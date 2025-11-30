@@ -359,11 +359,18 @@ def main(args=None):
     try:
         rclpy.spin(trajectory_publisher_node)
     except KeyboardInterrupt:
-        pass
+        trajectory_publisher_node.get_logger().info('Keyboard interrupt')
     finally:
-        trajectory_publisher_node.destroy_node()
-        rclpy.shutdown()
+        try:
+            trajectory_publisher_node.destroy_node()
+        except Exception as e:
+            print(f"[trajectory_publisher] destroy_node error: {e}")
 
+        try:
+            if rclpy.ok():
+                rclpy.shutdown()
+        except Exception as e:
+            print(f"[trajectory_publisher] rclpy.shutdown error: {e}")
 
 if __name__ == '__main__':
     main()
