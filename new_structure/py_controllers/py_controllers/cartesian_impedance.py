@@ -124,9 +124,12 @@ class CartesianImpedanceController(Node):
         self.ddq_des_joint = np.zeros(7)
         self.tau_residual = np.zeros(7)
 
+        self.gp_stride = 1      # 每 10 个 state callback 做一次 GP（你可以调）
         self.gp_counter = 0
+
         self.y_hat_filtered = np.zeros(7)
         self.y_hat_alpha = 0.05   # 越小越平滑，0.01~0.1 合理      
+        self.y_hat_combined = np.zeros(7)
         self.tau_filtered = np.zeros(7) 
 
         # 预测节流（你已有）from
@@ -136,6 +139,20 @@ class CartesianImpedanceController(Node):
         self.tau_residual_filtered = np.zeros(7)  # 滤波后的 tau_residual (7,)
         self.tau_residual_history = []   # 记录 tau_residual (7,)
 
+        # === local GP ===
+        self.gp_models = {}
+        self.gp_ready = False    # 标记本地 GP 是否加载成功
+        self.y_hat_local = np.zeros(7)
+        self.y_hat_local_history = []
+
+
+        # 本地加载离线训练模型
+        self._load_gp_models("./new_structure/gp/gp_models")
+
+        if self.gp_ready:
+            self.get_logger().info(f"[Controller] Local GP models loaded, will run local GP in control loop")
+        else:
+            self.get_logger().warn(f"[Controller] Local GP models NOT loaded, only using cloud GP")
 
         # GP service client
         self.gp_client = self.create_client(AsyncGPpredict, '/gp_predict')
@@ -144,6 +161,8 @@ class CartesianImpedanceController(Node):
         self._gp_lock = threading.Lock()
         self._latest_y_hat = np.zeros(7, dtype=float)
         self._gp_warned = False  # 避免一直刷 warn
+        self.y_hat_cloud = np.zeros(7)
+        self.y_hat_cloud_history = []
 
         # 只在轨迹真正开始之后再用 GP（由 /data_recording_enabled 控制）
         self.gp_active = False
@@ -160,7 +179,7 @@ class CartesianImpedanceController(Node):
             '/future_task_space'
         )
         self.future_delay = self.declare_parameter(
-            'future_delay', 0.06  # 默认 60 ms
+            'future_delay', 0.0  # 默认 60 ms
         ).value
 
         # 存最新一次未来轨迹
@@ -341,93 +360,90 @@ class CartesianImpedanceController(Node):
             )
             print("tau_residual:", tau_residual)
 
-            # 1) 先取用「最近一次」的 y_hat （如果没有就全 0）
-            with self._gp_lock:
-                raw = self._latest_y_hat.copy()
+            # === 控制：先用“上一帧”融合好的 y_hat_combined 做补偿 ===
+            if self.gp_active:
+                tau = tau - self.y_hat_combined
 
-            # 指数低通滤波
-            self.y_hat_filtered = (
-                self.y_hat_alpha * raw
-                + (1 - self.y_hat_alpha) * self.y_hat_filtered
-            )
-            y_hat = self.y_hat_filtered
+            # --- 记录（含最终补偿用的 y_hat_combined）---
+            if self.data_recording_enabled:
+                self.y_hat_history.append(self.y_hat_combined.tolist())      # combined
+                self.y_hat_local_history.append(self.y_hat_local.tolist())    # 上一帧或刚更新的 local
+                self.y_hat_cloud_history.append(self.y_hat_cloud.tolist())    # 上一帧或刚更新的 cloud
+                self.tau_residual_history.append(self.tau_residual_filtered.tolist())
 
             # === 异步请求未来轨迹（给 GP 用），比如 100Hz 请求一次 ===
             if self.future_traj_client.service_is_ready():
                 self._future_traj_counter += 1
                 if self._future_traj_counter % 10 == 0:
                     req_ft = GetFutureTrajectory.Request()
-                    req_ft.t_delay = float(self.future_delay)  # 例如 0.06
+                    req_ft.t_delay = float(self.future_delay)
                     future_ft = self.future_traj_client.call_async(req_ft)
                     future_ft.add_done_callback(self._future_traj_response_callback)
             else:
                 if not self._future_traj_warned:
-                    self.get_logger().warn("[Controller] /future_task_space not ready; GP will没有未来轨迹信息")
+                    self.get_logger().warn(
+                        "[Controller] /future_task_space not ready; GP 没有未来轨迹信息"
+                    )
                     self._future_traj_warned = True
 
-            # 2) 再异步发一个新的 request，结果回来后更新缓存
-            if self.gp_active and self.use_gp and self.gp_client.service_is_ready():
-                req = AsyncGPpredict.Request()
-
-                # 当前的关节特征（保持原来逻辑）
-                req.q = self.q.astype(np.float32).tolist()
-                req.dq_des_joint = self.dq_des_joint.astype(np.float32).tolist()
-                req.ddq_des_joint = self.ddq_des_joint.astype(np.float32).tolist()
-                req.tau_residual = self.tau_residual_filtered.astype(np.float32).tolist()
-
-                # === 重点：用「未来轨迹」算「未来关节空间特征」 ===
-                if self._latest_future_traj is not None:
-                    x_f  = self._latest_future_traj["x_des"]   # 6
-                    dx_f = self._latest_future_traj["dx_des"]  # 6
-                    ddx_f = self._latest_future_traj["ddx_des"]# 6
-
-                    # 任务空间只用前5维（和上面一致：3平移 + 2姿态）
-                    dx_f_5  = dx_f[:5]
-                    ddx_f_5 = ddx_f[:5]
-
-                    # 注意：这里我们用“当前的 J 和 dJ”来近似未来时刻的映射
-                    dq_des_joint_future  = jacobian_pinv @ dx_f_5
-                    ddq_des_joint_future = jacobian_pinv @ (ddx_f_5 - djacobian @ dq)
-
-                    req.dq_des_joint_future  = dq_des_joint_future.astype(np.float32).tolist()
-                    req.ddq_des_joint_future = ddq_des_joint_future.astype(np.float32).tolist()
-                else:
-                    # 没有未来轨迹时就发 0
-                    req.dq_des_joint_future  = [0.0]*7
-                    req.ddq_des_joint_future = [0.0]*7
-
+            # === 控制循环的最后：按节拍触发一次“GP 更新”（本地 + 云端） ===
+            if self.gp_active and self.use_gp:
                 self.gp_counter += 1
-                if self.gp_counter % 1 == 0:
-                    future = self.gp_client.call_async(req)
-                    future.add_done_callback(self._gp_response_callback)
+                if self.gp_counter % self.gp_stride == 0:
+                    # 1) 本地 GP 立刻算一次（同步）
+                    self.y_hat_local = self._gp_predict_and_update(
+                        self.q,
+                        self.dq_des_joint,
+                        self.ddq_des_joint,
+                        self.tau_residual_filtered,
+                    )
 
-            # 把 GP 的输出减掉
-            if self.gp_active:
-                tau = tau - y_hat
-            # self.tau_filtered = self.y_hat_alpha * tau + (1 - self.y_hat_alpha) * self.tau_filtered
-            # tau = self.tau_filtered
+                    # 2) 云端 GP：发异步请求（同一时刻的 q/dq/ddq/残差）
+                    if self.gp_client.service_is_ready():
+                        req = AsyncGPpredict.Request()
+                        req.q = self.q.astype(np.float32).tolist()
+                        req.dq_des_joint = self.dq_des_joint.astype(np.float32).tolist()
+                        req.ddq_des_joint = self.ddq_des_joint.astype(np.float32).tolist()
+                        req.tau_residual = self.tau_residual_filtered.astype(np.float32).tolist()
 
-            # --- 记录 y_hat / tau_residual（与其他数据一起） ---
-            if self.data_recording_enabled:
-                self.y_hat_history.append(self.y_hat_filtered.tolist())
-                self.tau_residual_history.append(self.tau_residual_filtered.tolist())
+                        # 未来特征：如果开启延迟补偿，就用最新 future_traj 算
+                        if self._latest_future_traj is not None:
+                            x_f  = self._latest_future_traj["x_des"]
+                            dx_f = self._latest_future_traj["dx_des"]
+                            ddx_f = self._latest_future_traj["ddx_des"]
+
+                            dx_f_5  = dx_f[:5]
+                            ddx_f_5 = ddx_f[:5]
+                            dq_future  = jacobian_pinv @ dx_f_5
+                            ddq_future = jacobian_pinv @ (ddx_f_5 - djacobian @ dq)
+
+                            req.dq_des_joint_future  = dq_future.astype(np.float32).tolist()
+                            req.ddq_des_joint_future = ddq_future.astype(np.float32).tolist()
+                        else:
+                            req.dq_des_joint_future  = [0.0]*7
+                            req.ddq_des_joint_future = [0.0]*7
+
+                            # 如果你现在云端只用当前特征，也可以都设 0
+
+                        future = self.gp_client.call_async(req)
+                        future.add_done_callback(self._gp_response_callback)
 
             # publish on topic /effort_command
             self.effort_msg.efforts = tau.tolist()
             self.effort_publisher.publish(self.effort_msg)
-            
+
             # record data only when data recording is enabled
             if self.data_recording_enabled:
                 self.tau_history.append(tau.tolist())
                 self.time_history.append(t_elapsed)
                 self.x_history.append(x.tolist())
                 self.x_des_history.append(self.x_des.tolist())
-                self.dx_history.append(dx[:3].tolist())      
-                self.dx_des_history.append(self.dx_des[:3].tolist()) 
+                self.dx_history.append(dx[:3].tolist())
+                self.dx_des_history.append(self.dx_des[:3].tolist())
                 self.tau_measured_history.append(np.array(msg.effort_measured).tolist())
                 self.gravity_history.append(np.array(msg.gravity).tolist())
                 self.q_history.append(q.tolist())
-                self.dq_history.append(dq.tolist()) 
+                self.dq_history.append(dq.tolist())
 
         except Exception as e:
             self.get_logger().error(f'Parameter error: {str(e)}')
@@ -462,21 +478,32 @@ class CartesianImpedanceController(Node):
         # self.get_logger().info(f"GP packet: {packet}")
         pass
 
-
     def _gp_response_callback(self, future):
         try:
             resp = future.result()
             if resp is None:
                 return
-            y_hat = np.array(resp.y_hat, dtype=float)
-            if y_hat.shape != (7,):
-                self.get_logger().warn(f"[Controller] GP returned wrong size y_hat: {y_hat.shape}")
+
+            y_cloud = np.array(resp.y_hat, dtype=float)
+            if y_cloud.shape != (7,):
+                self.get_logger().warn(
+                    f"[Controller] GP returned wrong size y_hat: {y_cloud.shape}"
+                )
                 return
+
+            # 更新云端 y_hat
             with self._gp_lock:
-                self._latest_y_hat = y_hat
+                self.y_hat_cloud = y_cloud
+
+            # === 在 callback 里做融合（本地 + 云端）===
+            # 这里用 self.y_hat_local 是“同一次节拍”时算出的本地结果
+            alpha = 0   # 云/本地权重，可以 declare_parameter 出来
+            self.y_hat_combined = (
+                alpha * self.y_hat_local + (1.0 - alpha) * self.y_hat_cloud
+            )
+
         except Exception as e:
             self.get_logger().warn(f"[Controller] GP response error: {e}")
-
 
     def start_trajectory(self):
         """start trajectory by calling the joint position adjust service"""
@@ -575,9 +602,8 @@ class CartesianImpedanceController(Node):
         self.get_logger().info(f"[GP] 共加载 {loaded} 个模型. ready={self.gp_ready}")
 
     def _gp_predict_and_update(self, q, dq_des_joint, ddq_des_joint, tau_residual):
-        """后台线程中调用：预测 + 在线更新（每次循环一次，带详细debug输出）"""
-        if self._gp_stop:
-            return
+        """本地 GP：预测 + 在线更新（每次控制循环调用一次）"""
+        # 不再用 _gp_stop，这个标志在控制器里没有定义
         if not self.gp_ready or not self.use_gp:
             return np.zeros(7, dtype=float)
 
@@ -586,7 +612,7 @@ class CartesianImpedanceController(Node):
         for j in range(1, 7):
             pack = self.gp_models.get(j)
             if pack is None:
-                self.get_logger().warn(f"[GP-debug] joint {j}: no model pack")
+                self.get_logger().warn(f"[GP-local] joint {j}: no model pack")
                 continue
 
             model = pack["model"]
@@ -748,8 +774,10 @@ class CartesianImpedanceController(Node):
                 header.extend([f'joint_vel_{i+1}' for i in range(7)])
                 header.extend([f'dq_des_joint_{i+1}' for i in range(7)])
                 header.extend([f'ddq_des_joint_{i+1}' for i in range(7)])
-                header.extend([f'y_hat_{i+1}' for i in range(7)])           # <--- 新增
-                header.extend([f'tau_residual_{i+1}' for i in range(7)])    # <--- 新增
+                header.extend([f'y_hat_{i+1}' for i in range(7)])          # combined
+                header.extend([f'y_hat_local_{i+1}' for i in range(7)])    # local
+                header.extend([f'y_hat_cloud_{i+1}' for i in range(7)])    # cloud
+                header.extend([f'tau_residual_{i+1}' for i in range(7)])
                 writer.writerow(header)
 
                 for i in range(min_len):
@@ -781,11 +809,20 @@ class CartesianImpedanceController(Node):
                     else:
                         row.extend([0.0]*7)
 
+                    if i < len(self.y_hat_local_history):
+                        row.extend(self.y_hat_local_history[i])
+                    else:
+                        row.extend([0.0]*7)
+
+                    if i < len(self.y_hat_cloud_history):
+                        row.extend(self.y_hat_cloud_history[i])
+                    else:
+                        row.extend([0.0]*7)
+
                     if i < len(self.tau_residual_history):
                         row.extend(self.tau_residual_history[i])
                     else:
                         row.extend([0.0]*7)
-
                     writer.writerow(row)
 
             self.get_logger().info(f'Successfully saved {min_len} data points to {filename}')

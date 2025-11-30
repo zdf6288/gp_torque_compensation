@@ -282,33 +282,61 @@ def plot_data_from_csv(csv_filename):
     else:
         print('Skip joint position vs torque error plot: missing joint_pos_* columns or torque data.')
 
-    # ===== 新增：逐关节 y_hat vs tau_residual 对比图 =====
-    yhat_cols = cols_1to7(df, 'y_hat_')
-    res_cols  = cols_1to7(df, 'tau_residual_')
+        # ===== 逐关节：local / cloud / combined y_hat vs tau_residual =====
+    # 允许下面三种命名：
+    #   y_hat_local_1..7, y_hat_cloud_1..7, y_hat_1..7 (combined)
+    yhat_comb_cols  = cols_1to7(df, 'y_hat_')
+    yhat_local_cols = cols_1to7(df, 'y_hat_local_')
+    yhat_cloud_cols = cols_1to7(df, 'y_hat_cloud_')
+    res_cols        = cols_1to7(df, 'tau_residual_')
 
-    if len(yhat_cols) == 7 and len(res_cols) == 7:
-        YH = df[yhat_cols].values      # shape [N,7]
+    if len(res_cols) == 7 and (len(yhat_comb_cols) == 7 or len(yhat_local_cols) == 7 or len(yhat_cloud_cols) == 7):
         TR = df[res_cols].values       # shape [N,7]
 
-        fig3, axes3 = plt.subplots(3, 3, figsize=(18, 14))
-        fig3.suptitle('Per-Joint: y_hat vs tau_residual', fontsize=14)
+        YH_comb  = df[yhat_comb_cols].values  if len(yhat_comb_cols)  == 7 else None
+        YH_local = df[yhat_local_cols].values if len(yhat_local_cols) == 7 else None
+        YH_cloud = df[yhat_cloud_cols].values if len(yhat_cloud_cols) == 7 else None
 
-        # 把 3x3 的 axes 拉平成列表，前7个用来画图，最后2个留空
+        fig3, axes3 = plt.subplots(3, 3, figsize=(18, 14))
+        fig3.suptitle('Per-Joint: GP predictions vs tau_residual', fontsize=14)
+
         ax_list = [ax for row in axes3 for ax in row]
 
-        print('\n=== y_hat vs tau_residual statistics ===')
+        print('\n=== GP predictions vs tau_residual statistics (combined/local/cloud) ===')
         for j in range(7):
             ax = ax_list[j]
-            yh = YH[:, j]
             tr = TR[:, j]
 
-            # 时间序列对比
+            # 残差
             ax.plot(time_history, tr, label='tau_residual', linewidth=1.8)
-            ax.plot(time_history, yh, label='y_hat', linestyle='--', linewidth=1.8)
 
-            # 剩余误差（残差-补偿）可视化（可选）
-            rem = tr - yh
-            ax.plot(time_history, rem, label='residual - y_hat', linewidth=1.0, alpha=0.8)
+            # 画 combined
+            if YH_comb is not None:
+                yh_c = YH_comb[:, j]
+                ax.plot(time_history, yh_c, '--', linewidth=1.5, label='y_hat_combined')
+
+            # 画 local
+            if YH_local is not None:
+                yh_l = YH_local[:, j]
+                ax.plot(time_history, yh_l, '-', linewidth=1.2, alpha=0.8, label='y_hat_local')
+
+            # 画 cloud
+            if YH_cloud is not None:
+                yh_cl = YH_cloud[:, j]
+                ax.plot(time_history, yh_cl, ':', linewidth=1.2, alpha=0.8, label='y_hat_cloud')
+
+            # 画剩余误差：残差 - combined（如果有）
+            if YH_comb is not None:
+                rem = tr - YH_comb[:, j]
+                ax.plot(time_history, rem, linewidth=1.0, alpha=0.7, label='residual - combined')
+
+                # 简单统计：corr / MSE / MAE
+                mask = np.isfinite(tr) & np.isfinite(YH_comb[:, j])
+                if mask.sum() >= 2:
+                    corr = np.corrcoef(tr[mask], YH_comb[mask, j])[0, 1]
+                    mse  = np.mean((tr[mask] - YH_comb[mask, j])**2)
+                    mae  = np.mean(np.abs(tr[mask] - YH_comb[mask, j]))
+                    print(f'Joint {j+1} (combined): corr={corr:.4f}, MSE={mse:.6f}, MAE={mae:.6f}')
 
             ax.set_title(f'Joint {j+1}')
             ax.set_xlabel('Time (s)')
@@ -316,27 +344,17 @@ def plot_data_from_csv(csv_filename):
             ax.grid(True)
             ax.legend()
 
-            # 数值统计
-            # 只在有限值上统计，避免 NaN/Inf 影响结果
-            mask = np.isfinite(tr) & np.isfinite(yh)
-            if mask.sum() >= 2:
-                corr = np.corrcoef(tr[mask], yh[mask])[0, 1]
-                mse  = np.mean((tr[mask] - yh[mask])**2)
-                mae  = np.mean(np.abs(tr[mask] - yh[mask]))
-                print(f'Joint {j+1}: corr={corr:.4f}, MSE={mse:.6f}, MAE={mae:.6f}')
-            else:
-                print(f'Joint {j+1}: insufficient finite samples for stats')
-
-        # 多出的第8/9个子图清空
+        # 把多出来的两个子图关掉
         ax_list[7].axis('off')
         ax_list[8].axis('off')
 
         plt.tight_layout()
-        out3 = csv_filename.replace('.csv', '_yhat_vs_residual.png')
+        out3 = csv_filename.replace('.csv', '_yhat_local_cloud_vs_residual.png')
         fig3.savefig(out3, dpi=300, bbox_inches='tight')
         print(f'Figure saved as {out3}')
     else:
-        print('Skip y_hat vs tau_residual plot: missing columns y_hat_* or tau_residual_*')
+        print('Skip y_hat(local/cloud) vs tau_residual plot: missing columns.')
+
 
 
 

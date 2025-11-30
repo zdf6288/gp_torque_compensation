@@ -45,8 +45,8 @@ class GPServer(Node):
             # 用「未来特征」做预测（当前特征你可以只用于分析或不用）
             y_hat = self._gp_predict_and_update(
                 q,
-                dq_des_joint_future,
-                ddq_des_joint_future,
+                dq_des_joint,
+                ddq_des_joint,
                 tau_residual
             )
             response.y_hat = y_hat.astype(np.float32).tolist()
@@ -121,15 +121,15 @@ class GPServer(Node):
         # key = 关节号（1..6），"default" 为所有关节的默认配置
         per_joint_cfg = {
             "default": dict(
-                max_data_per_expert=500,
-                nearest_k=2,
+                max_data_per_expert=100,
+                nearest_k=4,
                 max_experts=100,
                 timescale=0.03,
             ),
             # 举例：如果你想让 6 号关节忘得快一点、专家少一点，可以单独改：
             6: dict(
                 max_data_per_expert=50,
-                nearest_k=2,
+                nearest_k=4,
                 max_experts=50,
                 timescale=0.05,
             ),
