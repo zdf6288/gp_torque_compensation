@@ -157,6 +157,9 @@ class CartesianImpedanceController(Node):
         # GP service client
         self.gp_client = self.create_client(AsyncGPpredict, '/gp_predict')
         self.use_gp = True
+
+        self.gp_sample_n = 10   # 比如每次随机采样 10 个点
+        self.gp_sample_sigma = 0.02  # 采样扰动尺度
         
         self._gp_lock = threading.Lock()
         self._latest_y_hat = np.zeros(7, dtype=float)
@@ -417,11 +420,40 @@ class CartesianImpedanceController(Node):
                             dq_future  = jacobian_pinv @ dx_f_5
                             ddq_future = jacobian_pinv @ (ddx_f_5 - djacobian @ dq)
 
+                            # ==== 未来任务空间采样 ====
+                            future_samples = self._sample_future_task_space(
+                                dx_f, ddx_f, 
+                                n_samples=self.gp_sample_n,
+                                sigma=self.gp_sample_sigma
+                            )
+
+                            # ----- 未来样本收集 -----
+                            dq_samples = []
+                            ddq_samples = []
+
+                            for dx_f_i, ddx_f_i in future_samples:
+
+                                dx_f_i_5  = dx_f_i[:5]
+                                ddx_f_i_5 = ddx_f_i[:5]
+
+                                dq_future_i  = jacobian_pinv @ dx_f_i_5
+                                ddq_future_i = jacobian_pinv @ (ddx_f_i_5 - djacobian @ dq)
+
+                                dq_samples.append(dq_future_i.astype(np.float32))
+                                ddq_samples.append(ddq_future_i.astype(np.float32))
+
+                            # ----- 转成 flatten 数组 -----
+                            dq_samples_flat  = np.array(dq_samples, dtype=np.float32).reshape(-1)
+                            ddq_samples_flat = np.array(ddq_samples, dtype=np.float32).reshape(-1)
+
+                            # ----- 写入 request -----
+                            req.n_future_samples = len(dq_samples)
+                            req.dq_future_samples_flat  = dq_samples_flat.tolist()
+                            req.ddq_future_samples_flat = ddq_samples_flat.tolist()
+
+                            # ----- 主 future 状态 -----
                             req.dq_des_joint_future  = dq_future.astype(np.float32).tolist()
                             req.ddq_des_joint_future = ddq_future.astype(np.float32).tolist()
-                        else:
-                            req.dq_des_joint_future  = [0.0]*7
-                            req.ddq_des_joint_future = [0.0]*7
 
                             # 如果你现在云端只用当前特征，也可以都设 0
 
@@ -448,35 +480,18 @@ class CartesianImpedanceController(Node):
         except Exception as e:
             self.get_logger().error(f'Parameter error: {str(e)}')
 
-    def future_callback(self, future):
-        try:
-            res = future.result()
-        except Exception as e:
-            self.get_logger().error(f'Future traj service call failed: {e}')
-            return
+    def _sample_future_task_space(self, dx_f, ddx_f, n_samples=10, sigma=0.02):
+        samples = []
+        for _ in range(n_samples):
+            dx_f_i  = dx_f.copy()
+            ddx_f_i = ddx_f.copy()
 
-        x_f = np.array(res.x_des, dtype=float)
-        dx_f = np.array(res.dx_des, dtype=float)
-        ddx_f = np.array(res.ddx_des, dtype=float)
+            # --- 只扰动任务空间前5维（你的控制任务是5维）
+            dx_f_i[:5]  += np.random.normal(0, sigma, size=5)
+            ddx_f_i[:5] += np.random.normal(0, sigma, size=5)
 
-        # 打包发送给 GP server  
-        packet = {
-            "x_des": x_f.tolist(),
-            "dx_des": dx_f.tolist(),
-            "ddx_des": ddx_f.tolist(),
-        }
-        self.send_to_gp_server(packet)
-
-    def send_to_gp_server(self, packet: dict):
-        """
-        真正发给 GP server 的接口，你自己实现：
-          - socket 发送 json
-          - ROS2 topic/service
-          - 其他通信方式
-        """
-        # 调试时可以先打印
-        # self.get_logger().info(f"GP packet: {packet}")
-        pass
+            samples.append((dx_f_i, ddx_f_i))
+        return samples
 
     def _gp_response_callback(self, future):
         try:
@@ -484,16 +499,16 @@ class CartesianImpedanceController(Node):
             if resp is None:
                 return
 
-            y_cloud = np.array(resp.y_hat, dtype=float)
-            if y_cloud.shape != (7,):
+            y_hat_future_agg = np.array(resp.y_hat_future_agg, dtype=float)
+            if y_hat_future_agg.shape != (7,):
                 self.get_logger().warn(
-                    f"[Controller] GP returned wrong size y_hat: {y_cloud.shape}"
+                    f"[Controller] GP returned wrong size y_hat: {y_hat_future_agg.shape}"
                 )
                 return
 
             # 更新云端 y_hat
             with self._gp_lock:
-                self.y_hat_cloud = y_cloud
+                self.y_hat_cloud = y_hat_future_agg
 
             # === 在 callback 里做融合（本地 + 云端）===
             # 这里用 self.y_hat_local 是“同一次节拍”时算出的本地结果
