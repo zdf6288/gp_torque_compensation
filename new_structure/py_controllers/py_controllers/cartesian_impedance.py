@@ -182,7 +182,7 @@ class CartesianImpedanceController(Node):
             '/future_task_space'
         )
         self.future_delay = self.declare_parameter(
-            'future_delay', 0.0  # 默认 60 ms
+            'future_delay', 0.025  # 默认 60 ms
         ).value
 
         # 存最新一次未来轨迹
@@ -361,7 +361,7 @@ class CartesianImpedanceController(Node):
             self.tau_residual_filtered = (
                 0.02 * tau_residual + 0.98 * self.tau_residual_filtered
             )
-            print("tau_residual:", tau_residual)
+            # print("tau_residual:", tau_residual)
 
             # === 控制：先用“上一帧”融合好的 y_hat_combined 做补偿 ===
             if self.gp_active:
@@ -403,6 +403,7 @@ class CartesianImpedanceController(Node):
 
                     # 2) 云端 GP：发异步请求（同一时刻的 q/dq/ddq/残差）
                     if self.gp_client.service_is_ready():
+                        # print("updating!!!!!!!!!!!!!!!!!")
                         req = AsyncGPpredict.Request()
                         req.q = self.q.astype(np.float32).tolist()
                         req.dq_des_joint = self.dq_des_joint.astype(np.float32).tolist()
@@ -512,7 +513,7 @@ class CartesianImpedanceController(Node):
 
             # === 在 callback 里做融合（本地 + 云端）===
             # 这里用 self.y_hat_local 是“同一次节拍”时算出的本地结果
-            alpha = 0   # 云/本地权重，可以 declare_parameter 出来
+            alpha = 0.5   # 云/本地权重，可以 declare_parameter 出来
             self.y_hat_combined = (
                 alpha * self.y_hat_local + (1.0 - alpha) * self.y_hat_cloud
             )
@@ -683,9 +684,9 @@ class CartesianImpedanceController(Node):
             y_hat[j-1] = y_pred_weighted
 
             # 额外打印调试信息
-            self.get_logger().info(
-                f"[GP-debug] joint {j}: μ={y_pred:.3f}, σ={sigma:.3f}, w={w:.3f} → weighted={y_pred_weighted:.3f}"
-            )
+            # self.get_logger().info(
+            #     # f"[GP-debug] joint {j}: μ={y_pred:.3f}, σ={sigma:.3f}, w={w:.3f} → weighted={y_pred_weighted:.3f}"
+            # )
 
             # === 3. 在线更新 ===
             y_real = float(tau_residual[j-1])
@@ -697,9 +698,9 @@ class CartesianImpedanceController(Node):
             if np.isfinite(y_std):
                 try:
                     model.add_point(x_std, np.array([y_std], dtype=np.float32))
-                    self.get_logger().info(
-                        f"[GP-debug] joint {j}: update ok (y_real={y_real:.4f}, y_std={y_std:.4f})"
-                    )
+                    # self.get_logger().info(
+                    #     f"[GP-debug] joint {j}: update ok (y_real={y_real:.4f}, y_std={y_std:.4f})"
+                    # )
                 except Exception as e:
                     self.get_logger().error(f"[GP-debug] joint {j}: add_point failed: {e}")
             else:
@@ -722,7 +723,7 @@ class CartesianImpedanceController(Node):
         # 以当前脚本为基准，找到 gp/skygp.py
         script_dir = os.path.dirname(os.path.abspath(__file__))
         skygp_path = os.path.abspath(os.path.join(
-            script_dir, "..","..", "..", "new_structure","gp", "skygp.py"
+            script_dir, "..","..", "..","..","..", "..", "new_structure","gp", "skygp.py"
         ))
 
         if not os.path.isfile(skygp_path):

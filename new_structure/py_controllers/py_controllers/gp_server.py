@@ -69,12 +69,12 @@ class GPServer(Node):
             # =====================================================
             # 1) 当前预测
             # =====================================================
-            y_hat_current = self._gp_predict_vector(q, dq, ddq)
+            y_hat_current = self._gp_predict_vector(q, dq, ddq, tau, update = True)
 
             # =====================================================
             # 2) 主未来预测
             # =====================================================
-            y_hat_future = self._gp_predict_vector(q, dq_f, ddq_f)
+            y_hat_future = self._gp_predict_vector(q, dq_f, ddq_f, tau, update = False)
 
             # =====================================================
             # 3) 多采样 future 预测（逐个）
@@ -96,9 +96,9 @@ class GPServer(Node):
             # =====================================================
             # 设置 response
             # =====================================================
-            response.y_hat_current = y_hat_current.tolist()
+            response.y_hat_current = y_hat_future.tolist()
             response.y_hat_future  = y_hat_future.tolist()
-            response.y_hat_future_agg = y_future_agg.tolist()
+            response.y_hat_future_agg = y_hat_future.tolist()
 
         except Exception as e:
             self.get_logger().error(f"[GPServer] callback error: {e}")
@@ -113,9 +113,10 @@ class GPServer(Node):
     # ============================================================
     #  单个向量预测（不更新）
     # ============================================================
-    def _gp_predict_vector(self, q, dq, ddq):
+    def _gp_predict_vector(self, q, dq, ddq, tau_residual=None, update=False):
         """
-        对 7 个关节做预测（不做 online update）
+        对 7 个关节做预测
+        如果 do_update=True，则根据 tau_residual 对 "当前中心点" 做 online update
         """
         if not self.gp_ready:
             return np.zeros(7, dtype=float)
@@ -131,7 +132,7 @@ class GPServer(Node):
             Xm, Xs, Ym, Ys = pack["stats"]
             x_dim = pack["x_dim"]
 
-            # ---- 构建 x ----
+            # -------- 输入构造 ----------
             if x_dim == 3:
                 x = np.array([q[j-1], dq[j-1], ddq[j-1]], dtype=np.float32)
             elif x_dim == 2:
@@ -143,17 +144,38 @@ class GPServer(Node):
             Xs = np.asarray(Xs, dtype=np.float32)
             Ym = float(np.asarray(Ym)[0])
             Ys = float(np.asarray(Ys)[0])
+            Ys = Ys if Ys != 0 else 1.0
 
+            # -------- 标准化 ----------
             x_std = (x - Xm[:x_dim]) / Xs[:x_dim]
 
-            # ---- GP 预测 ----
-            mu_s, _ = model.predict(x_std.astype(np.float32))
+            # -------- GP 预测 ----------
+            mu_s, var_s = model.predict(x_std.astype(np.float32))
             mu = float(mu_s[0])
 
-            # ---- 去标准化 ----
-            y[j-1] = mu * Ys + Ym
+            y_pred = mu * Ys + Ym
+            y[j-1] = y_pred
+            print(1)
+            # -------- Online Update ----------
+            if update and tau_residual is not None:
+                print(2)
+                y_real = float(tau_residual[j-1])
+                y_std = (y_real - Ym) / Ys
+
+                if np.isfinite(y_std):
+                    try:
+                        model.add_point(
+                            x_std.astype(np.float32),
+                            np.array([y_std], dtype=np.float32)
+                        )
+                        print("updating")
+                    except Exception as e:
+                        self.get_logger().error(
+                            f"[GPServer] joint{j} online update failed: {e}"
+                        )
 
         return y
+
 
     # ==== 把你原来的这三个函数基本原样搬进来 ====
     def _ensure_skygp_import(self):
@@ -219,15 +241,15 @@ class GPServer(Node):
         per_joint_cfg = {
             "default": dict(
                 max_data_per_expert=100,
-                nearest_k=4,
-                max_experts=100,
+                nearest_k=2,
+                max_experts=8,
                 timescale=0.03,
             ),
             # 举例：如果你想让 6 号关节忘得快一点、专家少一点，可以单独改：
             6: dict(
                 max_data_per_expert=50,
-                nearest_k=4,
-                max_experts=50,
+                nearest_k=2,
+                max_experts=8,
                 timescale=0.05,
             ),
         }
