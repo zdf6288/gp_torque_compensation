@@ -12,6 +12,32 @@ def cols_1to7(df, prefix):
     # prefix 末尾自己带下划线，如 'tau_', 'tau_measured_', 'gravity_', 'y_hat_', 'tau_residual_'
     return [f'{prefix}{i}' for i in range(1, 8) if f'{prefix}{i}' in df.columns]
 
+def split_by_round(df, frequency):
+    """
+    根据 Time(s) 列和圆频率 frequency 自动切分成若干圈。
+    返回: list_of_df_rounds
+    """
+    if "Time(s)" not in df.columns:
+        raise ValueError("CSV 缺少 Time(s) 列")
+
+    T = 1.0 / frequency             # 一圈时间
+    time = df["Time(s)"].values
+
+    rounds = []
+    current_round = 0
+    
+    # 找到数据中总共有几圈
+    max_round = int(time[-1] / T) + 1
+
+    for r in range(max_round):
+        mask = (time >= r*T) & (time < (r+1)*T)
+        df_r = df[mask].copy()
+        if len(df_r) > 10:          # 太少点的不要
+            df_r["Time_round"] = df_r["Time(s)"] - r*T
+            rounds.append((r, df_r))
+
+    return rounds
+
 
 def plot_data_from_csv(csv_filename):
     """plot data from CSV file"""

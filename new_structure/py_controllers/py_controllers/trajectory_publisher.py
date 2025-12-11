@@ -8,6 +8,7 @@ from std_msgs.msg import Header, Bool
 import numpy as np
 import time
 from rclpy.duration import Duration
+from std_msgs.msg import String
 
 
 class TrajectoryPublisher(Node):
@@ -73,7 +74,20 @@ class TrajectoryPublisher(Node):
         self.trajectory_start_x = self.center_x + self.radius
         self.trajectory_start_y = self.center_y
         self.trajectory_start_z = self.center_z
-        
+
+        # Ablation parameters
+        self.gp_mode_pub = self.create_publisher(String, "/gp_mode", 10)
+        self.modes = ["none", "local", "cloud", "fusion", "history_fusion"]
+        self.current_mode_index = 0
+        self.period = 1.0 / self.frequency
+        self.last_round = -1
+
+        self.declare_parameter("max_rounds", 4)
+        self.max_rounds = self.get_parameter("max_rounds").value
+
+        self.shutdown_pub = self.create_publisher(Bool, "/shutdown_control", 10)
+
+
         self.get_logger().info('Trajectory publisher node started')
         self.get_logger().info(f'Publishing circular trajectory at 1000 Hz')
         self.get_logger().info(f'Circle radius: {self.radius} m, frequency: {self.frequency} Hz')
@@ -253,6 +267,46 @@ class TrajectoryPublisher(Node):
         except Exception as e:
             self.get_logger().error(f'Error in trajectory publisher: {str(e)}')
             self.get_logger().error(f'Current state: transition_complete={self.transition_complete}, elapsed_time={elapsed_time}')
+        
+        # ---------------------------
+        #   Round Detection + GP Mode Switch
+        # ---------------------------
+        if self.transition_complete:   # 只有真正跑圆轨迹才切换模式
+            current_round = int(elapsed_time / self.period)
+
+            if current_round != self.last_round:
+                self.last_round = current_round
+
+                # 切换 GP 模式
+                mode_msg = String()
+                mode_msg.data = self.modes[self.current_mode_index]
+                self.gp_mode_pub.publish(mode_msg)
+
+                self.get_logger().info(
+                    f"[TrajectoryPublisher] === New Round {current_round} | Switching GP Mode → {mode_msg.data}"
+                )
+
+                self.current_mode_index = (self.current_mode_index + 1) % len(self.modes)
+
+            # ========== Auto stop here ==========
+            if current_round >= self.max_rounds:
+                self.get_logger().info(
+                    f"Reached max rounds ({self.max_rounds}), stopping trajectory publisher..."
+                )
+
+                # 1. 停止 recording
+                stop_msg = Bool()
+                stop_msg.data = False
+                self.data_recording_publisher.publish(stop_msg)
+
+                # 2. 通知 controller 停止
+                shutdown_msg = Bool()
+                shutdown_msg.data = True
+                self.shutdown_pub.publish(shutdown_msg)
+
+                # 3. 自己退出
+                rclpy.shutdown()
+                return
 
     def get_future_task_space(self, t_delay):
         """

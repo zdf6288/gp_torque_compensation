@@ -73,6 +73,56 @@ def build_xy_no_filter(
 
     return X_list, Y_list, C_list, M_list, G_list
 
+def build_xy_full_input(
+    df,
+    dt=0.001,
+    use_ddq=True,   # True: 使用 21 维输入；False: 只使用 q + dq → 14 维
+):
+    """
+    每个关节都使用相同的高维输入 x_full:
+        use_ddq=False: X = [q1..q7, dq1..dq7]          → 14 维
+        use_ddq=True:  X = [q1..q7, dq1..dq7, ddq1..ddq7] → 21 维
+
+    Y_j = tau_measured_j − gravity_j − tau_cmd_j
+    """
+
+    X_list = [[] for _ in range(7)]
+    Y_list = [[] for _ in range(7)]
+
+    # -----------------------
+    # 读取全关节的数据
+    # -----------------------
+    q_mat       = np.stack([df[f"joint_pos_{j}"].values      for j in range(1,8)], axis=1)
+    dq_mat      = np.stack([df[f"dq_des_joint_{j}"].values   for j in range(1,8)], axis=1)
+    ddq_mat     = np.stack([df[f"ddq_des_joint_{j}"].values  for j in range(1,8)], axis=1)
+    tau_cmd_mat = np.stack([df[f"tau_{j}"].values            for j in range(1,8)], axis=1)
+    tau_meas_mat= np.stack([df[f"tau_measured_{j}"].values   for j in range(1,8)], axis=1)
+    g_mat       = np.stack([df[f"gravity_{j}"].values        for j in range(1,8)], axis=1)
+
+    # -----------------------
+    # 构造统一 X_full
+    # -----------------------
+    if use_ddq:
+        X_full = np.concatenate([q_mat, dq_mat, ddq_mat], axis=1)   # (N, 21)
+    else:
+        X_full = np.concatenate([q_mat, dq_mat], axis=1)            # (N, 14)
+
+    X_full = X_full.astype(np.float32)
+
+    # -----------------------
+    # 各关节独立的 y_j
+    # -----------------------
+    Y_full = (tau_meas_mat - g_mat - tau_cmd_mat).astype(np.float32)  # shape (N,7)
+
+    # -----------------------
+    # 每个关节构造 X_list[j], Y_list[j]
+    # -----------------------
+    for j in range(7):
+        X_list[j] = X_full                      # 所有关节共享同一个 X_full
+        Y_list[j] = Y_full[:, j][:, None]       # 第 j 个关节的输出
+
+    return X_list, Y_list
+
 
 def save_per_joint_plots(X_list, Y_list, out_npz_path, use_vel=False):
     import numpy as np
@@ -148,29 +198,49 @@ def main():
 
     eff_dt = args.dt * (args.decimate if args.decimate and args.decimate > 1 else 1)
 
-    # 2) 构建未滤波数据
-    X_list, Y_list, C_list, M_list, G_list = build_xy_no_filter(
-        df, dt=eff_dt, use_vel=args.use_vel
+    # # 2) 构建未滤波数据
+    # X_list, Y_list, C_list, M_list, G_list = build_xy_no_filter(
+    #     df, dt=eff_dt, use_vel=args.use_vel
+    # )
+
+    X_list, Y_list = build_xy_full_input(
+        df,
+        dt=eff_dt,
+        use_ddq=False  # 想14维就改成 False
     )
+
+
+    # np.savez(
+    #     args.out,
+    #     **{f"X{j}": X_list[j-1] for j in range(1, 8)},
+    #     **{f"Y{j}": Y_list[j-1] for j in range(1, 8)},
+    #     **{f"C{j}": C_list[j-1] for j in range(1, 8)},
+    #     **{f"M{j}": M_list[j-1] for j in range(1, 8)},
+    #     **{f"G{j}": G_list[j-1] for j in range(1, 8)},
+    #     meta=np.array({
+    #         "decimate": args.decimate,
+    #         "smooth": args.smooth,
+    #         "eff_dt": eff_dt,
+    #         "use_vel": args.use_vel
+    #     }, dtype=object)
+    # )
 
     np.savez(
-        args.out,
-        **{f"X{j}": X_list[j-1] for j in range(1, 8)},
-        **{f"Y{j}": Y_list[j-1] for j in range(1, 8)},
-        **{f"C{j}": C_list[j-1] for j in range(1, 8)},
-        **{f"M{j}": M_list[j-1] for j in range(1, 8)},
-        **{f"G{j}": G_list[j-1] for j in range(1, 8)},
-        meta=np.array({
-            "decimate": args.decimate,
-            "smooth": args.smooth,
-            "eff_dt": eff_dt,
-            "use_vel": args.use_vel
-        }, dtype=object)
-    )
+    args.out,
+    **{f"X{j}": X_list[j-1] for j in range(1, 8)},
+    **{f"Y{j}": Y_list[j-1] for j in range(1, 8)},
+    meta=np.array({
+        "decimate": args.decimate,
+        "smooth": args.smooth,
+        "eff_dt": eff_dt,
+        "input_dim": X_list[0].shape[1],
+    }, dtype=object)
+)
+
     print(f"✅ Saved {args.out} (no filtering applied).")
 
-    if args.plots_per_joint:
-        save_per_joint_plots(X_list, Y_list, args.out, use_vel=args.use_vel)
+    # if args.plots_per_joint:
+    #     save_per_joint_plots(X_list, Y_list, args.out, use_vel=args.use_vel)
 
 
 if __name__ == "__main__":

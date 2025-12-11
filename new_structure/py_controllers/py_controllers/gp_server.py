@@ -113,16 +113,93 @@ class GPServer(Node):
     # ============================================================
     #  单个向量预测（不更新）
     # ============================================================
+    # def _gp_predict_vector(self, q, dq, ddq, tau_residual=None, update=False):
+    #     """
+    #     对 7 个关节做预测
+    #     如果 do_update=True，则根据 tau_residual 对 "当前中心点" 做 online update
+    #     """
+    #     if not self.gp_ready:
+    #         return np.zeros(7, dtype=float)
+
+    #     y = np.zeros(7, dtype=float)
+
+    #     for j in range(1, 7):
+    #         pack = self.gp_models.get(j)
+    #         if pack is None:
+    #             continue
+
+    #         model = pack["model"]
+    #         Xm, Xs, Ym, Ys = pack["stats"]
+    #         x_dim = pack["x_dim"]
+
+    #         # -------- 输入构造 ----------
+    #         if x_dim == 3:
+    #             x = np.array([q[j-1], dq[j-1], ddq[j-1]], dtype=np.float32)
+    #         elif x_dim == 2:
+    #             x = np.array([q[j-1], ddq[j-1]], dtype=np.float32)
+    #         else:
+    #             x = np.array([q[j-1]], dtype=np.float32)
+
+    #         Xm = np.asarray(Xm, dtype=np.float32)
+    #         Xs = np.asarray(Xs, dtype=np.float32)
+    #         Ym = float(np.asarray(Ym)[0])
+    #         Ys = float(np.asarray(Ys)[0])
+    #         Ys = Ys if Ys != 0 else 1.0
+
+    #         # -------- 标准化 ----------
+    #         x_std = (x - Xm[:x_dim]) / Xs[:x_dim]
+
+    #         # -------- GP 预测 ----------
+    #         mu_s, var_s = model.predict(x_std.astype(np.float32))
+    #         mu = float(mu_s[0])
+
+    #         y_pred = mu * Ys + Ym
+    #         y[j-1] = y_pred
+    #         print(1)
+    #         # -------- Online Update ----------
+    #         if update and tau_residual is not None:
+    #             print(2)
+    #             y_real = float(tau_residual[j-1])
+    #             y_std = (y_real - Ym) / Ys
+
+    #             if np.isfinite(y_std):
+    #                 try:
+    #                     model.add_point(
+    #                         x_std.astype(np.float32),
+    #                         np.array([y_std], dtype=np.float32)
+    #                     )
+    #                     print("updating")
+    #                 except Exception as e:
+    #                     self.get_logger().error(
+    #                         f"[GPServer] joint{j} online update failed: {e}"
+    #                     )
+
+    #     return y
+
     def _gp_predict_vector(self, q, dq, ddq, tau_residual=None, update=False):
         """
-        对 7 个关节做预测
-        如果 do_update=True，则根据 tau_residual 对 "当前中心点" 做 online update
+        高维输入版本：
+        每个关节使用统一的 x_full = concat([q, dq, ddq]) 或 concat([q, dq])
+        输出仍然是 7 维关节残差预测
         """
+
         if not self.gp_ready:
             return np.zeros(7, dtype=float)
 
+        # ================================
+        # 1) 构造统一输入 x_full
+        # ================================
+        # 若你的训练数据是 21 维输入 (q+dq+ddq)
+        x_full = np.concatenate([q, dq, ddq]).astype(np.float32)
+
+        # 如果你训练的是 14 维 (q+dq)，把上面改成：
+        # x_full = np.concatenate([q, dq]).astype(np.float32)
+
         y = np.zeros(7, dtype=float)
 
+        # ================================
+        # 2) 每个关节都用同一个 x_full 输入
+        # ================================
         for j in range(1, 7):
             pack = self.gp_models.get(j)
             if pack is None:
@@ -130,36 +207,31 @@ class GPServer(Node):
 
             model = pack["model"]
             Xm, Xs, Ym, Ys = pack["stats"]
-            x_dim = pack["x_dim"]
-
-            # -------- 输入构造 ----------
-            if x_dim == 3:
-                x = np.array([q[j-1], dq[j-1], ddq[j-1]], dtype=np.float32)
-            elif x_dim == 2:
-                x = np.array([q[j-1], ddq[j-1]], dtype=np.float32)
-            else:
-                x = np.array([q[j-1]], dtype=np.float32)
-
+            x_dim = pack["x_dim"]   # 应该等于 14 或 21
+            # print("dimension of x:",x_dim)
             Xm = np.asarray(Xm, dtype=np.float32)
             Xs = np.asarray(Xs, dtype=np.float32)
             Ym = float(np.asarray(Ym)[0])
             Ys = float(np.asarray(Ys)[0])
             Ys = Ys if Ys != 0 else 1.0
 
-            # -------- 标准化 ----------
-            x_std = (x - Xm[:x_dim]) / Xs[:x_dim]
+            # 标准化整个 x_full
+            x_std = (x_full[:x_dim] - Xm[:x_dim]) / Xs[:x_dim]
 
-            # -------- GP 预测 ----------
+            # ===============================
+            # GP 预测
+            # ===============================
             mu_s, var_s = model.predict(x_std.astype(np.float32))
             mu = float(mu_s[0])
 
             y_pred = mu * Ys + Ym
-            y[j-1] = y_pred
-            print(1)
-            # -------- Online Update ----------
+            y[j - 1] = y_pred
+
+            # ===============================
+            # 在线更新（只在当前状态）
+            # ===============================
             if update and tau_residual is not None:
-                print(2)
-                y_real = float(tau_residual[j-1])
+                y_real = float(tau_residual[j - 1])
                 y_std = (y_real - Ym) / Ys
 
                 if np.isfinite(y_std):
@@ -168,13 +240,12 @@ class GPServer(Node):
                             x_std.astype(np.float32),
                             np.array([y_std], dtype=np.float32)
                         )
-                        print("updating")
                     except Exception as e:
                         self.get_logger().error(
                             f"[GPServer] joint{j} online update failed: {e}"
                         )
-
         return y
+
 
 
     # ==== 把你原来的这三个函数基本原样搬进来 ====
@@ -319,139 +390,6 @@ class GPServer(Node):
 
         self.gp_ready = (loaded > 0)
         self.get_logger().info(f"[GP] total loaded: {loaded}, ready={self.gp_ready}")
-
-    # def _gp_predict_and_update(self, q, dq_des_joint, ddq_des_joint, tau_residual):
-    #     """
-    #     对每个关节：
-    #       - 构造输入 x (维度 x_dim)
-    #       - 在 x_std 附近采样 n 个扰动点 x_std_k
-    #       - 对每个 x_std_k 调用 model.predict
-    #       - 用方差加权平均融合成一个预测 y_hat[j-1]
-    #       - 用真实残差 tau_residual[j-1] 在中心点 x_std 做在线更新
-    #     """
-    #     if not self.gp_ready or not self.use_gp:
-    #         return np.zeros(7, dtype=float)
-
-    #     y_hat = np.zeros(7, dtype=float)
-
-    #     # 多点采样配置
-    #     n_samples = max(self.n_samples, 0)
-    #     radius = float(self.sample_radius)
-
-    #     for j in range(1, 7):
-    #         pack = self.gp_models.get(j)
-    #         if pack is None:
-    #             continue
-    #         model = pack["model"]
-    #         Xm, Xs, Ym, Ys = pack["stats"]
-    #         x_dim = pack["x_dim"]
-
-    #         # ===== 1) 构造输入 x（当前 "state"） =====
-    #         if x_dim == 3:
-    #             x = np.array([q[j - 1], dq_des_joint[j - 1], ddq_des_joint[j - 1]], dtype=np.float32)
-    #         elif x_dim == 2:
-    #             x = np.array([q[j - 1], ddq_des_joint[j - 1]], dtype=np.float32)
-    #         else:
-    #             x = np.array([q[j - 1]], dtype=np.float32)
-
-    #         if not np.all(np.isfinite(x)):
-    #             self.get_logger().warn(f"[GP] joint {j}: invalid x={x}")
-    #             continue
-
-    #         Xm = np.asarray(Xm, dtype=np.float32)
-    #         Xs = np.asarray(Xs, dtype=np.float32)
-    #         Ym = float(np.asarray(Ym)[0])
-    #         Ys_val = float(np.asarray(Ys)[0])
-    #         Ys = Ys_val if Ys_val != 0.0 else 1.0
-
-    #         # 标准化中心点
-    #         x_std_center = (x - Xm[:x_dim]) / Xs[:x_dim]
-
-    #         # ===== 2) 构造采样点（标准化空间） =====
-    #         # 第一个就是中心点本身
-    #         samples = [x_std_center]
-
-    #         # if n_samples > 0 and radius > 0.0:
-    #         #     # 在单位高斯中采样，然后缩放到给定半径
-    #         #     for _ in range(n_samples):
-    #         #         # 标准正态扰动
-    #         #         delta = np.random.normal(loc=0.0, scale=1.0, size=x_dim).astype(np.float32)
-    #         #         # 归一化到单位球，再乘半径，避免太大的跳动
-    #         #         norm = np.linalg.norm(delta)
-    #         #         if norm < 1e-6:
-    #         #             continue
-    #         #         delta = delta / norm * radius
-    #         #         samples.append(x_std_center + delta)
-
-    #         mus_std = []
-    #         vars_std = []
-
-    #         # ===== 3) 对所有采样点调用 GP 预测 =====
-    #         for x_std in samples:
-    #             try:
-    #                 mu_std_vec, var_std_vec = model.predict(x_std.astype(np.float32))
-    #                 # 预测返回的是向量，这里只对单输出 y_dim=1 情况取 [0]
-    #                 mu_std = float(mu_std_vec[0])
-    #                 var_std = float(var_std_vec[0])
-    #             except Exception as e:
-    #                 self.get_logger().error(f"[GP] joint {j}: predict failed at sample: {e}")
-    #                 continue
-
-    #             if not np.isfinite(mu_std) or not np.isfinite(var_std) or var_std <= 0.0:
-    #                 # 非法结果直接丢掉
-    #                 continue
-
-    #             mus_std.append(mu_std)
-    #             vars_std.append(var_std)
-
-    #         if len(mus_std) == 0:
-    #             # 所有采样点都失败，就算了，给 0 输出
-    #             self.get_logger().warn(f"[GP] joint {j}: all samples invalid, use 0")
-    #             y_hat[j - 1] = 0.0
-    #             continue
-
-    #         mus_std = np.array(mus_std, dtype=float)
-    #         vars_std = np.array(vars_std, dtype=float)
-
-    #         # ===== 4) 方差加权平均（precision weighting）融合多个样本 =====
-    #         inv_vars = 1.0 / vars_std
-    #         weight_sum = np.sum(inv_vars)
-    #         if weight_sum <= 0.0 or not np.isfinite(weight_sum):
-    #             mu_std_comb = np.mean(mus_std)
-    #         else:
-    #             mu_std_comb = float(np.sum(mus_std * inv_vars) / weight_sum)
-
-    #         # 如果你想要一个总方差也可以：
-    #         # var_std_comb = 1.0 / weight_sum   （这里暂时没用到）
-
-    #         # 把标准化预测还原到物理量空间
-    #         y_pred = mu_std_comb * Ys + Ym
-
-    #         # 这里如果你还想用 sigma 做置信度加权，可以再算一次：
-    #         # sigma_std_comb = np.sqrt(var_std_comb)
-    #         # sigma_comb = sigma_std_comb * Ys
-    #         # alpha = 0.0  # 你之前的权重参数
-    #         # w = 1.0 / (1.0 + alpha * sigma_comb**2)
-    #         # y_pred_weighted = y_pred * w
-    #         # 目前为了简单就直接用 y_pred：
-    #         y_hat[j - 1] = y_pred
-
-    #         # ===== 5) 在线更新：用真实残差在中心点更新 =====
-    #         y_real = float(tau_residual[j - 1])
-    #         if not np.isfinite(y_real):
-    #             continue
-
-    #         y_std = (y_real - Ym) / Ys
-    #         if np.isfinite(y_std):
-    #             try:
-    #                 # 只在中心点 x_std_center 更新，保持“附近平均预测”的光滑性
-    #                 model.add_point(x_std_center.astype(np.float32),
-    #                                 np.array([y_std], dtype=np.float32))
-    #             except Exception as e:
-    #                 self.get_logger().error(f"[GP] joint {j}: add_point failed: {e}")
-
-    #     return y_hat
-
 
     def _gp_response_callback(self, future):
         """GP service 异步响应回调：更新 self._latest_y_hat"""

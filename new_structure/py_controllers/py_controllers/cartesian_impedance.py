@@ -17,6 +17,7 @@ import sys
 import os, pickle
 import importlib.util
 import threading, time
+from std_msgs.msg import String
 
 class CartesianImpedanceController(Node):
     
@@ -42,6 +43,14 @@ class CartesianImpedanceController(Node):
         # create service client for joint position adjustment
         self.joint_position_client = self.create_client(
             JointPositionAdjust, '/joint_position_adjust')
+        
+        # Ablation parameter
+        self.gp_mode_sub = self.create_subscription(
+            String, "/gp_mode", self.gp_mode_callback, 10
+        )   
+        self.shutdown_sub = self.create_subscription(
+            Bool, "/shutdown_control", self.shutdown_callback, 10
+        )
         
         self.declare_parameter('k_pd', [24.0, 24.0, 24.0, 24.0, 10.0, 6.0, 2.0])    # k_gains in PD control (joint space)
         self.declare_parameter('d_pd', [16.0, 16.0, 16.0, 16.0, 10.0, 6.0, 2.0])    # d_gains in PD control (joint space)
@@ -167,6 +176,12 @@ class CartesianImpedanceController(Node):
         self.y_hat_cloud = np.zeros(7)
         self.y_hat_cloud_history = []
 
+        ## Ablation parameters
+        self.declare_parameter("gp_mode", "fusion")  
+        self.gp_mode = self.get_parameter("gp_mode").value
+        self.get_logger().info(f"[GP] Running mode = {self.gp_mode}")
+
+
         # 只在轨迹真正开始之后再用 GP（由 /data_recording_enabled 控制）
         self.gp_active = False
         # 不要 while 死等，只尝试一次
@@ -228,6 +243,49 @@ class CartesianImpedanceController(Node):
         }
         # 调试时可以看看
         # self.get_logger().debug(f"Got future traj: x={x_f[:3]}")
+    
+    def gp_mode_callback(self, msg):
+        self.gp_mode = msg.data
+        self.get_logger().info(f"[Controller] GP mode switched to: {self.gp_mode}")
+
+    def shutdown_callback(self, msg):
+        if msg.data:
+            self.get_logger().info("[Controller] Received shutdown signal — stopping robot, saving data & exiting.")
+
+            # ------------------------------------------
+            # 1) 立即停止力矩输出（关键！！！）
+            # ------------------------------------------
+            try:
+                zero_tau = EffortCommand()
+                zero_tau.efforts = [0.0] * 7
+                self.effort_publisher.publish(zero_tau)
+                self.get_logger().info("[Controller] Published zero torque to stop robot.")
+            except Exception as e:
+                self.get_logger().error(f"Error publishing zero torque: {e}")
+
+            # ------------------------------------------
+            # 2) 停止后再保存数据
+            # ------------------------------------------
+            try:
+                self.save_data_to_file()
+            except Exception as e:
+                self.get_logger().error(f"Error saving data: {e}")
+
+            # ------------------------------------------
+            # 3) 自动画图
+            # ------------------------------------------
+            try:
+                os.system("python3 ablation.py cartesian_impedance_controller_data.csv")
+                self.get_logger().info("[Controller] Plotting completed.")
+            except Exception as e:
+                self.get_logger().error(f"Plotting error: {e}")
+
+            # ------------------------------------------
+            # 4) 安全退出
+            # ------------------------------------------
+            rclpy.shutdown()
+            os._exit(0)
+
 
     def stateParameterCallback(self, msg):
         """callback function for /state_parameter subscriber"""
@@ -500,26 +558,42 @@ class CartesianImpedanceController(Node):
             if resp is None:
                 return
 
-            y_hat_future_agg = np.array(resp.y_hat_future_agg, dtype=float)
-            if y_hat_future_agg.shape != (7,):
-                self.get_logger().warn(
-                    f"[Controller] GP returned wrong size y_hat: {y_hat_future_agg.shape}"
-                )
-                return
+            y_cloud = np.array(resp.y_hat_future_agg, dtype=float)
 
-            # 更新云端 y_hat
             with self._gp_lock:
-                self.y_hat_cloud = y_hat_future_agg
+                self.y_hat_cloud = y_cloud
 
-            # === 在 callback 里做融合（本地 + 云端）===
-            # 这里用 self.y_hat_local 是“同一次节拍”时算出的本地结果
-            alpha = 0.5   # 云/本地权重，可以 declare_parameter 出来
-            self.y_hat_combined = (
-                alpha * self.y_hat_local + (1.0 - alpha) * self.y_hat_cloud
-            )
+            # ---------- 融合模式选择 ----------
+            mode = self.gp_mode
+
+            if mode == "local":
+                # local-only
+                self.y_hat_combined = self.y_hat_local
+
+            elif mode == "cloud":
+                # cloud-only
+                self.y_hat_combined = self.y_hat_cloud
+
+            elif mode == "fusion":
+                # 0.5/0.5 融合
+                self.y_hat_combined = 0.5 * self.y_hat_local + 0.5 * self.y_hat_cloud
+
+            elif mode == "history_fusion":
+                # 需要你先添加一个历史平滑：下面我会给你
+                y_hist = self._push_and_smooth_history(self.y_hat_local)
+                self.y_hat_combined = 0.5 * y_hist + 0.5 * self.y_hat_cloud
+
+            elif mode == "none":
+                # 不用 GP
+                self.y_hat_combined = np.zeros(7)
+
+            else:
+                self.get_logger().warn(f"[GP] Unknown mode {mode}, fallback to fusion")
+                self.y_hat_combined = 0.5 * self.y_hat_local + 0.5 * self.y_hat_cloud
 
         except Exception as e:
             self.get_logger().warn(f"[Controller] GP response error: {e}")
+
 
     def start_trajectory(self):
         """start trajectory by calling the joint position adjust service"""
@@ -575,10 +649,51 @@ class CartesianImpedanceController(Node):
         # 4. 直接退出程序
         os._exit(0)
 
-    
+    # ---------------- One dimensional input version
+    # def _load_gp_models(self, dir_path="./new_structure/gp/gp_models"):
+    #     """加载离线训练好的每关节GP：gp_models/joint{j}.pkl"""
+    #     # 打印当前工作目录和 dir_path 的绝对路径，方便调试
+    #     if not self._ensure_skygp_import():
+    #         self.get_logger().error("[GP] skygp import failed; pickle loading will likely fail.")
+
+    #     cwd = os.getcwd()
+    #     abs_dir = os.path.abspath(dir_path)
+    #     self.get_logger().info(f"[GP] 当前工作目录: {cwd}")
+    #     self.get_logger().info(f"[GP] 模型目录绝对路径: {abs_dir}")
+
+    #     loaded = 0
+    #     for j in range(1, 7):
+    #         p = os.path.join(dir_path, f"joint{j}.pkl")
+    #         abs_p = os.path.abspath(p)
+    #         self.get_logger().info(f"[GP] 尝试加载模型: {abs_p}")
+
+    #         if not os.path.isfile(p):
+    #             self.get_logger().warn(f"[GP] model file not found: {abs_p}")
+    #             continue
+
+    #         try:
+    #             with open(p, "rb") as f:
+    #                 pack = pickle.load(f)
+    #             model = pack.get("model", None)
+    #             stats = pack.get("stats", None)  # (Xm, Xs, Ym, Ys)
+    #             if model is None or stats is None:
+    #                 self.get_logger().warn(f"[GP] bad model pack: {abs_p}")
+    #                 continue
+
+    #             Xm, Xs, _, _ = stats
+    #             x_dim = int(np.asarray(Xm).shape[0])
+    #             self.gp_models[j] = {"model": model, "stats": stats, "x_dim": x_dim}
+    #             loaded += 1
+    #             self.get_logger().info(f"[GP] 成功加载关节{j}模型 ({x_dim}维输入) 来自: {abs_p}")
+    #         except Exception as e:
+    #             self.get_logger().error(f"[GP] fail loading {abs_p}: {e}")
+
+    #     self.gp_ready = (loaded > 0)
+    #     self.get_logger().info(f"[GP] 共加载 {loaded} 个模型. ready={self.gp_ready}")
+
     def _load_gp_models(self, dir_path="./new_structure/gp/gp_models"):
-        """加载离线训练好的每关节GP：gp_models/joint{j}.pkl"""
-        # 打印当前工作目录和 dir_path 的绝对路径，方便调试
+        """加载离线训练好的每关节GP，支持高维输入（14或21）"""
+
         if not self._ensure_skygp_import():
             self.get_logger().error("[GP] skygp import failed; pickle loading will likely fail.")
 
@@ -587,8 +702,11 @@ class CartesianImpedanceController(Node):
         self.get_logger().info(f"[GP] 当前工作目录: {cwd}")
         self.get_logger().info(f"[GP] 模型目录绝对路径: {abs_dir}")
 
+        self.gp_models = {}
         loaded = 0
-        for j in range(1, 7):
+
+        # ==== 必须改成加载 1..7 ====
+        for j in range(1, 8):
             p = os.path.join(dir_path, f"joint{j}.pkl")
             abs_p = os.path.abspath(p)
             self.get_logger().info(f"[GP] 尝试加载模型: {abs_p}")
@@ -600,120 +718,183 @@ class CartesianImpedanceController(Node):
             try:
                 with open(p, "rb") as f:
                     pack = pickle.load(f)
-                model = pack.get("model", None)
-                stats = pack.get("stats", None)  # (Xm, Xs, Ym, Ys)
-                if model is None or stats is None:
-                    self.get_logger().warn(f"[GP] bad model pack: {abs_p}")
-                    continue
 
-                Xm, Xs, _, _ = stats
-                x_dim = int(np.asarray(Xm).shape[0])
-                self.gp_models[j] = {"model": model, "stats": stats, "x_dim": x_dim}
+                model = pack["model"]
+                stats = pack["stats"]   # (Xm, Xs, Ym, Ys)
+                Xm, Xs, Ym, Ys = stats
+                x_dim = int(len(Xm))    # 自动推断 14 或 21 维
+
+                self.gp_models[j] = {
+                    "model": model,
+                    "stats": stats,
+                    "x_dim": x_dim
+                }
+
                 loaded += 1
-                self.get_logger().info(f"[GP] 成功加载关节{j}模型 ({x_dim}维输入) 来自: {abs_p}")
+                self.get_logger().info(f"[GP] 成功加载关节{j}模型, x_dim={x_dim}")
+
             except Exception as e:
                 self.get_logger().error(f"[GP] fail loading {abs_p}: {e}")
 
         self.gp_ready = (loaded > 0)
-        self.get_logger().info(f"[GP] 共加载 {loaded} 个模型. ready={self.gp_ready}")
+        self.get_logger().info(f"[GP] 共加载 {loaded} 个模型，ready={self.gp_ready}")
+
+    # one dimensional version
+    # def _gp_predict_and_update(self, q, dq_des_joint, ddq_des_joint, tau_residual):
+    #     """本地 GP：预测 + 在线更新（每次控制循环调用一次）"""
+    #     # 不再用 _gp_stop，这个标志在控制器里没有定义
+    #     if not self.gp_ready or not self.use_gp:
+    #         return np.zeros(7, dtype=float)
+
+    #     y_hat = np.zeros(7, dtype=float)
+
+    #     for j in range(1, 7):
+    #         pack = self.gp_models.get(j)
+    #         if pack is None:
+    #             self.get_logger().warn(f"[GP-local] joint {j}: no model pack")
+    #             continue
+
+    #         model = pack["model"]
+    #         Xm, Xs, Ym, Ys = pack["stats"]
+    #         x_dim = pack["x_dim"]
+
+    #         # === 1. 构造输入 ===
+    #         if x_dim == 3:
+    #             x = np.array([q[j-1], dq_des_joint[j-1], ddq_des_joint[j-1]], dtype=np.float32)
+    #         elif x_dim == 2:
+    #             x = np.array([q[j-1], ddq_des_joint[j-1]], dtype=np.float32)
+    #         else:
+    #             x = np.array([q[j-1]], dtype=np.float32)
+
+    #         if not np.all(np.isfinite(x)):
+    #             self.get_logger().warn(f"[GP-debug] joint {j}: invalid x = {x}")
+    #             continue
+
+    #         Xm = np.asarray(Xm, dtype=np.float32)
+    #         Xs = np.asarray(Xs, dtype=np.float32)
+    #         Ym = float(np.asarray(Ym)[0])
+    #         Ys = float(np.asarray(Ys)[0]) if float(np.asarray(Ys)[0]) != 0.0 else 1.0
+    #         # Xs[Xs < 1e-9] = 1.0
+
+    #         # 标准化
+    #         x_std = (x - Xm[:x_dim]) / Xs[:x_dim]
+    #         # x_std = np.clip(x_std, -5.0, 5.0)
+
+    #         # === 2. 预测 ===
+    #         try:
+    #             mu_std, var_std = model.predict(x_std)
+    #             mu_std = float(mu_std[0])
+    #             sigma_std = float(np.sqrt(var_std[0])) if np.all(np.isfinite(var_std)) else 0.0
+    #         except Exception as e:
+    #             self.get_logger().error(f"[GP-debug] joint {j}: predict failed: {e}")
+    #             continue
+
+    #         if not np.isfinite(mu_std):
+    #             self.get_logger().warn(f"[GP-debug] joint {j}: mu_std not finite ({mu_std}) → set 0")
+    #             mu_std = 0.0
+
+    #         # === 标准化反变换 ===
+    #         y_pred = mu_std * Ys + Ym
+    #         sigma = sigma_std * Ys   # 方差反变换
+
+    #         # === 基于方差的置信加权 ===
+    #         alpha = 0.5  # <-- 可调参数，越大抑制越强
+    #         w = 1.0 / (1.0 + alpha * sigma**2)
+    #         # w = 1.0
+    #         y_pred_weighted = y_pred * w
+
+    #         # === 存入结果 ===
+    #         y_hat[j-1] = y_pred_weighted
+
+    #         # 额外打印调试信息
+    #         # self.get_logger().info(
+    #         #     # f"[GP-debug] joint {j}: μ={y_pred:.3f}, σ={sigma:.3f}, w={w:.3f} → weighted={y_pred_weighted:.3f}"
+    #         # )
+
+    #         # === 3. 在线更新 ===
+    #         y_real = float(tau_residual[j-1])
+    #         if not np.isfinite(y_real):
+    #             self.get_logger().warn(f"[GP-debug] joint {j}: invalid y_real={y_real}")
+    #             continue
+    #         y_std = (y_real - Ym) / Ys
+
+    #         if np.isfinite(y_std):
+    #             try:
+    #                 model.add_point(x_std, np.array([y_std], dtype=np.float32))
+    #                 # self.get_logger().info(
+    #                 #     f"[GP-debug] joint {j}: update ok (y_real={y_real:.4f}, y_std={y_std:.4f})"
+    #                 # )
+    #             except Exception as e:
+    #                 self.get_logger().error(f"[GP-debug] joint {j}: add_point failed: {e}")
+    #         else:
+    #             self.get_logger().warn(f"[GP-debug] joint {j}: skip update (non-finite y_std={y_std})")
+    #     return y_hat
 
     def _gp_predict_and_update(self, q, dq_des_joint, ddq_des_joint, tau_residual):
-        """本地 GP：预测 + 在线更新（每次控制循环调用一次）"""
-        # 不再用 _gp_stop，这个标志在控制器里没有定义
+        """
+        本地 GP：高维输入版本（14维 or 21维）
+        每个关节都使用相同的 x_full = concat([q, dq, ddq])
+        """
+
         if not self.gp_ready or not self.use_gp:
             return np.zeros(7, dtype=float)
 
         y_hat = np.zeros(7, dtype=float)
 
+        # ==================================================
+        # 1) 构造统一的高维输入 x_full
+        # ==================================================
+        # 如果你的训练是 q + dq + ddq → 21 维
+        # x_full = np.concatenate([q, dq_des_joint, ddq_des_joint]).astype(np.float32)
+
+        # 如果你训练使用的是 q + dq → 14 维，请改成：
+        x_full = np.concatenate([q, dq_des_joint]).astype(np.float32)
+
+        # ==================================================
+        # 2) 每个关节都用同一 x_full 预测
+        # ==================================================
         for j in range(1, 7):
+
             pack = self.gp_models.get(j)
             if pack is None:
-                self.get_logger().warn(f"[GP-local] joint {j}: no model pack")
                 continue
 
             model = pack["model"]
             Xm, Xs, Ym, Ys = pack["stats"]
-            x_dim = pack["x_dim"]
-
-            # === 1. 构造输入 ===
-            if x_dim == 3:
-                x = np.array([q[j-1], dq_des_joint[j-1], ddq_des_joint[j-1]], dtype=np.float32)
-            elif x_dim == 2:
-                x = np.array([q[j-1], ddq_des_joint[j-1]], dtype=np.float32)
-            else:
-                x = np.array([q[j-1]], dtype=np.float32)
-
-            if not np.all(np.isfinite(x)):
-                self.get_logger().warn(f"[GP-debug] joint {j}: invalid x = {x}")
-                continue
-
+            x_dim = pack["x_dim"]  # 训练时的真实维度
+            print("dimension of x:",x_dim)
             Xm = np.asarray(Xm, dtype=np.float32)
             Xs = np.asarray(Xs, dtype=np.float32)
-            Ym = float(np.asarray(Ym)[0])
-            Ys = float(np.asarray(Ys)[0]) if float(np.asarray(Ys)[0]) != 0.0 else 1.0
-            # Xs[Xs < 1e-9] = 1.0
+            Ym = float(Ym[0])
+            Ys = float(Ys[0]) if float(Ys[0]) != 0.0 else 1.0
 
-            # 标准化
-            x_std = (x - Xm[:x_dim]) / Xs[:x_dim]
-            # x_std = np.clip(x_std, -5.0, 5.0)
+            # -------- 标准化整个向量 --------
+            x_std = (x_full[:x_dim] - Xm[:x_dim]) / Xs[:x_dim]
 
-            # === 2. 预测 ===
-            try:
-                mu_std, var_std = model.predict(x_std)
-                mu_std = float(mu_std[0])
-                sigma_std = float(np.sqrt(var_std[0])) if np.all(np.isfinite(var_std)) else 0.0
-            except Exception as e:
-                self.get_logger().error(f"[GP-debug] joint {j}: predict failed: {e}")
-                continue
+            # -------- GP 预测 --------
+            mu_std, var_std = model.predict(x_std.astype(np.float32))
+            mu_std = float(mu_std[0])
 
-            if not np.isfinite(mu_std):
-                self.get_logger().warn(f"[GP-debug] joint {j}: mu_std not finite ({mu_std}) → set 0")
-                mu_std = 0.0
-
-            # === 标准化反变换 ===
+            # -------- 反标准化 --------
             y_pred = mu_std * Ys + Ym
-            sigma = sigma_std * Ys   # 方差反变换
 
-            # === 基于方差的置信加权 ===
-            alpha = 0.5  # <-- 可调参数，越大抑制越强
-            w = 1.0 / (1.0 + alpha * sigma**2)
-            # w = 1.0
-            y_pred_weighted = y_pred * w
+            y_hat[j - 1] = y_pred
 
-            # === 存入结果 ===
-            y_hat[j-1] = y_pred_weighted
-
-            # 额外打印调试信息
-            # self.get_logger().info(
-            #     # f"[GP-debug] joint {j}: μ={y_pred:.3f}, σ={sigma:.3f}, w={w:.3f} → weighted={y_pred_weighted:.3f}"
-            # )
-
-            # === 3. 在线更新 ===
-            y_real = float(tau_residual[j-1])
-            if not np.isfinite(y_real):
-                self.get_logger().warn(f"[GP-debug] joint {j}: invalid y_real={y_real}")
-                continue
+            # -------- 在线更新 --------
+            y_real = float(tau_residual[j - 1])
             y_std = (y_real - Ym) / Ys
 
             if np.isfinite(y_std):
                 try:
-                    model.add_point(x_std, np.array([y_std], dtype=np.float32))
-                    # self.get_logger().info(
-                    #     f"[GP-debug] joint {j}: update ok (y_real={y_real:.4f}, y_std={y_std:.4f})"
-                    # )
+                    model.add_point(
+                        x_std.astype(np.float32),
+                        np.array([y_std], dtype=np.float32)
+                    )
                 except Exception as e:
-                    self.get_logger().error(f"[GP-debug] joint {j}: add_point failed: {e}")
-            else:
-                self.get_logger().warn(f"[GP-debug] joint {j}: skip update (non-finite y_std={y_std})")
+                    self.get_logger().error(f"[GP] joint{j} add_point failed: {e}")
 
-        # # 限幅
-        # norm6 = np.linalg.norm(y_hat[:6])
-        # if norm6 > 12.0:
-        #     y_hat[:6] *= (12.0 / (norm6 + 1e-9))
-        #     self.get_logger().warn(f"[GP-debug] y_hat norm={norm6:.3f} → clipped")
-
-        # self.get_logger().info(f"[GP-debug] final y_hat={np.round(y_hat,4)}")
         return y_hat
+
 
     def _ensure_skygp_import(self):
         """
