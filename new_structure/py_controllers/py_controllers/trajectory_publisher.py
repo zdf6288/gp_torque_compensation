@@ -77,10 +77,14 @@ class TrajectoryPublisher(Node):
 
         # Ablation parameters
         self.gp_mode_pub = self.create_publisher(String, "/gp_mode", 10)
-        self.modes = ["none", "local", "cloud", "fusion", "history_fusion"]
+        # self.modes = ["none", "local", "cloud", "fusion", "history_fusion"]
+        self.modes = ["local"]
         self.current_mode_index = 0
         self.period = 1.0 / self.frequency
         self.last_round = -1
+
+        self.declare_parameter("rounds_per_mode", 3)
+        self.rounds_per_mode = self.get_parameter("rounds_per_mode").value
 
         self.declare_parameter("max_rounds", 4)
         self.max_rounds = self.get_parameter("max_rounds").value
@@ -277,36 +281,40 @@ class TrajectoryPublisher(Node):
             if current_round != self.last_round:
                 self.last_round = current_round
 
-                # 切换 GP 模式
-                mode_msg = String()
-                mode_msg.data = self.modes[self.current_mode_index]
-                self.gp_mode_pub.publish(mode_msg)
+                # === 是否该切换 mode ===
+                if current_round > 0 and (current_round % self.rounds_per_mode) == 0:
+                    self.current_mode_index = (self.current_mode_index + 1) % len(self.modes)
 
-                self.get_logger().info(
-                    f"[TrajectoryPublisher] === New Round {current_round} | Switching GP Mode → {mode_msg.data}"
-                )
+                    mode_msg = String()
+                    mode_msg.data = self.modes[self.current_mode_index]
+                    self.gp_mode_pub.publish(mode_msg)
 
-                self.current_mode_index = (self.current_mode_index + 1) % len(self.modes)
+                    self.get_logger().info(
+                        f"[TrajectoryPublisher] Switching GP Mode → {mode_msg.data}"
+                    )
+
 
             # ========== Auto stop here ==========
-            if current_round >= self.max_rounds:
+            total_rounds = self.rounds_per_mode * len(self.modes)
+
+            if current_round >= total_rounds:
                 self.get_logger().info(
-                    f"Reached max rounds ({self.max_rounds}), stopping trajectory publisher..."
+                    f"Reached total {total_rounds} rounds, stopping trajectory publisher..."
                 )
 
-                # 1. 停止 recording
+                # Stop recording
                 stop_msg = Bool()
                 stop_msg.data = False
                 self.data_recording_publisher.publish(stop_msg)
 
-                # 2. 通知 controller 停止
+                # Notify controller
                 shutdown_msg = Bool()
                 shutdown_msg.data = True
                 self.shutdown_pub.publish(shutdown_msg)
 
-                # 3. 自己退出
                 rclpy.shutdown()
                 return
+
 
     def get_future_task_space(self, t_delay):
         """

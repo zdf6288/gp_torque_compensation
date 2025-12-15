@@ -452,19 +452,26 @@ class CartesianImpedanceController(Node):
                 self.gp_counter += 1
                 if self.gp_counter % self.gp_stride == 0:
                     # 1) 本地 GP 立刻算一次（同步）
+                    # self.y_hat_local = self._gp_predict_and_update(
+                    #     self.q,
+                    #     self.dq_des_joint,
+                    #     self.ddq_des_joint,
+                    #     self.tau_residual_filtered,
+                    # )
                     self.y_hat_local = self._gp_predict_and_update(
                         self.q,
-                        self.dq_des_joint,
+                        dq,
                         self.ddq_des_joint,
                         self.tau_residual_filtered,
-                    )
+                    )   
 
                     # 2) 云端 GP：发异步请求（同一时刻的 q/dq/ddq/残差）
                     if self.gp_client.service_is_ready():
                         # print("updating!!!!!!!!!!!!!!!!!")
                         req = AsyncGPpredict.Request()
                         req.q = self.q.astype(np.float32).tolist()
-                        req.dq_des_joint = self.dq_des_joint.astype(np.float32).tolist()
+                        # req.dq_des_joint = self.dq_des_joint.astype(np.float32).tolist()
+                        req.dq_des_joint = dq.astype(np.float32).tolist()
                         req.ddq_des_joint = self.ddq_des_joint.astype(np.float32).tolist()
                         req.tau_residual = self.tau_residual_filtered.astype(np.float32).tolist()
 
