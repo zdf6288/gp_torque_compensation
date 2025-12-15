@@ -96,9 +96,9 @@ class GPServer(Node):
             # =====================================================
             # 设置 response
             # =====================================================
-            response.y_hat_current = y_hat_future.tolist()
-            response.y_hat_future  = y_hat_future.tolist()
-            response.y_hat_future_agg = y_hat_future.tolist()
+            response.y_hat_current = y_hat_current.tolist()
+            response.y_hat_future  = y_hat_current.tolist()
+            response.y_hat_future_agg = y_hat_current.tolist()
 
         except Exception as e:
             self.get_logger().error(f"[GPServer] callback error: {e}")

@@ -197,7 +197,7 @@ class CartesianImpedanceController(Node):
             '/future_task_space'
         )
         self.future_delay = self.declare_parameter(
-            'future_delay', 0.025  # 默认 60 ms
+            'future_delay', 0.06  # 默认 60 ms
         ).value
 
         # 存最新一次未来轨迹
@@ -423,7 +423,7 @@ class CartesianImpedanceController(Node):
 
             # === 控制：先用“上一帧”融合好的 y_hat_combined 做补偿 ===
             if self.gp_active:
-                tau = tau - self.y_hat_combined
+                tau = tau - self.y_hat_local
 
             # --- 记录（含最终补偿用的 y_hat_combined）---
             if self.data_recording_enabled:
@@ -572,6 +572,7 @@ class CartesianImpedanceController(Node):
 
             # ---------- 融合模式选择 ----------
             mode = self.gp_mode
+            mode = "local"
 
             if mode == "local":
                 # local-only

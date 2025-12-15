@@ -84,7 +84,7 @@ def build_rBCM(x_dim, hps,
 def main():
     parser = argparse.ArgumentParser(description="Train per-joint GP models (full input)")
 
-    parser.add_argument("--data", default="gp_train_full_input.npz",
+    parser.add_argument("--data", default="gp_train_data_per_joint_no_filter.npz",
                         help="高维训练数据 npz （包含 X1..X7, Y1..Y7）")
     parser.add_argument("--joint", default="all",
                         help="'all' 或 1..7")
