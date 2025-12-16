@@ -96,9 +96,9 @@ class GPServer(Node):
             # =====================================================
             # 设置 response
             # =====================================================
-            response.y_hat_current = y_hat_current.tolist()
-            response.y_hat_future  = y_hat_current.tolist()
-            response.y_hat_future_agg = y_hat_current.tolist()
+            response.y_hat_current = y_hat_future.tolist()
+            response.y_hat_future  = y_hat_future.tolist()
+            response.y_hat_future_agg = y_hat_future.tolist()
 
         except Exception as e:
             self.get_logger().error(f"[GPServer] callback error: {e}")
@@ -329,7 +329,7 @@ class GPServer(Node):
         self.gp_models = {}
 
         for j in range(1, 7):
-            p = os.path.join(dir_path, f"joint{j}.pkl")
+            p = os.path.join(dir_path, f"joint{j}_cloud.pkl")
             abs_p = os.path.abspath(p)
             if not os.path.isfile(p):
                 self.get_logger().warn(f"[GP] model file not found: {abs_p}")

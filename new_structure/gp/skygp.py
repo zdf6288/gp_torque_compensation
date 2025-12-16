@@ -365,96 +365,101 @@ class SkyGP_rBCM:
     # ---------- 预测 ----------
 
     def predict(self, x_query):
-        x_query = np.asarray(x_query).reshape(-1)
-        self.last_prediction_cache.clear()
+        try:
+            x_query = np.asarray(x_query).reshape(-1)
+            self.last_prediction_cache.clear()
 
-        if len(self.expert_centers) == 0:
-            return np.zeros(self.y_dim), np.ones(self.y_dim) * 10.0
+            if len(self.expert_centers) == 0:
+                return np.zeros(self.y_dim), np.ones(self.y_dim) * 10.0
 
-        raw_ls = self.model_params[self.expert_creation_order[0]]["log_lengthscale"]
-        lengthscale_ref = np.exp(raw_ls[:, 0]) if np.ndim(raw_ls) == 2 else np.exp(raw_ls)
+            raw_ls = self.model_params[self.expert_creation_order[0]]["log_lengthscale"]
+            lengthscale_ref = np.exp(raw_ls[:, 0]) if np.ndim(raw_ls) == 2 else np.exp(raw_ls)
 
-        # if self.last_x is not None:
-        #     norm_dist = np.linalg.norm((x_query - self.last_x) / lengthscale_ref)
-        # else:
-        #     norm_dist = np.inf
+            # if self.last_x is not None:
+            #     norm_dist = np.linalg.norm((x_query - self.last_x) / lengthscale_ref)
+            # else:
+            #     norm_dist = np.inf
 
-        # search_k = int(min(self.max_experts, max(1, np.exp(norm_dist / self.timescale))))
-        # # print("search_k:",search_k)
-        search_k = 1
-        n_experts = len(self.expert_centers)
+            # search_k = int(min(self.max_experts, max(1, np.exp(norm_dist / self.timescale))))
+            # # print("search_k:",search_k)
+            search_k = 1
+            n_experts = len(self.expert_centers)
 
-        if self.last_expert_idx is None:
-            candidate_idxs = list(range(n_experts))
-        else:
-            half_k = search_k // 2
-            start = max(0, self.last_expert_idx - half_k)
-            end = min(n_experts, self.last_expert_idx + half_k + 1)
-            candidate_idxs = list(range(start, end))
+            if self.last_expert_idx is None:
+                candidate_idxs = list(range(n_experts))
+            else:
+                half_k = search_k // 2
+                start = max(0, self.last_expert_idx - half_k)
+                end = min(n_experts, self.last_expert_idx + half_k + 1)
+                candidate_idxs = list(range(start, end))
 
-        min_weight_threshold = 1e-3
-        valid_idxs = [idx for idx in candidate_idxs if self.expert_weights[idx] > min_weight_threshold]
+            min_weight_threshold = 1e-3
+            valid_idxs = [idx for idx in candidate_idxs if self.expert_weights[idx] > min_weight_threshold]
 
-        outputscale, _, lengthscale_all = self.pretrained_params
-        sigma_f_ref = np.atleast_1d(outputscale)[0]
-        lengthscale_all = lengthscale_all if np.ndim(lengthscale_all) == 1 else lengthscale_all[:, 0]
+            outputscale, _, lengthscale_all = self.pretrained_params
+            sigma_f_ref = np.atleast_1d(outputscale)[0]
+            lengthscale_all = lengthscale_all if np.ndim(lengthscale_all) == 1 else lengthscale_all[:, 0]
 
-        dists = []
-        for idx in valid_idxs:
-            if self.localCount[idx] == 0:
-                continue
-            k_val = self.kernel_np(self.expert_centers[idx][:, None], x_query[:, None], lengthscale_all, sigma_f_ref)[0, 0]
-            dists.append((k_val, idx))
-        if not dists:
-            return np.zeros(self.y_dim), np.ones(self.y_dim) * 10.0
+            dists = []
+            for idx in valid_idxs:
+                if self.localCount[idx] == 0:
+                    continue
+                k_val = self.kernel_np(self.expert_centers[idx][:, None], x_query[:, None], lengthscale_all, sigma_f_ref)[0, 0]
+                dists.append((k_val, idx))
+            if not dists:
+                return np.zeros(self.y_dim), np.ones(self.y_dim) * 10.0
 
-        dists.sort(reverse=True)
-        selected = [idx for _, idx in dists[: self.nearest_k]]
-        self.last_sorted_experts = selected
-        self.last_x = x_query
-        self.last_expert_idx = selected[0]
+            dists.sort(reverse=True)
+            selected = [idx for _, idx in dists[: self.nearest_k]]
+            self.last_sorted_experts = selected
+            self.last_x = x_query
+            self.last_expert_idx = selected[0]
 
-        mus, vars_ = [], []
-        for idx in selected:
-            L = self.L_all[idx]
-            alpha = self.alpha_all[idx]
-            X_snapshot = self.X_list[idx][:, : self.localCount[idx]]
-            n_valid = self.localCount[idx]
+            mus, vars_ = [], []
+            for idx in selected:
+                L = self.L_all[idx]
+                alpha = self.alpha_all[idx]
+                X_snapshot = self.X_list[idx][:, : self.localCount[idx]]
+                n_valid = self.localCount[idx]
 
-            mu = np.zeros(self.y_dim)
-            var = np.zeros(self.y_dim)
-            for p in range(self.y_dim):
-                params = self.model_params[self.expert_creation_order[idx]]
-                sigma_f = np.exp(params["log_sigma_f"][p])
-                sigma_n = np.exp(params["log_sigma_n"][p])
-                lengthscale = (
-                    np.exp(params["log_lengthscale"][:, p]) if self.y_dim > 1 else np.exp(params["log_lengthscale"])
-                )
+                mu = np.zeros(self.y_dim)
+                var = np.zeros(self.y_dim)
+                for p in range(self.y_dim):
+                    params = self.model_params[self.expert_creation_order[idx]]
+                    sigma_f = np.exp(params["log_sigma_f"][p])
+                    sigma_n = np.exp(params["log_sigma_n"][p])
+                    lengthscale = (
+                        np.exp(params["log_lengthscale"][:, p]) if self.y_dim > 1 else np.exp(params["log_lengthscale"])
+                    )
 
-                k_star = self.kernel_np(X_snapshot, x_query[:, None], lengthscale, sigma_f).flatten()
-                k_xx = sigma_f**2
+                    k_star = self.kernel_np(X_snapshot, x_query[:, None], lengthscale, sigma_f).flatten()
+                    k_xx = sigma_f**2
 
-                mu[p] = np.dot(k_star, alpha[:n_valid, p])
-                v = solve_triangular(L[:n_valid, :n_valid], k_star, lower=True)
-                var[p] = max(k_xx - np.sum(v**2), 1e-12)
+                    mu[p] = np.dot(k_star, alpha[:n_valid, p])
+                    v = solve_triangular(L[:n_valid, :n_valid], k_star, lower=True)
+                    var[p] = max(k_xx - np.sum(v**2), 1e-12)
 
-                if idx not in self.last_prediction_cache:
-                    self.last_prediction_cache[idx] = {}
-                self.last_prediction_cache[idx][p] = {"k_star": k_star.copy(), "v": v.copy(), "mu_part": mu[p]}
+                    if idx not in self.last_prediction_cache:
+                        self.last_prediction_cache[idx] = {}
+                    self.last_prediction_cache[idx][p] = {"k_star": k_star.copy(), "v": v.copy(), "mu_part": mu[p]}
 
-            mus.append(mu)
-            vars_.append(var)
+                mus.append(mu)
+                vars_.append(var)
 
-        mus = np.stack(mus)
-        vars_ = np.stack(vars_)
-        inv_vars = 1.0 / (vars_ + 1e-9)
+            mus = np.stack(mus)
+            vars_ = np.stack(vars_)
+            inv_vars = 1.0 / (vars_ + 1e-9)
 
-        sigma0_sq = np.exp(self.model_params[self.expert_creation_order[selected[0]]]["log_sigma_f"][0]) ** 2
-        mu_weighted = np.sum(inv_vars * mus, axis=0)
-        denom = np.sum(inv_vars, axis=0)
-        denom_corr = denom - (len(mus) - 1) / sigma0_sq
-        mu_bcm = mu_weighted / (denom_corr + 1e-9)
-        var_bcm = 1.0 / (denom_corr + 1e-9)
+            sigma0_sq = np.exp(self.model_params[self.expert_creation_order[selected[0]]]["log_sigma_f"][0]) ** 2
+            mu_weighted = np.sum(inv_vars * mus, axis=0)
+            denom = np.sum(inv_vars, axis=0)
+            denom_corr = denom - (len(mus) - 1) / sigma0_sq
+            mu_bcm = mu_weighted / (denom_corr + 1e-9)
+            var_bcm = 1.0 / (denom_corr + 1e-9)
+            # print("mu:",mu_bcm)
+        except Exception as e:
+            print(e)
+          
         return mu_bcm, var_bcm
 
     # ---------- 超参数优化（全局） ----------
@@ -654,3 +659,27 @@ class SkyGP_rBCM:
         y_pred, var = self.predict(x_new)
         self.add_point(x_new, y_new)
         return y_pred, var
+
+    def serialize(self):
+        return {
+            "x_dim": self.x_dim,
+            "y_dim": self.y_dim,
+            "max_data": self.max_data,
+            "nearest_k": self.nearest_k,
+            "max_experts": self.max_experts,
+            "replacement": self.replacement,
+            "timescale": self.timescale,
+            "pretrained_params": self.pretrained_params,
+
+            # 全部专家数据
+            "expert_creation_order": self.expert_creation_order,
+            "X_list": self.X_list,
+            "Y_list": self.Y_list,
+            "L_all": self.L_all,
+            "alpha_all": self.alpha_all,
+            "localCount": self.localCount,
+            "expert_centers": self.expert_centers,
+            "drop_centers": self.drop_centers,
+            "drop_counts": self.drop_counts,
+            "model_params": self.model_params,
+        }
