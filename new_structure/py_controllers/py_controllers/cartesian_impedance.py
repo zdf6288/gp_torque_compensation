@@ -133,7 +133,7 @@ class CartesianImpedanceController(Node):
         self.ddq_des_joint = np.zeros(7)
         self.tau_residual = np.zeros(7)
 
-        self.gp_stride = 1      # 每 10 个 state callback 做一次 GP（你可以调）
+        self.gp_stride = 20      # 每 10 个 state callback 做一次 GP（你可以调）
         self.gp_counter = 0
 
         self.y_hat_filtered = np.zeros(7)
@@ -197,7 +197,7 @@ class CartesianImpedanceController(Node):
             '/future_task_space'
         )
         self.future_delay = self.declare_parameter(
-            'future_delay', 0.01  # 默认 60 ms
+            'future_delay', 0.02  # 默认 60 ms
         ).value
 
         # 存最新一次未来轨迹
@@ -423,7 +423,7 @@ class CartesianImpedanceController(Node):
 
             # === 控制：先用“上一帧”融合好的 y_hat_combined 做补偿 ===
             if self.gp_active:
-                tau = tau - self.y_hat_cloud
+                tau = tau - self.y_hat_combined
 
             # --- 记录（含最终补偿用的 y_hat_combined）---
             if self.data_recording_enabled:
@@ -452,12 +452,6 @@ class CartesianImpedanceController(Node):
                 self.gp_counter += 1
                 if self.gp_counter % self.gp_stride == 0:
                     # 1) 本地 GP 立刻算一次（同步）
-                    # self.y_hat_local = self._gp_predict_and_update(
-                    #     self.q,
-                    #     self.dq_des_joint,
-                    #     self.ddq_des_joint,
-                    #     self.tau_residual_filtered,
-                    # )
                     self.y_hat_local = self._gp_predict_and_update(
                         self.q,
                         dq,
@@ -466,63 +460,44 @@ class CartesianImpedanceController(Node):
                     )   
 
                 # 2) 云端 GP：发异步请求（同一时刻的 q/dq/ddq/残差）
+                # === CLOUD GP 调用 ===
                 if self.gp_client.service_is_ready():
-                    # print("updating!!!!!!!!!!!!!!!!!")
+
                     req = AsyncGPpredict.Request()
+
+                    # ---- 当前输入 ----
                     req.q = self.q.astype(np.float32).tolist()
-                    # req.dq_des_joint = self.dq_des_joint.astype(np.float32).tolist()
                     req.dq_des_joint = dq.astype(np.float32).tolist()
                     req.ddq_des_joint = self.ddq_des_joint.astype(np.float32).tolist()
                     req.tau_residual = self.tau_residual_filtered.astype(np.float32).tolist()
 
-                    # 未来特征：如果开启延迟补偿，就用最新 future_traj 算
-                    if self._latest_future_traj is not None:
-                        x_f  = self._latest_future_traj["x_des"]
-                        dx_f = self._latest_future_traj["dx_des"]
-                        ddx_f = self._latest_future_traj["ddx_des"]
+                    # ============================================================
+                    #   未来输入（不依赖 future_traj，不依赖任务空间）
+                    #   永远可计算 —— 保证 cloud GP 每次都能收到预测输入
+                    # ============================================================
 
-                        dx_f_5  = dx_f[:5]
-                        ddx_f_5 = ddx_f[:5]
-                        dq_future  = jacobian_pinv @ dx_f_5
-                        ddq_future = jacobian_pinv @ (ddx_f_5 - djacobian @ dq)
+                    delay = float(self.future_delay)
 
-                        # ==== 未来任务空间采样 ====
-                        future_samples = self._sample_future_task_space(
-                            dx_f, ddx_f, 
-                            n_samples=self.gp_sample_n,
-                            sigma=self.gp_sample_sigma
-                        )
+                    q_now  = self.q
+                    dq_now = dq
+                    ddq_now = self.ddq_des_joint
 
-                        # ----- 未来样本收集 -----
-                        dq_samples = []
-                        ddq_samples = []
+                    # ---- 常加速度未来预测 ----
+                    q_future  = q_now + dq_now * delay + 0.5 * ddq_now * delay**2
+                    dq_future = dq_now + ddq_now * delay
 
-                        for dx_f_i, ddx_f_i in future_samples:
+                    # ---- cloud GP 特征输入 ----
+                    req.dq_des_joint_future  = dq_future.astype(np.float32).tolist()
+                    req.ddq_des_joint_future = ddq_now.astype(np.float32).tolist()
 
-                            dx_f_i_5  = dx_f_i[:5]
-                            ddx_f_i_5 = ddx_f_i[:5]
+                    # ---- 不使用未来采样 ----
+                    req.n_future_samples = 0
+                    req.dq_future_samples_flat = []
+                    req.ddq_future_samples_flat = []
 
-                            dq_future_i  = jacobian_pinv @ dx_f_i_5
-                            ddq_future_i = jacobian_pinv @ (ddx_f_i_5 - djacobian @ dq)
-
-                            dq_samples.append(dq_future_i.astype(np.float32))
-                            ddq_samples.append(ddq_future_i.astype(np.float32))
-
-                        # ----- 转成 flatten 数组 -----
-                        dq_samples_flat  = np.array(dq_samples, dtype=np.float32).reshape(-1)
-                        ddq_samples_flat = np.array(ddq_samples, dtype=np.float32).reshape(-1)
-
-                        # ----- 写入 request -----
-                        req.n_future_samples = len(dq_samples)
-                        req.dq_future_samples_flat  = dq_samples_flat.tolist()
-                        req.ddq_future_samples_flat = ddq_samples_flat.tolist()
-
-                        # ----- 主 future 状态 -----
-                        req.dq_des_joint_future  = dq_future.astype(np.float32).tolist()
-                        req.ddq_des_joint_future = ddq_future.astype(np.float32).tolist()
-
-                        # 如果你现在云端只用当前特征，也可以都设 0
-
+                    # ============================================================
+                    #   发送异步 cloud GP 请求
+                    # ============================================================
                     future = self.gp_client.call_async(req)
                     future.add_done_callback(self._gp_response_callback)
 
@@ -546,6 +521,11 @@ class CartesianImpedanceController(Node):
         except Exception as e:
             self.get_logger().error(f'Parameter error: {str(e)}')
     
+    def predict_future_joint_state(q, dq, ddq_des, delay):
+        dq_future = dq + ddq_des * delay
+        q_future  = q + dq * delay + 0.5 * ddq_des * delay**2
+        return q_future, dq_future
+
     def _sample_future_task_space(self, dx_f, ddx_f, n_samples=10, sigma=0.02):
         samples = []
         for _ in range(n_samples):
@@ -572,7 +552,7 @@ class CartesianImpedanceController(Node):
 
             # ---------- 融合模式选择 ----------
             mode = self.gp_mode
-            mode = "local"
+            mode = "fusion"
 
             if mode == "local":
                 # local-only
