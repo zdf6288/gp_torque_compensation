@@ -559,7 +559,7 @@ class CartesianImpedanceController(Node):
 
             # ---------- 融合模式选择 ----------
             mode = self.gp_mode
-            mode = "none"
+            mode = "local"
 
             if mode == "local":
                 # local-only
@@ -836,8 +836,8 @@ class CartesianImpedanceController(Node):
                 header.extend([f'y_hat_{i+1}' for i in range(7)])          # combined
                 header.extend([f'y_hat_local_{i+1}' for i in range(7)])    # local
                 header.extend([f'y_hat_cloud_{i+1}' for i in range(7)])    # cloud
+                header.extend([f'y_hat_mem_{i+1}' for i in range(7)])    # cloud
                 header.extend([f'tau_residual_{i+1}' for i in range(7)])
-                header.extend([f'y_hat_mem_{i+1}' for i in range(7)])      # ⭐ memory
                 writer.writerow(header)
 
                 for i in range(min_len):
@@ -878,12 +878,12 @@ class CartesianImpedanceController(Node):
                         row.extend(self.y_hat_cloud_history[i])
                     else:
                         row.extend([0.0]*7)
-                    
+
                     if i < len(self.y_hat_mem_history):
                         row.extend(self.y_hat_mem_history[i])
                     else:
                         row.extend([0.0]*7)
-
+                    
                     if i < len(self.tau_residual_history):
                         row.extend(self.tau_residual_history[i])
                     else:

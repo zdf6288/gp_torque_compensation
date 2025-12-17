@@ -288,23 +288,16 @@ def plot_data_from_csv(csv_filename):
     yhat_comb_cols  = cols_1to7(df, 'y_hat_')
     yhat_local_cols = cols_1to7(df, 'y_hat_local_')
     yhat_cloud_cols = cols_1to7(df, 'y_hat_cloud_')
+    yhat_mem_cols = cols_1to7(df,'y_hat_mem_')
     res_cols        = cols_1to7(df, 'tau_residual_')
-    yhat_mem_cols   = cols_1to7(df, 'y_hat_mem_')
 
-
-    if len(res_cols) == 7 and (
-        len(yhat_comb_cols)  == 7 or
-        len(yhat_local_cols) == 7 or
-        len(yhat_cloud_cols) == 7 or
-        len(yhat_mem_cols)   == 7
-    ):
-
+    if len(res_cols) == 7 and (len(yhat_comb_cols) == 7 or len(yhat_local_cols) == 7 or len(yhat_cloud_cols) == 7 or len(yhat_mem_cols) == 7):
         TR = df[res_cols].values       # shape [N,7]
 
         YH_comb  = df[yhat_comb_cols].values  if len(yhat_comb_cols)  == 7 else None
         YH_local = df[yhat_local_cols].values if len(yhat_local_cols) == 7 else None
         YH_cloud = df[yhat_cloud_cols].values if len(yhat_cloud_cols) == 7 else None
-        YH_mem   = df[yhat_mem_cols].values   if len(yhat_mem_cols)   == 7 else None
+        YH_mem = df[yhat_mem_cols].values if len(yhat_mem_cols) == 7 else None
 
         fig3, axes3 = plt.subplots(3, 3, figsize=(18, 14))
         fig3.suptitle('Per-Joint: GP predictions vs tau_residual', fontsize=14)
@@ -334,17 +327,9 @@ def plot_data_from_csv(csv_filename):
                 yh_cl = YH_cloud[:, j]
                 ax.plot(time_history, yh_cl, ':', linewidth=1.2, alpha=0.8, label='y_hat_cloud')
 
-            # 画 memory
             if YH_mem is not None:
-                yh_m = YH_mem[:, j]
-                ax.plot(
-                    time_history,
-                    yh_m,
-                    '-.',
-                    linewidth=1.2,
-                    alpha=0.9,
-                    label='y_hat_mem'
-                )
+                yh_mem = YH_mem[:, j]
+                ax.plot(time_history, yh_mem, ':', linewidth=1.2, alpha=0.8, label='y_hat_mem')
 
             # 画剩余误差：残差 - combined（如果有）
             if YH_comb is not None:
