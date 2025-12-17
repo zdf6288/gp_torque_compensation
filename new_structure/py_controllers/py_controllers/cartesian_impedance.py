@@ -133,7 +133,7 @@ class CartesianImpedanceController(Node):
         self.ddq_des_joint = np.zeros(7)
         self.tau_residual = np.zeros(7)
 
-        self.gp_stride = 20      # 每 10 个 state callback 做一次 GP（你可以调）
+        self.gp_stride = 1      # 每 10 个 state callback 做一次 GP（你可以调）
         self.gp_counter = 0
 
         self.y_hat_filtered = np.zeros(7)
@@ -176,6 +176,10 @@ class CartesianImpedanceController(Node):
         self.y_hat_cloud = np.zeros(7)
         self.y_hat_cloud_history = []
 
+        # Prediction history memory
+        self.y_hat_mem = np.zeros(7)
+        self.y_hat_mem_history = []
+
         ## Ablation parameters
         self.declare_parameter("gp_mode", "fusion")  
         self.gp_mode = self.get_parameter("gp_mode").value
@@ -197,7 +201,7 @@ class CartesianImpedanceController(Node):
             '/future_task_space'
         )
         self.future_delay = self.declare_parameter(
-            'future_delay', 0.02  # 默认 60 ms
+            'future_delay', 0.03  # 默认 60 ms
         ).value
 
         # 存最新一次未来轨迹
@@ -430,7 +434,9 @@ class CartesianImpedanceController(Node):
                 self.y_hat_history.append(self.y_hat_combined.tolist())      # combined
                 self.y_hat_local_history.append(self.y_hat_local.tolist())    # 上一帧或刚更新的 local
                 self.y_hat_cloud_history.append(self.y_hat_cloud.tolist())    # 上一帧或刚更新的 cloud
+                self.y_hat_mem_history.append(self.y_hat_mem.tolist())
                 self.tau_residual_history.append(self.tau_residual_filtered.tolist())
+
 
             # === 异步请求未来轨迹（给 GP 用），比如 100Hz 请求一次 ===
             if self.future_traj_client.service_is_ready():
@@ -462,7 +468,6 @@ class CartesianImpedanceController(Node):
                 # 2) 云端 GP：发异步请求（同一时刻的 q/dq/ddq/残差）
                 # === CLOUD GP 调用 ===
                 if self.gp_client.service_is_ready():
-
                     req = AsyncGPpredict.Request()
 
                     # ---- 当前输入 ----
@@ -545,14 +550,16 @@ class CartesianImpedanceController(Node):
             if resp is None:
                 return
 
-            y_cloud = np.array(resp.y_hat_future_agg, dtype=float)
+            y_cloud = np.array(resp.y_cloud, dtype=float)
+            y_mem = np.array(resp.y_mem,dtype=float)
 
             with self._gp_lock:
                 self.y_hat_cloud = y_cloud
+                self.y_hat_mem = y_mem
 
             # ---------- 融合模式选择 ----------
             mode = self.gp_mode
-            mode = "fusion"
+            mode = "none"
 
             if mode == "local":
                 # local-only
@@ -564,7 +571,7 @@ class CartesianImpedanceController(Node):
 
             elif mode == "fusion":
                 # 0.5/0.5 融合
-                self.y_hat_combined = 0.5 * self.y_hat_local + 0.5 * self.y_hat_cloud
+                self.y_hat_combined = 0 * self.y_hat_local + 1 * self.y_hat_cloud
 
             elif mode == "history_fusion":
                 # 需要你先添加一个历史平滑：下面我会给你
@@ -717,7 +724,6 @@ class CartesianImpedanceController(Node):
             model = pack["model"]
             Xm, Xs, Ym, Ys = pack["stats"]
             x_dim = pack["x_dim"]  # 训练时的真实维度
-            print("dimension of x:",x_dim)
             Xm = np.asarray(Xm, dtype=np.float32)
             Xs = np.asarray(Xs, dtype=np.float32)
             Ym = float(Ym[0])
@@ -831,6 +837,7 @@ class CartesianImpedanceController(Node):
                 header.extend([f'y_hat_local_{i+1}' for i in range(7)])    # local
                 header.extend([f'y_hat_cloud_{i+1}' for i in range(7)])    # cloud
                 header.extend([f'tau_residual_{i+1}' for i in range(7)])
+                header.extend([f'y_hat_mem_{i+1}' for i in range(7)])      # ⭐ memory
                 writer.writerow(header)
 
                 for i in range(min_len):
@@ -869,6 +876,11 @@ class CartesianImpedanceController(Node):
 
                     if i < len(self.y_hat_cloud_history):
                         row.extend(self.y_hat_cloud_history[i])
+                    else:
+                        row.extend([0.0]*7)
+                    
+                    if i < len(self.y_hat_mem_history):
+                        row.extend(self.y_hat_mem_history[i])
                     else:
                         row.extend([0.0]*7)
 

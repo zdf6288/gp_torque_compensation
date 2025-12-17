@@ -4,6 +4,7 @@ from rclpy.node import Node
 import numpy as np
 import os, sys, pickle, importlib.util
 from custom_msgs.srv import AsyncGPpredict   # 刚才定义的 srv
+from collections import deque
 
 class GPServer(Node):
     def __init__(self):
@@ -32,6 +33,11 @@ class GPServer(Node):
         self.srv = self.create_service(AsyncGPpredict, '/gp_predict', self.gp_predict_callback)
         self.get_logger().info("[GPServer] service /gp_predict ready")
 
+        # ===== Memory buffer =====
+        self.mem_X = []      # list of (x_dim,)
+        self.mem_Y = []      # list of (7,)
+        self.mem_max = 2000  # 最大容量（你可以调）
+
     # ============================================================
     # 主 Service 回调
     # ============================================================
@@ -39,7 +45,7 @@ class GPServer(Node):
 
         try:
             # -----------------------
-            #  收到当前主状态
+            # 当前状态
             # -----------------------
             q   = np.array(request.q, dtype=np.float32)
             dq  = np.array(request.dq_des_joint, dtype=np.float32)
@@ -47,189 +53,133 @@ class GPServer(Node):
             tau = np.array(request.tau_residual, dtype=np.float32)
 
             # -----------------------
-            #  收到未来主状态
+            # 未来主状态
             # -----------------------
             dq_f  = np.array(request.dq_des_joint_future, dtype=np.float32)
             ddq_f = np.array(request.ddq_des_joint_future, dtype=np.float32)
 
             # -----------------------
-            #  多采样 future
+            # 多采样 future
             # -----------------------
             N = request.n_future_samples
-            dq_samples_flat  = np.array(request.dq_future_samples_flat, dtype=np.float32)
-            ddq_samples_flat = np.array(request.ddq_future_samples_flat, dtype=np.float32)
-
             if N > 0:
-                dq_samples  = dq_samples_flat.reshape(N, 7)
-                ddq_samples = ddq_samples_flat.reshape(N, 7)
+                dq_samples  = np.array(request.dq_future_samples_flat, dtype=np.float32).reshape(N,7)
+                ddq_samples = np.array(request.ddq_future_samples_flat, dtype=np.float32).reshape(N,7)
             else:
                 dq_samples = np.zeros((0,7), dtype=np.float32)
                 ddq_samples = np.zeros((0,7), dtype=np.float32)
 
             # =====================================================
-            # 1) 当前预测
+            # 1) 当前 cloud GP + memory
             # =====================================================
-            y_hat_current = self._gp_predict_vector(q, dq, ddq, tau, update = True)
+            y_gp_cur, y_mem_cur, mem_dist_cur = \
+                self._gp_predict_vector(q, dq, ddq, tau, update=True)
 
             # =====================================================
-            # 2) 主未来预测
+            # 2) 未来 cloud GP（主预测）
             # =====================================================
-            y_hat_future = self._gp_predict_vector(q, dq_f, ddq_f, tau, update = False)
+            y_gp_fut, _, _ = \
+                self._gp_predict_vector(q, dq_f, ddq_f, None, update=False)
 
             # =====================================================
-            # 3) 多采样 future 预测（逐个）
+            # 3) 多采样 future cloud GP
             # =====================================================
             if N > 0:
                 y_future_samples = []
                 for k in range(N):
-                    yk = self._gp_predict_vector(q, dq_samples[k], ddq_samples[k])
-                    y_future_samples.append(yk)
+                    yk_gp, _, _ = self._gp_predict_vector(
+                        q, dq_samples[k], ddq_samples[k],
+                        None, update=False
+                    )
+                    y_future_samples.append(yk_gp)
 
-                y_future_samples = np.array(y_future_samples)   # (N,7)
-
-                # ---- 聚合（均值） ----
-                y_future_agg = np.mean(y_future_samples, axis=0)
-
+                y_gp_future_agg = np.mean(np.array(y_future_samples), axis=0)
             else:
-                y_future_agg = np.zeros(7, dtype=np.float32)
+                y_gp_future_agg = np.zeros(7, dtype=np.float32)
 
             # =====================================================
-            # 设置 response
+            # 返回（不融合）
             # =====================================================
-            response.y_hat_current = y_hat_future.tolist()
-            response.y_hat_future  = y_hat_future.tolist()
-            response.y_hat_future_agg = y_hat_future.tolist()
+            response.y_local = y_gp_cur.tolist()
+            response.y_cloud = y_gp_fut.tolist()
+            response.y_mem   = y_mem_cur.tolist()
+            response.mem_dist = float(mem_dist_cur)
 
         except Exception as e:
             self.get_logger().error(f"[GPServer] callback error: {e}")
-
-            response.y_hat_current = [0.0]*7
-            response.y_hat_future = [0.0]*7
-            response.y_hat_future_agg = [0.0]*7
+            response.y_local = [0.0]*7
+            response.y_cloud = [0.0]*7
 
         return response
 
-
-    # ============================================================
-    #  单个向量预测（不更新）
-    # ============================================================
-    # def _gp_predict_vector(self, q, dq, ddq, tau_residual=None, update=False):
-    #     """
-    #     对 7 个关节做预测
-    #     如果 do_update=True，则根据 tau_residual 对 "当前中心点" 做 online update
-    #     """
-    #     if not self.gp_ready:
-    #         return np.zeros(7, dtype=float)
-
-    #     y = np.zeros(7, dtype=float)
-
-    #     for j in range(1, 7):
-    #         pack = self.gp_models.get(j)
-    #         if pack is None:
-    #             continue
-
-    #         model = pack["model"]
-    #         Xm, Xs, Ym, Ys = pack["stats"]
-    #         x_dim = pack["x_dim"]
-
-    #         # -------- 输入构造 ----------
-    #         if x_dim == 3:
-    #             x = np.array([q[j-1], dq[j-1], ddq[j-1]], dtype=np.float32)
-    #         elif x_dim == 2:
-    #             x = np.array([q[j-1], ddq[j-1]], dtype=np.float32)
-    #         else:
-    #             x = np.array([q[j-1]], dtype=np.float32)
-
-    #         Xm = np.asarray(Xm, dtype=np.float32)
-    #         Xs = np.asarray(Xs, dtype=np.float32)
-    #         Ym = float(np.asarray(Ym)[0])
-    #         Ys = float(np.asarray(Ys)[0])
-    #         Ys = Ys if Ys != 0 else 1.0
-
-    #         # -------- 标准化 ----------
-    #         x_std = (x - Xm[:x_dim]) / Xs[:x_dim]
-
-    #         # -------- GP 预测 ----------
-    #         mu_s, var_s = model.predict(x_std.astype(np.float32))
-    #         mu = float(mu_s[0])
-
-    #         y_pred = mu * Ys + Ym
-    #         y[j-1] = y_pred
-    #         print(1)
-    #         # -------- Online Update ----------
-    #         if update and tau_residual is not None:
-    #             print(2)
-    #             y_real = float(tau_residual[j-1])
-    #             y_std = (y_real - Ym) / Ys
-
-    #             if np.isfinite(y_std):
-    #                 try:
-    #                     model.add_point(
-    #                         x_std.astype(np.float32),
-    #                         np.array([y_std], dtype=np.float32)
-    #                     )
-    #                     print("updating")
-    #                 except Exception as e:
-    #                     self.get_logger().error(
-    #                         f"[GPServer] joint{j} online update failed: {e}"
-    #                     )
-
-    #     return y
-
     def _gp_predict_vector(self, q, dq, ddq, tau_residual=None, update=False):
         """
-        高维输入版本：
-        每个关节使用统一的 x_full = concat([q, dq, ddq]) 或 concat([q, dq])
-        输出仍然是 7 维关节残差预测
+        返回：
+            y_gp   : (7,) GP 预测
+            y_mem  : (7,) memory 预测（若无则 0）
+            mem_dist : float，与 memory 最近点的距离
         """
 
         if not self.gp_ready:
-            return np.zeros(7, dtype=float)
+            return (
+                np.zeros(7, dtype=float),
+                np.zeros(7, dtype=float),
+                np.inf
+            )
 
         # ================================
         # 1) 构造统一输入 x_full
         # ================================
-        # 若你的训练数据是 21 维输入 (q+dq+ddq)
         x_full = np.concatenate([q, dq, ddq]).astype(np.float32)
 
-        # 如果你训练的是 14 维 (q+dq)，把上面改成：
-        # x_full = np.concatenate([q, dq]).astype(np.float32)
+        # ================================
+        # 2) 用 joint1 的 stats 做标准化（统一）
+        # ================================
+        ref_pack = self.gp_models.get(1)
+        Xm, Xs, _, _ = ref_pack["stats"]
+        Xm = np.asarray(Xm, dtype=np.float32)
+        Xs = np.asarray(Xs, dtype=np.float32)
+        x_dim = ref_pack["x_dim"]
 
-        y = np.zeros(7, dtype=float)
+        x_std = (x_full[:x_dim] - Xm[:x_dim]) / Xs[:x_dim]
 
         # ================================
-        # 2) 每个关节都用同一个 x_full 输入
+        # 3) memory 查询（⭐ 新增）
         # ================================
-        for j in range(1, 7):
+        y_mem, mem_dist = self._query_memory(x_std)
+        if y_mem is None:
+            y_mem = np.zeros(7, dtype=np.float32)
+            mem_dist = np.inf
+
+        # ================================
+        # 4) GP 预测（原逻辑，几乎不动）
+        # ================================
+        y_gp = np.zeros(7, dtype=float)
+
+        for j in range(1, 8):
             pack = self.gp_models.get(j)
             if pack is None:
                 continue
 
             model = pack["model"]
             Xm, Xs, Ym, Ys = pack["stats"]
-            x_dim = pack["x_dim"]   # 应该等于 14 或 21
-            # print("dimension of x:",x_dim)
+            x_dim = pack["x_dim"]
+
             Xm = np.asarray(Xm, dtype=np.float32)
             Xs = np.asarray(Xs, dtype=np.float32)
             Ym = float(np.asarray(Ym)[0])
-            Ys = float(np.asarray(Ys)[0])
-            Ys = Ys if Ys != 0 else 1.0
+            Ys = float(np.asarray(Ys)[0]) or 1.0
 
-            # 标准化整个 x_full
-            x_std = (x_full[:x_dim] - Xm[:x_dim]) / Xs[:x_dim]
+            x_std_j = (x_full[:x_dim] - Xm[:x_dim]) / Xs[:x_dim]
 
-            # ===============================
-            # GP 预测
-            # ===============================
-            mu_s, var_s = model.predict(x_std.astype(np.float32))
+            mu_s, _ = model.predict(x_std_j.astype(np.float32))
             mu = float(mu_s[0])
 
-            y_pred = mu * Ys + Ym
-            y[j - 1] = y_pred
+            y_gp[j - 1] = mu * Ys + Ym
 
-            # ===============================
-            # 在线更新（只在当前状态）
-            # ===============================
+            # -------------------------------
+            # online update（只对当前点）
+            # -------------------------------
             if update and tau_residual is not None:
                 y_real = float(tau_residual[j - 1])
                 y_std = (y_real - Ym) / Ys
@@ -237,15 +187,19 @@ class GPServer(Node):
                 if np.isfinite(y_std):
                     try:
                         model.add_point(
-                            x_std.astype(np.float32),
+                            x_std_j.astype(np.float32),
                             np.array([y_std], dtype=np.float32)
                         )
                     except Exception as e:
                         self.get_logger().error(
                             f"[GPServer] joint{j} online update failed: {e}"
                         )
-        return y
 
+        # ================================
+        # 5) 返回三个值
+        # ================================
+        self._store_memory(x_std,y_gp)
+        return y_gp, y_mem, mem_dist
 
 
     # ==== 把你原来的这三个函数基本原样搬进来 ====
@@ -410,6 +364,45 @@ class GPServer(Node):
         except Exception as e:
             # 这里不需要太吓人，只是调试信息
             self.get_logger().warn(f"[Controller] GP response error: {e}")
+
+    # ============================================================
+    # Memory: 查询最近邻
+    # ============================================================
+    def _query_memory(self, x_std):
+        """
+        返回：
+            y_mem : (7,) or None
+            dist  : float
+        """
+        if len(self.mem_X) == 0:
+            return None, np.inf
+
+        X = np.array(self.mem_X)   # (N, x_dim)
+        Y = np.array(self.mem_Y)   # (N, 7)
+
+        # 欧氏距离（标准化空间）
+        dists = np.linalg.norm(X - x_std[None, :], axis=1)
+        idx = np.argmin(dists)
+
+        return Y[idx], float(dists[idx])
+
+
+
+    # ============================================================
+    # Memory: 写入
+    # ============================================================
+    def _store_memory(self, x_std, y_hat):
+        """
+        x_std : (x_dim,)
+        y_hat : (7,)
+        """
+        self.mem_X.append(x_std.copy())
+        self.mem_Y.append(y_hat.copy())
+
+        # FIFO 限制容量
+        if len(self.mem_X) > self.mem_max:
+            self.mem_X.pop(0)
+            self.mem_Y.pop(0)
 
 
 def main(args=None):
