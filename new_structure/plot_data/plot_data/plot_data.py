@@ -29,7 +29,7 @@ def plot_data_from_csv(csv_filename):
         # 子采样率（越大 → 点越少）
         DECIMATE = 5     # 每5个取一个点  (1000Hz → 200Hz)
         # 平滑窗口大小
-        SMOOTH_WINDOW = 10  # 相当于 ~50ms 平滑
+        SMOOTH_WINDOW = 1  # 相当于 ~50ms 平滑
 
         # Step 1: 子采样
         df = df.iloc[::DECIMATE, :].reset_index(drop=True)

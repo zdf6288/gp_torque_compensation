@@ -55,6 +55,7 @@ class GPServer(Node):
             # -----------------------
             # 未来主状态
             # -----------------------
+            # q_f = np.array(request.q_future, dtype=np.float32)
             dq_f  = np.array(request.dq_des_joint_future, dtype=np.float32)
             ddq_f = np.array(request.ddq_des_joint_future, dtype=np.float32)
 
@@ -72,7 +73,7 @@ class GPServer(Node):
             # =====================================================
             # 1) 当前 cloud GP + memory
             # =====================================================
-            y_gp_cur, y_mem_cur, mem_dist_cur = \
+            y_gp_cur, y_mem_cur, mem_dist_cur  = \
                 self._gp_predict_vector(q, dq, ddq, tau, update=True)
 
             # =====================================================
@@ -101,7 +102,7 @@ class GPServer(Node):
             # 返回（不融合）
             # =====================================================
             response.y_local = y_gp_cur.tolist()
-            response.y_cloud = y_gp_fut.tolist()
+            response.y_cloud = y_gp_cur.tolist()
             response.y_mem   = y_mem_cur.tolist()
             response.mem_dist = float(mem_dist_cur)
 
