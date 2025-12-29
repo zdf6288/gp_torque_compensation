@@ -201,7 +201,7 @@ class CartesianImpedanceController(Node):
             '/future_task_space'
         )
         self.future_delay = self.declare_parameter(
-            'future_delay', 0 # 默认 60 ms
+            'future_delay', 0.005 # 默认 60 ms
         ).value
 
         # 存最新一次未来轨迹
@@ -466,12 +466,12 @@ class CartesianImpedanceController(Node):
                         dq,
                         self.ddq_des_joint,
                         self.tau_residual_filtered,
-                    )   
+                    )
+                    self.y_hat_combined = self.y_hat_local   
                     # print(self.gp_counter)
                 # 2) 云端 GP：发异步请求（同一时刻的 q/dq/ddq/残差）
-                # === CLOUD GP 调用 ===
+                # === CLOUD GP 调用 === 
                 if self.gp_client.service_is_ready():
-                    self.gp_counter = 0
                     req = AsyncGPpredict.Request()
 
                     # ---- 当前输入 ----
@@ -485,56 +485,29 @@ class CartesianImpedanceController(Node):
                     #   永远可计算 —— 保证 cloud GP 每次都能收到预测输入
                     # ============================================================
 
-                    # delay = float(self.future_delay)
+                    delay = float(self.future_delay)
 
-                    # q_now  = self.q
-                    # dq_now = dq
-                    # ddq_now = self.ddq_des_joint
+                    q_now  = self.q
+                    dq_now = dq
+                    ddq_now = self.ddq_des_joint
 
-                    # # ---- 常加速度未来预测 ----
-                    # q_future  = q_now + dq_now * delay + 0.5 * ddq_now * delay**2
-                    # dq_future = dq_now + ddq_now * delay
-                    # ============================================================
-                    #   CLOUD GP：使用异步请求得到的未来任务空间轨迹
-                    # ============================================================
+                    # ---- 常加速度未来预测 ----
+                    q_future  = q_now + dq_now * delay + 0.5 * ddq_now * delay**2
+                    dq_future = dq_now + ddq_now * delay
 
-                    if self._latest_future_traj is not None:
-
-                        # 1) 取未来任务空间期望
-                        dx_f  = self._latest_future_traj["dx_des"]
-                        ddx_f = self._latest_future_traj["ddx_des"]
-
-                        # 只用前 5 维（你的控制任务）
-                        dx_f_5  = dx_f[:5]
-                        ddx_f_5 = ddx_f[:5]
-
-                        # 2) 用当前 Jacobian 映射到 joint space
-                        dq_future  = jacobian_pinv @ dx_f_5
-                        ddq_future = jacobian_pinv @ (ddx_f_5 - djacobian @ dq)
-
-                    else:
-                        # ❗ fallback：没有 future traj 时，直接置零 or 用当前 dq
-                        dq_future  = dq.copy()
-                        ddq_future = np.zeros_like(dq)
-
-
-                    # req = AsyncGPpredict.Request()
-
-                    # ---- 当前状态 ----
-                    # req.q = self.q.astype(np.float32).tolist()
-                    # req.dq_des_joint = dq.astype(np.float32).tolist()
-                    # req.ddq_des_joint = self.ddq_des_joint.astype(np.float32).tolist()
-                    # req.tau_residual = self.tau_residual_filtered.astype(np.float32).tolist()
-
-                    # ---- 未来状态（来自轨迹）----
+                    # ---- cloud GP 特征输入 ----
+                    req.q_future = q_future.astype(np.float32).tolist()
                     req.dq_des_joint_future  = dq_future.astype(np.float32).tolist()
-                    req.ddq_des_joint_future = ddq_future.astype(np.float32).tolist()
+                    req.ddq_des_joint_future = ddq_now.astype(np.float32).tolist()
 
-                    # ---- 不使用采样 ----
+                    # ---- 不使用未来采样 ----
                     req.n_future_samples = 0
                     req.dq_future_samples_flat = []
                     req.ddq_future_samples_flat = []
 
+                    # ============================================================
+                    #   发送异步 cloud GP 请求
+                    # ============================================================
                     future = self.gp_client.call_async(req)
                     future.add_done_callback(self._gp_response_callback)
 

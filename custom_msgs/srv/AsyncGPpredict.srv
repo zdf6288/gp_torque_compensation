@@ -3,6 +3,7 @@ float32[] dq_des_joint
 float32[] ddq_des_joint
 float32[] tau_residual
 
+float32[] q_future
 float32[] dq_des_joint_future
 float32[] ddq_des_joint_future
 

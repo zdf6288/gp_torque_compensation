@@ -5,6 +5,7 @@ import numpy as np
 import os, sys, pickle, importlib.util
 from custom_msgs.srv import AsyncGPpredict   # 刚才定义的 srv
 from collections import deque
+import time
 
 class GPServer(Node):
     def __init__(self):
@@ -36,13 +37,13 @@ class GPServer(Node):
         # ===== Memory buffer =====
         self.mem_X = []      # list of (x_dim,)
         self.mem_Y = []      # list of (7,)
-        self.mem_max = 2000  # 最大容量（你可以调）
+        self.mem_max = 10000  # 最大容量（你可以调）
 
     # ============================================================
     # 主 Service 回调
     # ============================================================
     def gp_predict_callback(self, request, response):
-
+        time.sleep(0.005)
         try:
             # -----------------------
             # 当前状态
@@ -55,7 +56,7 @@ class GPServer(Node):
             # -----------------------
             # 未来主状态
             # -----------------------
-            # q_f = np.array(request.q_future, dtype=np.float32)
+            q_f = np.array(request.q_future, dtype=np.float32)
             dq_f  = np.array(request.dq_des_joint_future, dtype=np.float32)
             ddq_f = np.array(request.ddq_des_joint_future, dtype=np.float32)
 
@@ -73,14 +74,14 @@ class GPServer(Node):
             # =====================================================
             # 1) 当前 cloud GP + memory
             # =====================================================
-            y_gp_cur, y_mem_cur, mem_dist_cur  = \
+            y_gp_cur, _, _  = \
                 self._gp_predict_vector(q, dq, ddq, tau, update=True)
 
             # =====================================================
             # 2) 未来 cloud GP（主预测）
             # =====================================================
-            y_gp_fut, _, _ = \
-                self._gp_predict_vector(q, dq_f, ddq_f, None, update=False)
+            y_gp_fut, y_mem_cur, mem_dist_cur = \
+                self._gp_predict_vector(q_f, dq_f, ddq_f, None, update=False)
 
             # =====================================================
             # 3) 多采样 future cloud GP
@@ -102,7 +103,7 @@ class GPServer(Node):
             # 返回（不融合）
             # =====================================================
             response.y_local = y_gp_cur.tolist()
-            response.y_cloud = y_gp_cur.tolist()
+            response.y_cloud = y_gp_fut.tolist()
             response.y_mem   = y_mem_cur.tolist()
             response.mem_dist = float(mem_dist_cur)
 
@@ -147,7 +148,7 @@ class GPServer(Node):
         # ================================
         # 3) memory 查询（⭐ 新增）
         # ================================
-        y_mem, mem_dist = self._query_memory(x_std)
+        y_mem, mem_dist = self._query_memory(x_full)
         if y_mem is None:
             y_mem = np.zeros(7, dtype=np.float32)
             mem_dist = np.inf
@@ -199,7 +200,7 @@ class GPServer(Node):
         # ================================
         # 5) 返回三个值
         # ================================
-        self._store_memory(x_std,y_gp)
+        self._store_memory(x_full, y_gp)
         return y_gp, y_mem, mem_dist
 
 
