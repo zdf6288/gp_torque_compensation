@@ -458,7 +458,7 @@ class CartesianImpedanceController(Node):
             # print("use:",self.use_gp)
             if self.gp_active and self.use_gp:
                 self.gp_counter += 1
-                print("gp counter:",self.gp_counter)
+                # print("gp counter:",self.gp_counter)
                 if self.gp_counter % self.gp_stride == 0:
                     # 1) 本地 GP 立刻算一次（同步）
                     self.y_hat_local = self._gp_predict_and_update(
@@ -584,7 +584,7 @@ class CartesianImpedanceController(Node):
                 return
 
             y_cloud = np.array(resp.y_cloud, dtype=float)
-            y_mem = np.array(resp.y_mem,dtype=float)
+            y_mem = np.array(resp.y_local,dtype=float)
 
             with self._gp_lock:
                 self.y_hat_cloud = y_cloud

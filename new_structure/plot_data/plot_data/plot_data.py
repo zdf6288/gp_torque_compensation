@@ -312,15 +312,15 @@ def plot_data_from_csv(csv_filename):
             # 残差
             ax.plot(time_history, tr, label='tau_residual', linewidth=1.8)
 
-            # 画 combined
-            if YH_comb is not None:
-                yh_c = YH_comb[:, j]
-                ax.plot(time_history, yh_c, '--', linewidth=1.5, label='y_hat_combined')
+            # # 画 combined
+            # if YH_comb is not None:
+            #     yh_c = YH_comb[:, j]
+            #     ax.plot(time_history, yh_c, '--', linewidth=1.5, label='y_hat_combined')
 
-            # 画 local
-            if YH_local is not None:
-                yh_l = YH_local[:, j]
-                ax.plot(time_history, yh_l, '-', linewidth=1.2, alpha=0.8, label='y_hat_local')
+            # # 画 local
+            # if YH_local is not None:
+            #     yh_l = YH_local[:, j]
+            #     ax.plot(time_history, yh_l, '-', linewidth=1.2, alpha=0.8, label='y_hat_local')
 
             # 画 cloud
             if YH_cloud is not None:
