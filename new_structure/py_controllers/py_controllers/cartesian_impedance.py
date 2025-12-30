@@ -18,6 +18,7 @@ import os, pickle
 import importlib.util
 import threading, time
 from std_msgs.msg import String
+from collections import deque
 
 class CartesianImpedanceController(Node):
     
@@ -176,6 +177,20 @@ class CartesianImpedanceController(Node):
         self.y_hat_cloud = np.zeros(7)
         self.y_hat_cloud_history = []
 
+        self.future_n_samples = 10          # 未来采样点个数
+        self.future_ddq_noise_std = 0.1    # rad/s^2，加速度噪声强度    
+
+        #simulated dalay
+        self.future_delay = self.declare_parameter(
+            'future_delay', 0.005 # 默认 60 ms
+        ).value
+
+        self.cloud_delay_steps = int(self.future_delay / 0.1)  # 假设 control 1kHz
+        self.y_hat_cloud_buffer = deque(
+            [np.zeros(7)] * (self.cloud_delay_steps + 1),
+            maxlen=self.cloud_delay_steps + 1
+        )
+
         # Prediction history memory
         self.y_hat_mem = np.zeros(7)
         self.y_hat_mem_history = []
@@ -200,9 +215,6 @@ class CartesianImpedanceController(Node):
             GetFutureTrajectory,
             '/future_task_space'
         )
-        self.future_delay = self.declare_parameter(
-            'future_delay', 0.005 # 默认 60 ms
-        ).value
 
         # 存最新一次未来轨迹
         self._latest_future_traj = None   # dict: {"x_des": np.array(6,), "dx_des": ..., "ddx_des": ...}
@@ -425,9 +437,37 @@ class CartesianImpedanceController(Node):
             )
             # print("tau_residual:", tau_residual)
 
-            # === 控制：先用“上一帧”融合好的 y_hat_combined 做补偿 ===
+            # === 云端延迟补偿 ===
             if self.gp_active:
+
+                # 1️⃣ 取“最老”的 cloud（≈ t - Δt）
+                if len(self.y_hat_cloud_buffer) > 0:
+                    y_cloud_delayed = self.y_hat_cloud_buffer[0]
+                else:
+                    y_cloud_delayed = np.zeros(7)
+
+                # 2️⃣ 融合策略（你原来的 mode 放这里）
+                mode = self.gp_mode
+                mode = "local"
+
+                if mode == "local":
+                    self.y_hat_combined = self.y_hat_local
+
+                elif mode == "cloud":
+                    self.y_hat_combined = y_cloud_delayed
+
+                elif mode == "fusion":
+                    self.y_hat_combined = 0.5 * self.y_hat_local + 0.5 * y_cloud_delayed
+
+                elif mode == "none":
+                    self.y_hat_combined = np.zeros(7)
+
+                else:
+                    self.y_hat_combined = 0.5 * self.y_hat_local + 0.5 * y_cloud_delayed
+
+                # 3️⃣ 真正用于控制
                 tau = tau - self.y_hat_combined
+
 
             # --- 记录（含最终补偿用的 y_hat_combined）---
             if self.data_recording_enabled:
@@ -458,7 +498,6 @@ class CartesianImpedanceController(Node):
             # print("use:",self.use_gp)
             if self.gp_active and self.use_gp:
                 self.gp_counter += 1
-                print("gp counter:",self.gp_counter)
                 if self.gp_counter % self.gp_stride == 0:
                     # 1) 本地 GP 立刻算一次（同步）
                     self.y_hat_local = self._gp_predict_and_update(
@@ -473,7 +512,6 @@ class CartesianImpedanceController(Node):
                 # === CLOUD GP 调用 === 
                 if self.gp_client.service_is_ready():
                     req = AsyncGPpredict.Request()
-
                     # ---- 当前输入 ----
                     req.q = self.q.astype(np.float32).tolist()
                     req.dq_des_joint = dq.astype(np.float32).tolist()
@@ -484,33 +522,58 @@ class CartesianImpedanceController(Node):
                     #   未来输入（不依赖 future_traj，不依赖任务空间）
                     #   永远可计算 —— 保证 cloud GP 每次都能收到预测输入
                     # ============================================================
-
+                    sigma_ddq = 0.02                    # rad/s^2
                     delay = float(self.future_delay)
 
-                    q_now  = self.q
-                    dq_now = dq
+                    q_now   = self.q
+                    dq_now  = dq
                     ddq_now = self.ddq_des_joint
 
-                    # ---- 常加速度未来预测 ----
-                    q_future  = q_now + dq_now * delay + 0.5 * ddq_now * delay**2
-                    dq_future = dq_now + ddq_now * delay
+                    # 主预测（deterministic）
+                    q_future_main  = q_now + dq_now * delay + 0.5 * ddq_now * delay**2
+                    dq_future_main = dq_now + ddq_now * delay
+                    ddq_future_main = ddq_now
+
+                    N = self.future_n_samples
+                    noise_std = self.future_ddq_noise_std
+
+                    q_samples  = []
+                    dq_samples = []
+                    ddq_samples = []
+
+                    for _ in range(N):
+                        # 1️⃣ 在加速度层加噪声（唯一噪声源）
+                        ddq_k = ddq_now + np.random.normal(
+                            loc=0.0,
+                            scale=sigma_ddq,
+                            size=ddq_now.shape
+                        )
+
+                        # 2️⃣ 积分得到速度
+                        dq_k = dq_now + ddq_k * delay
+
+                        # 3️⃣ 再积分得到位置
+                        q_k = q_now + dq_now * delay + 0.5 * ddq_k * delay**2
+
+                        q_samples.append(q_k)
+                        dq_samples.append(dq_k)
+                        ddq_samples.append(ddq_k)
 
                     # ---- cloud GP 特征输入 ----
-                    req.q_future = q_future.astype(np.float32).tolist()
-                    req.dq_des_joint_future  = dq_future.astype(np.float32).tolist()
-                    req.ddq_des_joint_future = ddq_now.astype(np.float32).tolist()
+                    # ---- 主 future ----
+                    req.q_future = q_future_main.astype(np.float32).tolist()
+                    req.dq_des_joint_future  = dq_future_main.astype(np.float32).tolist()
+                    req.ddq_des_joint_future = ddq_future_main.astype(np.float32).tolist()
 
-                    # ---- 不使用未来采样 ----
-                    req.n_future_samples = 0
-                    req.dq_future_samples_flat = []
-                    req.ddq_future_samples_flat = []
+                    # ---- 多采样 future ----
+                    req.n_future_samples = N
+                    req.q_future_samples_flat = np.array(q_samples,dtype=np.float32).reshape(-1).tolist()
+                    req.dq_future_samples_flat = np.array(dq_samples, dtype=np.float32).reshape(-1).tolist()
+                    req.ddq_future_samples_flat = np.array(ddq_samples, dtype=np.float32).reshape(-1).tolist()
 
-                    # ============================================================
-                    #   发送异步 cloud GP 请求
-                    # ============================================================
+                    # ⭐⭐⭐ 缺失的关键两行 ⭐⭐⭐
                     future = self.gp_client.call_async(req)
                     future.add_done_callback(self._gp_response_callback)
-
 
             # publish on topic /effort_command
             self.effort_msg.efforts = tau.tolist()
@@ -557,40 +620,17 @@ class CartesianImpedanceController(Node):
                 return
 
             y_cloud = np.array(resp.y_cloud, dtype=float)
-            y_mem = np.array(resp.y_mem,dtype=float)
+            y_mem   = np.array(resp.y_mem, dtype=float)
 
             with self._gp_lock:
+                # 1️⃣ 保存“最新 cloud（t_now）”
                 self.y_hat_cloud = y_cloud
+
+                # 2️⃣ 推入 delay buffer（用于 t-Δt）
+                self.y_hat_cloud_buffer.append(y_cloud)
+
+                # 3️⃣ 其他辅助信息
                 self.y_hat_mem = y_mem
-
-            # ---------- 融合模式选择 ----------
-            mode = self.gp_mode
-            mode = "local"
-
-            if mode == "local":
-                # local-only
-                self.y_hat_combined = self.y_hat_local
-
-            elif mode == "cloud":
-                # cloud-only
-                self.y_hat_combined = self.y_hat_cloud
-
-            elif mode == "fusion":
-                # 0.5/0.5 融合
-                self.y_hat_combined = 0 * self.y_hat_local + 1 * self.y_hat_cloud
-
-            elif mode == "history_fusion":
-                # 需要你先添加一个历史平滑：下面我会给你
-                y_hist = self._push_and_smooth_history(self.y_hat_local)
-                self.y_hat_combined = 0.5 * y_hist + 0.5 * self.y_hat_cloud
-
-            elif mode == "none":
-                # 不用 GP
-                self.y_hat_combined = np.zeros(7)
-
-            else:
-                self.get_logger().warn(f"[GP] Unknown mode {mode}, fallback to fusion")
-                self.y_hat_combined = 0.5 * self.y_hat_local + 0.5 * self.y_hat_cloud
 
         except Exception as e:
             self.get_logger().warn(f"[Controller] GP response error: {e}")
