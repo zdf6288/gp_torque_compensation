@@ -310,7 +310,7 @@ def plot_data_from_csv(csv_filename):
             tr = TR[:, j]
 
             # 残差
-            # ax.plot(time_history, tr, label='tau_residual', linewidth=1.8)
+            ax.plot(time_history, tr, label='tau_residual', linewidth=1.8)
 
             # 画 combined
             # if YH_comb is not None:
@@ -325,13 +325,13 @@ def plot_data_from_csv(csv_filename):
             # 画 cloud
             if YH_cloud is not None:
                 yh_cl = YH_cloud[:, j]
-                # ax.plot(time_history, yh_cl, ':', linewidth=1.2, alpha=0.8, label='cloud')
+                ax.plot(time_history, yh_cl, ':', linewidth=1.2, alpha=0.8, label='cloud')
                 rem = tr - yh_cl
                 ax.plot(time_history, rem, linewidth=1.2, alpha=0.8, label='true - cloud')
 
             if YH_mem is not None:
                 yh_mem = YH_mem[:, j]
-                # ax.plot(time_history, yh_mem, ':', linewidth=1.2, alpha=0.8, label='history')
+                ax.plot(time_history, yh_mem, ':', linewidth=1.2, alpha=0.8, label='history')
                 rem = tr - yh_mem
                 ax.plot(time_history, rem, linewidth=1.2, alpha=0.8, label='true - history')
 

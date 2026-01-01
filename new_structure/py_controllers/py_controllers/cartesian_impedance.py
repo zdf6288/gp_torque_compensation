@@ -177,17 +177,17 @@ class CartesianImpedanceController(Node):
         self.y_hat_cloud = np.zeros(7)
         self.y_hat_cloud_history = []
 
-        self.future_n_samples = 10          # 未来采样点个数
+        self.future_n_samples = 5          # 未来采样点个数
         self.future_ddq_noise_std = 0.1    # rad/s^2，加速度噪声强度    
 
         #simulated dalay
         self.future_delay = self.declare_parameter(
-            'future_delay', 0.005 # 默认 60 ms
+            'future_delay', 0.02 # 默认 60 ms
         ).value
 
-        self.cloud_delay_steps = int(self.future_delay / 0.1)  # 假设 control 1kHz
+        self.cloud_delay_steps = 200
         self.y_hat_cloud_buffer = deque(
-            [np.zeros(7)] * (self.cloud_delay_steps + 1),
+            [np.zeros(7, dtype=float) for _ in range(self.cloud_delay_steps + 1)],
             maxlen=self.cloud_delay_steps + 1
         )
 
@@ -433,7 +433,7 @@ class CartesianImpedanceController(Node):
             # === 计算残差 ===
             tau_residual = tau_measured - tau - gravity_measured
             self.tau_residual_filtered = (
-                0.05 * tau_residual + 0.95 * self.tau_residual_filtered
+                0.03 * tau_residual + 0.97 * self.tau_residual_filtered
             )
             # print("tau_residual:", tau_residual)
 
@@ -467,6 +467,7 @@ class CartesianImpedanceController(Node):
 
                 # 3️⃣ 真正用于控制
                 tau = tau - self.y_hat_combined
+                
 
 
             # --- 记录（含最终补偿用的 y_hat_combined）---
@@ -522,7 +523,7 @@ class CartesianImpedanceController(Node):
                     #   未来输入（不依赖 future_traj，不依赖任务空间）
                     #   永远可计算 —— 保证 cloud GP 每次都能收到预测输入
                     # ============================================================
-                    sigma_ddq = 0.02                    # rad/s^2
+                    sigma_ddq = 0.1                    # rad/s^2
                     delay = float(self.future_delay)
 
                     q_now   = self.q
@@ -620,7 +621,7 @@ class CartesianImpedanceController(Node):
                 return
 
             y_cloud = np.array(resp.y_cloud, dtype=float)
-            y_mem   = np.array(resp.y_mem, dtype=float)
+            y_mem   = np.array(resp.y_cloud_aggregation, dtype=float)
 
             with self._gp_lock:
                 # 1️⃣ 保存“最新 cloud（t_now）”

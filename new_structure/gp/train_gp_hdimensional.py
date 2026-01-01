@@ -88,7 +88,7 @@ def main():
                         help="高维训练数据 npz （包含 X1..X7, Y1..Y7）")
     parser.add_argument("--joint", default="all",
                         help="'all' 或 1..7")
-    parser.add_argument("--iters", type=int, default=400)
+    parser.add_argument("--iters", type=int, default=600)
     parser.add_argument("--lr", type=float, default=0.04)
     parser.add_argument("--max-hp", type=int, default=3000)
     parser.add_argument("--max-exp", type=int, default=64)

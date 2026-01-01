@@ -95,7 +95,6 @@ class GPServer(Node):
             # =====================================================
             # C) 多采样 future + PoE（❌ 不更新）
             # =====================================================
-            print(N)
             if N > 0:
                 mu_list  = []
                 var_list = []
@@ -123,6 +122,7 @@ class GPServer(Node):
                 weighted_mu   = np.sum(mu_arr * precision, axis=0) # (7,)
 
                 y_gp_future_agg = weighted_mu / precision_sum
+                # y_gp_future_agg = np.mean(mu_arr, axis=0)   # shape: (7,)
                 print(y_gp_future_agg)
             else:
                 y_gp_future_agg = np.zeros(7, dtype=np.float32)
@@ -132,7 +132,7 @@ class GPServer(Node):
             # D) 返回
             # =====================================================
             response.y_local  = y_gp_cur.tolist()
-            response.y_cloud  = y_gp_cur.tolist()
+            response.y_cloud  = y_gp_fut.tolist()
             response.y_cloud_aggregation = y_gp_future_agg.tolist()
             response.y_mem    = y_mem_cur.tolist()
             response.mem_dist = float(mem_dist_cur)
@@ -298,16 +298,16 @@ class GPServer(Node):
         # key = 关节号（1..6），"default" 为所有关节的默认配置
         per_joint_cfg = {
             "default": dict(
-                max_data_per_expert=100,
+                max_data_per_expert=50,
                 nearest_k=2,
-                max_experts=8,
+                max_experts=50,
                 timescale=0.03,
             ),
             # 举例：如果你想让 6 号关节忘得快一点、专家少一点，可以单独改：
             6: dict(
                 max_data_per_expert=50,
                 nearest_k=2,
-                max_experts=8,
+                max_experts=50,
                 timescale=0.05,
             ),
         }
