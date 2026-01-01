@@ -123,7 +123,7 @@ class GPServer(Node):
 
                 y_gp_future_agg = weighted_mu / precision_sum
                 # y_gp_future_agg = np.mean(mu_arr, axis=0)   # shape: (7,)
-                print(y_gp_future_agg)
+                # print(y_gp_future_agg)
             else:
                 y_gp_future_agg = np.zeros(7, dtype=np.float32)
 
@@ -299,15 +299,15 @@ class GPServer(Node):
         per_joint_cfg = {
             "default": dict(
                 max_data_per_expert=50,
-                nearest_k=2,
-                max_experts=50,
+                nearest_k=4,
+                max_experts=100,
                 timescale=0.03,
             ),
             # 举例：如果你想让 6 号关节忘得快一点、专家少一点，可以单独改：
             6: dict(
                 max_data_per_expert=50,
-                nearest_k=2,
-                max_experts=50,
+                nearest_k=4,
+                max_experts=100,
                 timescale=0.05,
             ),
         }

@@ -61,7 +61,7 @@ class CartesianImpedanceController(Node):
         self.i_pid = np.array(self.get_parameter('i_pid').value, dtype=float)
         self.i_error = np.zeros(7)
 
-        self.declare_parameter('k_gains', [750.0, 750.0, 750.0, 75.0, 75.0, 0.0])   # k_gains in impedance control (task space)
+        self.declare_parameter('k_gains', [1500.0, 1000.0, 1000.0, 75.0, 75.0, 0.0])   # k_gains in impedance control (task space)
         self.k_gains = np.array(self.get_parameter('k_gains').value, dtype=float)
         self.K_gains = np.diag(self.k_gains)
         self.eta = 1.0                                                              # for calculating d_gains
@@ -177,15 +177,22 @@ class CartesianImpedanceController(Node):
         self.y_hat_cloud = np.zeros(7)
         self.y_hat_cloud_history = []
 
-        self.future_n_samples = 5          # 未来采样点个数
+        self.future_n_samples = 0         # 未来采样点个数
         self.future_ddq_noise_std = 0.1    # rad/s^2，加速度噪声强度    
+
+        # ===== Alpha-Beta filter for tau =====
+        self.tau_ab      = np.zeros(7)   # τ̂
+        self.dtau_ab     = np.zeros(7)   # τ̇̂
+
+        self.tau_alpha = 0.1
+        self.tau_beta  = 0.005
 
         #simulated dalay
         self.future_delay = self.declare_parameter(
-            'future_delay', 0.02 # 默认 60 ms
+            'future_delay', 0.01 # 默认 60 ms
         ).value
 
-        self.cloud_delay_steps = 200
+        self.cloud_delay_steps = 0
         self.y_hat_cloud_buffer = deque(
             [np.zeros(7, dtype=float) for _ in range(self.cloud_delay_steps + 1)],
             maxlen=self.cloud_delay_steps + 1
@@ -316,7 +323,7 @@ class CartesianImpedanceController(Node):
                 self.t_initial = t_now
                 self.t_last = t_now
                 t_elapsed = 0.0
-                dt = 1e-3
+                dt = 1e-1
                 ddq = np.zeros_like(dq)
                 self.dq_buffer = dq.copy()
             else:
@@ -433,8 +440,9 @@ class CartesianImpedanceController(Node):
             # === 计算残差 ===
             tau_residual = tau_measured - tau - gravity_measured
             self.tau_residual_filtered = (
-                0.03 * tau_residual + 0.97 * self.tau_residual_filtered
+                0.02 * tau_residual + 0.98 * self.tau_residual_filtered
             )
+            # self.tau_residual_filtered = self.alpha_beta_filter_tau(tau_residual, dt)
             # print("tau_residual:", tau_residual)
 
             # === 云端延迟补偿 ===
@@ -466,7 +474,7 @@ class CartesianImpedanceController(Node):
                     self.y_hat_combined = 0.5 * self.y_hat_local + 0.5 * y_cloud_delayed
 
                 # 3️⃣ 真正用于控制
-                tau = tau - self.y_hat_combined
+                # tau = tau - self.y_hat_combined
                 
 
 
@@ -482,7 +490,7 @@ class CartesianImpedanceController(Node):
             # === 异步请求未来轨迹（给 GP 用），比如 100Hz 请求一次 ===
             if self.future_traj_client.service_is_ready():
                 self._future_traj_counter += 1
-                if self._future_traj_counter % 10 == 0:
+                if self._future_traj_counter % 1 == 0:
                     req_ft = GetFutureTrajectory.Request()
                     req_ft.t_delay = float(self.future_delay)
                     future_ft = self.future_traj_client.call_async(req_ft)
@@ -535,7 +543,35 @@ class CartesianImpedanceController(Node):
                     dq_future_main = dq_now + ddq_now * delay
                     ddq_future_main = ddq_now
 
-                    N = self.future_n_samples
+                    # ============================================================
+                    # ✅ 使用 future_traj_service 给出的未来任务空间轨迹
+                    # ============================================================
+                    # if self._latest_future_traj is not None:
+
+                    #     x_f  = self._latest_future_traj["x_des"]
+                    #     dx_f = self._latest_future_traj["dx_des"]
+                    #     ddx_f = self._latest_future_traj["ddx_des"]
+
+                    #     # 你的控制是 5 DoF（3 pos + 2 rot）
+                    #     dx_f_5  = dx_f[:5]
+                    #     ddx_f_5 = ddx_f[:5]
+
+                    #     # 逆雅可比（当前时刻）
+                    #     dq_future_main  = jacobian_pinv @ dx_f_5
+                    #     ddq_future_main = jacobian_pinv @ (ddx_f_5 - djacobian @ dq)
+
+                    #     # 积分得到 q_future（用于 GP 特征）
+                    #     q_future_main = self.q + dq_future_main * delay \
+                    #                         + 0.5 * ddq_future_main * delay**2
+
+                    # else:
+                    #     # fallback（极少发生）
+                    #     q_future_main  = self.q
+                    #     dq_future_main = dq
+                    #     ddq_future_main = self.ddq_des_joint
+
+
+                    N = 0
                     noise_std = self.future_ddq_noise_std
 
                     q_samples  = []
@@ -559,6 +595,21 @@ class CartesianImpedanceController(Node):
                         q_samples.append(q_k)
                         dq_samples.append(dq_k)
                         ddq_samples.append(ddq_k)
+                    # N = 0
+                    # q_samples, dq_samples, ddq_samples = [], [], []
+
+                    # for _ in range(N):
+                    #     ddx_f_k = ddx_f.copy()
+                    #     ddx_f_k[:5] += np.random.normal(0, sigma_ddq, size=5)
+
+                    #     dq_k  = jacobian_pinv @ dx_f_5
+                    #     ddq_k = jacobian_pinv @ (ddx_f_k[:5] - djacobian @ dq)
+
+                    #     q_k = self.q + dq_k * delay + 0.5 * ddq_k * delay**2
+
+                    #     q_samples.append(q_k)
+                    #     dq_samples.append(dq_k)
+                    #     ddq_samples.append(ddq_k)
 
                     # ---- cloud GP 特征输入 ----
                     # ---- 主 future ----
@@ -596,6 +647,26 @@ class CartesianImpedanceController(Node):
         except Exception as e:
             self.get_logger().error(f'Parameter error: {str(e)}')
     
+    def alpha_beta_filter_tau(self, tau_meas, dt):
+        """
+        tau_meas : (7,) 原始计算得到的 tau
+        dt       : 控制周期
+        """
+
+        # ---------- prediction ----------
+        tau_pred  = self.tau_ab + self.dtau_ab * dt
+        dtau_pred = self.dtau_ab
+
+        # ---------- innovation ----------
+        err = tau_meas - tau_pred
+
+        # ---------- update ----------
+        self.tau_ab  = tau_pred  + self.tau_alpha * err
+        self.dtau_ab = dtau_pred + (self.tau_beta / max(dt, 1e-6)) * err
+
+        return self.tau_ab.copy()
+
+
     def predict_future_joint_state(q, dq, ddq_des, delay):
         dq_future = dq + ddq_des * delay
         q_future  = q + dq * delay + 0.5 * ddq_des * delay**2
