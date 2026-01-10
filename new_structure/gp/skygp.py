@@ -137,6 +137,7 @@ class SkyGP_rBCM:
         self.Y_list.append(np.zeros((self.y_dim, self.max_data)))
         self.localCount.append(0)
         self.expert_centers.append(np.zeros(self.x_dim))
+        print("appending expert centers")
         self.drop_centers.append(np.zeros(self.x_dim))
         self.drop_counts.append(0)
         self.L_all.append(np.zeros((self.max_data, self.max_data)))
@@ -149,6 +150,7 @@ class SkyGP_rBCM:
 
     def _insert_new_expert_near(self, near_idx):
         if self.last_x is None or len(self.expert_centers) <= 1:
+            print("creating from insert new expert")
             return self._create_new_expert()
 
         left_idx = max(near_idx - 1, 0)
@@ -173,6 +175,7 @@ class SkyGP_rBCM:
         self.Y_list.insert(insert_pos, np.zeros((self.y_dim, self.max_data)))
         self.localCount.insert(insert_pos, 0)
         self.expert_centers.insert(insert_pos, np.zeros(self.x_dim))
+        print("inserting expert centers")
         self.drop_centers.insert(insert_pos, np.zeros(self.x_dim))
         self.drop_counts.insert(insert_pos, 0)
         self.L_all.insert(insert_pos, np.zeros((self.max_data, self.max_data)))
@@ -259,6 +262,7 @@ class SkyGP_rBCM:
         self.update_param_incremental(x, y, model)
 
     def add_point(self, x, y):
+            print("max_experts:",self.max_experts)
             x = np.asarray(x)
             y = np.asarray(y).reshape(-1)
             
@@ -288,6 +292,7 @@ class SkyGP_rBCM:
                 self.expert_weights[model] = 1.0  # reset weight
                 # if expert does not exist
                 if model >= len(self.X_list):
+                    print("creating from add point1")
                     self._create_new_expert(model)
                 if self.localCount[model] < self.max_data:
                     idx = self.localCount[model]
@@ -359,6 +364,7 @@ class SkyGP_rBCM:
             if self.last_expert_idx is not None:
                 model = self._insert_new_expert_near(self.last_expert_idx)
             else:
+                print("creating from add point2")
                 model = self._create_new_expert()
             self._insert_into_expert(model, x_uncat, y_uncat) 
 
@@ -371,7 +377,6 @@ class SkyGP_rBCM:
 
             if len(self.expert_centers) == 0:
                 return np.zeros(self.y_dim), np.ones(self.y_dim) * 10.0
-
             raw_ls = self.model_params[self.expert_creation_order[0]]["log_lengthscale"]
             lengthscale_ref = np.exp(raw_ls[:, 0]) if np.ndim(raw_ls) == 2 else np.exp(raw_ls)
 
@@ -615,6 +620,7 @@ class SkyGP_rBCM:
 
         # 如果已存在专家，用新的超参重置其参数表
         if len(self.expert_creation_order) == 0:
+            print("creating from offline pretrain")
             self._create_new_expert()
         self._reinit_all_expert_params()
 

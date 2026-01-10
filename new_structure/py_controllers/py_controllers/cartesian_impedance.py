@@ -189,14 +189,12 @@ class CartesianImpedanceController(Node):
 
         #simulated dalay
         self.future_delay = self.declare_parameter(
-            'future_delay', 0.01 # 默认 60 ms
+            'future_delay', 0.005 # 默认 60 ms
         ).value
 
-        self.cloud_delay_steps = 0
-        self.y_hat_cloud_buffer = deque(
-            [np.zeros(7, dtype=float) for _ in range(self.cloud_delay_steps + 1)],
-            maxlen=self.cloud_delay_steps + 1
-        )
+        self.cloud_delay_steps = 100
+        self.y_hat_cloud_buffer = deque(maxlen=self.cloud_delay_steps)
+
 
         # Prediction history memory
         self.y_hat_mem = np.zeros(7)
@@ -446,17 +444,35 @@ class CartesianImpedanceController(Node):
             # print("tau_residual:", tau_residual)
 
             # === 云端延迟补偿 ===
+            # === 云端延迟补偿（时间戳对齐版）===
             if self.gp_active:
 
-                # 1️⃣ 取“最老”的 cloud（≈ t - Δt）
+                t_now = self.get_clock().now().nanoseconds * 1e-9
+
+                # with self._gp_lock:
                 if len(self.y_hat_cloud_buffer) > 0:
-                    y_cloud_delayed = self.y_hat_cloud_buffer[0]
+                    # 找“预测时间最接近当前时刻”的 cloud 结果
+                    best = min(
+                        self.y_hat_cloud_buffer,
+                        key=lambda e: abs(e["t"] - t_now)
+                    )
+                    y_cloud_delayed = best["y"]
                 else:
                     y_cloud_delayed = np.zeros(7)
 
+                self.y_hat_cloud = y_cloud_delayed
+
+
+                # 1️⃣ 取“最老”的 cloud（≈ t - Δt）
+                # if len(self.y_hat_cloud_buffer) > 0:
+                #     y_cloud_delayed = self.y_hat_cloud_buffer[0]
+                # else:
+                #     y_cloud_delayed = np.zeros(7)
+                # self.y_hat_cloud = y_cloud_delayed
+
                 # 2️⃣ 融合策略（你原来的 mode 放这里）
                 mode = self.gp_mode
-                mode = "local"
+                mode = "none"
 
                 if mode == "local":
                     self.y_hat_combined = self.y_hat_local
@@ -474,7 +490,7 @@ class CartesianImpedanceController(Node):
                     self.y_hat_combined = 0.5 * self.y_hat_local + 0.5 * y_cloud_delayed
 
                 # 3️⃣ 真正用于控制
-                # tau = tau - self.y_hat_combined
+                tau = tau - self.y_hat_combined
                 
 
 
@@ -515,7 +531,7 @@ class CartesianImpedanceController(Node):
                         self.ddq_des_joint,
                         self.tau_residual_filtered,
                     )
-                    self.y_hat_combined = self.y_hat_local   
+                    # self.y_hat_local = np.zeros(7)
                     # print(self.gp_counter)
                 # 2) 云端 GP：发异步请求（同一时刻的 q/dq/ddq/残差）
                 # === CLOUD GP 调用 === 
@@ -531,7 +547,7 @@ class CartesianImpedanceController(Node):
                     #   未来输入（不依赖 future_traj，不依赖任务空间）
                     #   永远可计算 —— 保证 cloud GP 每次都能收到预测输入
                     # ============================================================
-                    sigma_ddq = 0.1                    # rad/s^2
+                    sigma_ddq = 0.01                    # rad/s^2
                     delay = float(self.future_delay)
 
                     q_now   = self.q
@@ -612,6 +628,11 @@ class CartesianImpedanceController(Node):
                     #     ddq_samples.append(ddq_k)
 
                     # ---- cloud GP 特征输入 ----
+                    t_now = self.get_clock().now().nanoseconds * 1e-9
+                    t_target = t_now + self.future_delay
+
+                    req.t_target = t_target
+
                     # ---- 主 future ----
                     req.q_future = q_future_main.astype(np.float32).tolist()
                     req.dq_des_joint_future  = dq_future_main.astype(np.float32).tolist()
@@ -689,20 +710,29 @@ class CartesianImpedanceController(Node):
         try:
             resp = future.result()
             if resp is None:
+                print("response not received")
                 return
 
             y_cloud = np.array(resp.y_cloud, dtype=float)
             y_mem   = np.array(resp.y_cloud_aggregation, dtype=float)
 
-            with self._gp_lock:
+            # with self._gp_lock:
                 # 1️⃣ 保存“最新 cloud（t_now）”
-                self.y_hat_cloud = y_cloud
+                # self.y_hat_cloud = y_cloud
 
                 # 2️⃣ 推入 delay buffer（用于 t-Δt）
-                self.y_hat_cloud_buffer.append(y_cloud)
+                # self.y_hat_cloud_buffer.append(y_cloud)
+                # self.y_hat_cloud_buffer.append(y_mem)
+                
+                # t_now = self.get_clock().now().nanoseconds * 1e-9
 
-                # 3️⃣ 其他辅助信息
-                self.y_hat_mem = y_mem
+            self.y_hat_cloud_buffer.append({
+                "t": resp.t_target,
+                "y": y_cloud
+            })
+
+            # 3️⃣ 其他辅助信息
+            self.y_hat_mem = y_mem
 
         except Exception as e:
             self.get_logger().warn(f"[Controller] GP response error: {e}")

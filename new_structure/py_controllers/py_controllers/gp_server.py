@@ -145,6 +145,7 @@ class GPServer(Node):
             response.y_mem    = [0.0] * 7
             response.mem_dist = 1e6
 
+        response.t_target = request.t_target
         return response
 
 
@@ -298,16 +299,16 @@ class GPServer(Node):
         # key = 关节号（1..6），"default" 为所有关节的默认配置
         per_joint_cfg = {
             "default": dict(
-                max_data_per_expert=50,
+                max_data_per_expert=200,
                 nearest_k=4,
-                max_experts=100,
+                max_experts=1000,
                 timescale=0.03,
             ),
             # 举例：如果你想让 6 号关节忘得快一点、专家少一点，可以单独改：
             6: dict(
-                max_data_per_expert=50,
+                max_data_per_expert=200,
                 nearest_k=4,
-                max_experts=100,
+                max_experts=1000,
                 timescale=0.05,
             ),
         }

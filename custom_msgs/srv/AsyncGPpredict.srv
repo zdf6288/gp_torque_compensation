@@ -11,9 +11,12 @@ int32 n_future_samples
 float32[] q_future_samples_flat
 float32[] dq_future_samples_flat
 float32[] ddq_future_samples_flat
+
+float64 t_target
 ---
 float32[] y_local
 float32[] y_cloud
 float32[] y_cloud_aggregation
 float32[] y_mem
 float32 mem_dist
+float64 t_target
