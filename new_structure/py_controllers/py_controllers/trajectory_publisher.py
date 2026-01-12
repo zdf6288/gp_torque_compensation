@@ -83,7 +83,7 @@ class TrajectoryPublisher(Node):
         self.period = 1.0 / self.frequency
         self.last_round = -1
 
-        self.declare_parameter("rounds_per_mode", 2)
+        self.declare_parameter("rounds_per_mode", 4)
         self.rounds_per_mode = self.get_parameter("rounds_per_mode").value
 
         self.declare_parameter("max_rounds", 4)

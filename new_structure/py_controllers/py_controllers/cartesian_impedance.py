@@ -82,6 +82,7 @@ class CartesianImpedanceController(Node):
         self.t_initial = None               # initial time
         self.t_last = None                  # last time
         self.dq_buffer = None               # buffer for joint velocity dq
+        self.dq = None
         self.zero_jacobian_buffer = None    # buffer for zero jacobian matrix in flange frame
         self.jacobian_buffer = None         # buffer for jacobian matrix in flange frame
 
@@ -180,6 +181,9 @@ class CartesianImpedanceController(Node):
         self.future_n_samples = 0         # 未来采样点个数
         self.future_ddq_noise_std = 0.1    # rad/s^2，加速度噪声强度    
 
+        self.gp_send_seq = 0        # 发送给 cloud 的请求编号
+        self.gp_recv_seq = -1      # 最近一次收到的请求编号
+
         # ===== Alpha-Beta filter for tau =====
         self.tau_ab      = np.zeros(7)   # τ̂
         self.dtau_ab     = np.zeros(7)   # τ̇̂
@@ -189,7 +193,7 @@ class CartesianImpedanceController(Node):
 
         #simulated dalay
         self.future_delay = self.declare_parameter(
-            'future_delay', 0.005 # 默认 60 ms
+            'future_delay', 0 # 默认 60 ms
         ).value
 
         self.cloud_delay_steps = 100
@@ -317,6 +321,7 @@ class CartesianImpedanceController(Node):
             q = np.array(msg.position)
             self.q = q
             dq = np.array(msg.velocity)
+            self.dq = dq
             if self.t_initial is None:
                 self.t_initial = t_now
                 self.t_last = t_now
@@ -472,7 +477,7 @@ class CartesianImpedanceController(Node):
 
                 # 2️⃣ 融合策略（你原来的 mode 放这里）
                 mode = self.gp_mode
-                mode = "none"
+                mode = "fusion"
 
                 if mode == "local":
                     self.y_hat_combined = self.y_hat_local
@@ -644,9 +649,14 @@ class CartesianImpedanceController(Node):
                     req.dq_future_samples_flat = np.array(dq_samples, dtype=np.float32).reshape(-1).tolist()
                     req.ddq_future_samples_flat = np.array(ddq_samples, dtype=np.float32).reshape(-1).tolist()
 
+                    self.gp_send_seq = self.gp_send_seq+1
+                    req.seq = float(self.gp_send_seq)
+
                     # ⭐⭐⭐ 缺失的关键两行 ⭐⭐⭐
                     future = self.gp_client.call_async(req)
                     future.add_done_callback(self._gp_response_callback)
+                else:
+                    print("service not ready!!!!!!!!!!!!!!!!!")
 
             # publish on topic /effort_command
             self.effort_msg.efforts = tau.tolist()
@@ -715,7 +725,18 @@ class CartesianImpedanceController(Node):
 
             y_cloud = np.array(resp.y_cloud, dtype=float)
             y_mem   = np.array(resp.y_cloud_aggregation, dtype=float)
-
+            
+            print(resp.seq)
+            if resp.seq == self.gp_send_seq:
+                print(1)
+            else:
+                print(0)
+            # self.y_hat_local = self._gp_predict_and_update(
+            #             self.q,
+            #             self.dq,
+            #             self.ddq_des_joint,
+            #             self.tau_residual_filtered,
+            #         )
             # with self._gp_lock:
                 # 1️⃣ 保存“最新 cloud（t_now）”
                 # self.y_hat_cloud = y_cloud
@@ -728,7 +749,7 @@ class CartesianImpedanceController(Node):
 
             self.y_hat_cloud_buffer.append({
                 "t": resp.t_target,
-                "y": y_cloud
+                "y": y_mem
             })
 
             # 3️⃣ 其他辅助信息
@@ -793,7 +814,7 @@ class CartesianImpedanceController(Node):
         os._exit(0)
 
     def _load_gp_models(self, dir_path="./new_structure/gp/gp_models"):
-        """加载离线训练好的每关节GP，支持高维输入（14或21）"""
+        """加载离线训练好的每关节GP，支持高维输入（14或21）""" 
 
         if not self._ensure_skygp_import():
             self.get_logger().error("[GP] skygp import failed; pickle loading will likely fail.")
@@ -802,6 +823,24 @@ class CartesianImpedanceController(Node):
         abs_dir = os.path.abspath(dir_path)
         self.get_logger().info(f"[GP] 当前工作目录: {cwd}")
         self.get_logger().info(f"[GP] 模型目录绝对路径: {abs_dir}")
+        
+        # ===== 按关节定制 GP 参数（你可以自己改这些值） =====
+        # key = 关节号（1..6），"default" 为所有关节的默认配置
+        per_joint_cfg = {
+            "default": dict(
+                max_data_per_expert=50,
+                nearest_k=4,
+                max_experts=4,
+                timescale=0.03,
+            ),
+            # 举例：如果你想让 6 号关节忘得快一点、专家少一点，可以单独改：
+            6: dict(
+                max_data_per_expert=50,
+                nearest_k=4,
+                max_experts=4,
+                timescale=0.05,
+            ),
+        }
 
         self.gp_models = {}
         loaded = 0
@@ -824,6 +863,31 @@ class CartesianImpedanceController(Node):
                 stats = pack["stats"]   # (Xm, Xs, Ym, Ys)
                 Xm, Xs, Ym, Ys = stats
                 x_dim = int(len(Xm))    # 自动推断 14 或 21 维
+
+                # ===== 在这里覆盖 SkyGP_rBCM 的参数 =====
+                cfg = per_joint_cfg.get(j, per_joint_cfg["default"])
+                try:
+                    # 只有在模型里确实有这些属性时才改，避免旧版本崩溃
+                    if hasattr(model, "max_data_per_expert"):
+                        model.max_data_per_expert = int(cfg["max_data_per_expert"])
+                    if hasattr(model, "nearest_k"):
+                        model.nearest_k = int(cfg["nearest_k"])
+                    if hasattr(model, "max_experts"):
+                        model.max_experts = int(cfg["max_experts"])
+                    if hasattr(model, "timescale"):
+                        model.timescale = float(cfg["timescale"])
+
+                    self.get_logger().info(
+                        f"[GP] joint{j} loaded: x_dim={x_dim}, "
+                        f"max_data_per_expert={getattr(model, 'max_data_per_expert', 'NA')}, "
+                        f"nearest_k={getattr(model, 'nearest_k', 'NA')}, "
+                        f"max_experts={getattr(model, 'max_experts', 'NA')}, "
+                        f"timescale={getattr(model, 'timescale', 'NA')}"
+                    )
+                except Exception as e:
+                    self.get_logger().warn(
+                        f"[GP] joint{j}: override model params failed: {e}"
+                    )
 
                 self.gp_models[j] = {
                     "model": model,

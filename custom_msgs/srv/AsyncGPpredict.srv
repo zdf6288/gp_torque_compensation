@@ -13,6 +13,8 @@ float32[] dq_future_samples_flat
 float32[] ddq_future_samples_flat
 
 float64 t_target
+float64 seq
+float64 t_send
 ---
 float32[] y_local
 float32[] y_cloud
@@ -20,3 +22,5 @@ float32[] y_cloud_aggregation
 float32[] y_mem
 float32 mem_dist
 float64 t_target
+float64 seq
+float64 t_send

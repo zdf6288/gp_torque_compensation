@@ -175,7 +175,6 @@ class SkyGP_rBCM:
         self.Y_list.insert(insert_pos, np.zeros((self.y_dim, self.max_data)))
         self.localCount.insert(insert_pos, 0)
         self.expert_centers.insert(insert_pos, np.zeros(self.x_dim))
-        print("inserting expert centers")
         self.drop_centers.insert(insert_pos, np.zeros(self.x_dim))
         self.drop_counts.insert(insert_pos, 0)
         self.L_all.insert(insert_pos, np.zeros((self.max_data, self.max_data)))
@@ -262,7 +261,6 @@ class SkyGP_rBCM:
         self.update_param_incremental(x, y, model)
 
     def add_point(self, x, y):
-            print("max_experts:",self.max_experts)
             x = np.asarray(x)
             y = np.asarray(y).reshape(-1)
             
