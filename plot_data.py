@@ -318,16 +318,16 @@ def plot_data_from_csv(csv_filename):
             #     ax.plot(time_history, yh_c, '--', linewidth=1.5, label='y_hat_combined')
 
             # 画 local
-            # if YH_local is not None:
-            #     yh_l = YH_local[:, j]
-            #     ax.plot(time_history, yh_l, '-', linewidth=1.2, alpha=0.8, label='y_hat_local')
+            if YH_local is not None:
+                yh_l = YH_local[:, j]
+                ax.plot(time_history, yh_l, '-', linewidth=1.2, alpha=0.8, label='y_hat_local')
 
             # # 画 cloud
-            # if YH_cloud is not None:
-            #     yh_cl = YH_cloud[:, j]
-            #     ax.plot(time_history, yh_cl, ':', linewidth=1.2, alpha=0.8, label='cloud')
-            #     rem = tr - yh_cl
-            #     ax.plot(time_history, rem, linewidth=1.2, alpha=0.8, label='true - cloud')
+            if YH_cloud is not None:
+                yh_cl = YH_cloud[:, j]
+                ax.plot(time_history, yh_cl, ':', linewidth=1.2, alpha=0.8, label='cloud')
+                rem = tr - yh_cl
+                ax.plot(time_history, rem, linewidth=1.2, alpha=0.8, label='true - cloud')
 
             # if YH_mem is not None:
             #     yh_mem = YH_mem[:, j]
@@ -336,9 +336,9 @@ def plot_data_from_csv(csv_filename):
             #     ax.plot(time_history, rem, linewidth=1.2, alpha=0.8, label='true - history')
 
             # 画剩余误差：残差 - combined（如果有）
-            if YH_comb is not None:
-                rem = tr - YH_comb[:, j]
-                ax.plot(time_history, rem, linewidth=1.0, alpha=0.7, label='residual - combined')
+            # if YH_comb is not None:
+            #     rem = tr - YH_comb[:, j]
+            #     ax.plot(time_history, rem, linewidth=1.0, alpha=0.7, label='residual - combined')
 
             if YH_comb is not None:
                 rem = tr - YH_local[:, j]
