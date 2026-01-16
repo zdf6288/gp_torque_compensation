@@ -194,10 +194,10 @@ class CartesianImpedanceController(Node):
 
         #simulated dalay
         self.future_delay = self.declare_parameter(
-            'future_delay', 0.01 # 默认 60 ms
+            'future_delay', 0.015 # 默认 60 ms
         ).value
         self.delay_steps = 0
-        self.state_delay_steps = 10   # 你想模拟的通信延迟：20个周期
+        self.state_delay_steps = 15   # 你想模拟的通信延迟：20个周期
         self.state_buffer = deque(maxlen=1000)  # 存2秒(1kHz)都够
         self.cloud_delay_steps = 100
         self.y_hat_cloud_buffer = deque(maxlen=self.cloud_delay_steps)
@@ -480,7 +480,7 @@ class CartesianImpedanceController(Node):
 
                 # 2️⃣ 融合策略（你原来的 mode 放这里）
                 mode = self.gp_mode
-                mode = "fusion"
+                mode = "local"
 
                 if mode == "local":
                     self.y_hat_combined = self.y_hat_local
@@ -533,19 +533,61 @@ class CartesianImpedanceController(Node):
                 self.gp_counter += 1
                 # if self.gp_counter % self.gp_stride == 0:
                 # 1) 本地 GP 立刻算一次（同步）
-                self.y_hat_local = self._gp_predict_and_update(
-                    self.q,
-                    dq,
-                    self.ddq_des_joint,
-                    self.tau_residual_filtered,
-                    self.gp_models_small
-                )
+                # self.y_hat_local = self._gp_predict_and_update(
+                #     self.q,
+                #     dq,
+                #     self.ddq_des_joint,
+                #     self.tau_residual_filtered,
+                #     self.gp_models_small
+                # )
+                # self.y_hat_cloud = self._gp_predict_and_update(
+                #     self.q,
+                #     dq,
+                #     self.ddq_des_joint,
+                #     self.tau_residual_filtered,
+                #     self.gp_models_big
+                # )
+
                 self.state_buffer.append({
                     "q": self.q.copy(),
                     "dq": dq.copy(),
                     "ddq": self.ddq_des_joint.copy(),     # 推荐用命令加速度
                     "tau_res": self.tau_residual_filtered.copy()
                 })
+
+                N = self.state_delay_steps
+
+                if len(self.state_buffer) > N:
+                    s = self.state_buffer[-1 - N]   # ✅ N步前的状态（关键行）
+
+                    q_old   = s["q"]
+                    dq_old  = s["dq"]
+                    ddq_old = s["ddq"]
+                    tau_res_old = s["tau_res"]
+
+                    # 用同一个 delay（秒），把 old 状态推进到它的 future（可选）
+                    delay = float(self.future_delay)   # 例如 0.002s，也可以设成 N*dt
+                    q_future = q_old + dq_old * delay + 0.5 * ddq_old * delay**2
+                    dq_future = dq_old + ddq_old * delay
+                    ddq_future = ddq_old
+
+                    self.y_hat_cloud = self._gp_predict_and_update(
+                        q_future,
+                        dq_future,
+                        ddq_future,
+                        self.tau_residual_filtered,          # ✅ 更新用旧残差更一致
+                        self.gp_models_big,
+                        update = False
+                    )
+                    _ = self._gp_predict_and_update(
+                        q_old,
+                        dq_old,
+                        ddq_old,
+                        tau_res_old,          # ✅ 更新用旧残差更一致
+                        self.gp_models_big
+                    )
+                else:
+                    self.y_hat_cloud = np.zeros(7)
                 
                 # self.y_hat_cloud = self._gp_predict_and_update(
                 #     self.q,
@@ -583,31 +625,40 @@ class CartesianImpedanceController(Node):
                     dq_future_main = dq_now + ddq_now * delay
                     ddq_future_main = ddq_now
 
-                    N = self.state_delay_steps
+                    # N = self.state_delay_steps
 
-                    if len(self.state_buffer) > N:
-                        s = self.state_buffer[-1 - N]   # ✅ N步前的状态（关键行）
+                    # if len(self.state_buffer) > N:
+                    #     s = self.state_buffer[-1 - N]   # ✅ N步前的状态（关键行）
 
-                        q_old   = s["q"]
-                        dq_old  = s["dq"]
-                        ddq_old = s["ddq"]
-                        tau_res_old = s["tau_res"]
+                    #     q_old   = s["q"]
+                    #     dq_old  = s["dq"]
+                    #     ddq_old = s["ddq"]
+                    #     tau_res_old = s["tau_res"]
 
-                        # 用同一个 delay（秒），把 old 状态推进到它的 future（可选）
-                        delay = float(self.future_delay)   # 例如 0.002s，也可以设成 N*dt
-                        q_future = q_old + dq_old * delay + 0.5 * ddq_old * delay**2
-                        dq_future = dq_old + ddq_old * delay
-                        ddq_future = ddq_old
+                    #     # 用同一个 delay（秒），把 old 状态推进到它的 future（可选）
+                    #     delay = float(self.future_delay)   # 例如 0.002s，也可以设成 N*dt
+                    #     q_future = q_old + dq_old * delay + 0.5 * ddq_old * delay**2
+                    #     dq_future = dq_old + ddq_old * delay
+                    #     ddq_future = ddq_old
 
-                        self.y_hat_cloud = self._gp_predict_and_update(
-                            q_future,
-                            dq_future,
-                            ddq_future,
-                            tau_res_old,          # ✅ 更新用旧残差更一致
-                            self.gp_models_big
-                        )
-                    else:
-                        self.y_hat_cloud = np.zeros(7)
+                    #     # self.y_hat_cloud = self._gp_predict_and_update(
+                    #     #     q_future,
+                    #     #     dq_future,
+                    #     #     ddq_future,
+                    #     #     tau_res_old,          # ✅ 更新用旧残差更一致
+                    #     #     self.gp_models_big,
+                    #     #     update = False
+                    #     # )
+                    #     # _ = self._gp_predict_and_update(
+                    #     #     self.q,
+                    #     #     dq,
+                    #     #     self.ddq_des_joint,
+                    #     #     tau_res_old,          # ✅ 更新用旧残差更一致
+                    #     #     self.gp_models_big
+                    #     # )
+                    #     self.y_hat_cloud = np.zeros(7)
+                    # else:
+                    #     self.y_hat_cloud = np.zeros(7)
 
                     # ============================================================
                     # ✅ 使用 future_traj_service 给出的未来任务空间轨迹
@@ -954,14 +1005,14 @@ class CartesianImpedanceController(Node):
             "default": dict(
                 max_data_per_expert=50,
                 nearest_k=4,
-                max_experts=100,
+                max_experts=50,
                 timescale=0.03,
             ),
             # 举例：如果你想让 6 号关节忘得快一点、专家少一点，可以单独改：
             6: dict(
                 max_data_per_expert=50,
                 nearest_k=4,
-                max_experts=100,
+                max_experts=50,
                 timescale=0.05,
             ),
         }
@@ -1028,7 +1079,7 @@ class CartesianImpedanceController(Node):
         self.gp_ready = (loaded > 0)
         self.get_logger().info(f"[GP] 共加载 {loaded} 个模型，ready={self.gp_ready}")
 
-    def _gp_predict_and_update(self, q, dq_des_joint, ddq_des_joint, tau_residual, models):
+    def _gp_predict_and_update(self, q, dq_des_joint, ddq_des_joint, tau_residual, models, update = True):
         """
         本地 GP：高维输入版本（14维 or 21维）
         每个关节都使用相同的 x_full = concat([q, dq, ddq])
@@ -1083,11 +1134,12 @@ class CartesianImpedanceController(Node):
 
             if np.isfinite(y_std):
                 try:
-                    model.add_point(
-                        x_std.astype(np.float32),
-                        np.array([y_std], dtype=np.float32)
-                    )
-                    self.offline_limit=self.offline_limit+1
+                    if update:
+                        model.add_point(
+                            x_std.astype(np.float32),
+                            np.array([y_std], dtype=np.float32)
+                        )
+                        self.offline_limit=self.offline_limit+1
                 except Exception as e:
                     self.get_logger().error(f"[GP] joint{j} add_point failed: {e}")
 
