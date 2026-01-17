@@ -149,6 +149,7 @@ class CartesianImpedanceController(Node):
         self.y_hat_history = []          # 记录每次控制回路使用的 y_hat (7,)
         self.tau_residual_filtered = np.zeros(7)  # 滤波后的 tau_residual (7,)
         self.tau_residual_history = []   # 记录 tau_residual (7,)
+        self.tau_residual_raw_history = []   # 滤波前残差
 
         # === local GP ===
         self.gp_models_small = {}
@@ -194,10 +195,10 @@ class CartesianImpedanceController(Node):
 
         #simulated dalay
         self.future_delay = self.declare_parameter(
-            'future_delay', 0.015 # 默认 60 ms
+            'future_delay', 0.05 # 默认 60 ms
         ).value
         self.delay_steps = 0
-        self.state_delay_steps = 15   # 你想模拟的通信延迟：20个周期
+        self.state_delay_steps = 50   # 你想模拟的通信延迟：20个周期
         self.state_buffer = deque(maxlen=1000)  # 存2秒(1kHz)都够
         self.cloud_delay_steps = 100
         self.y_hat_cloud_buffer = deque(maxlen=self.cloud_delay_steps)
@@ -445,6 +446,8 @@ class CartesianImpedanceController(Node):
 
             # === 计算残差 ===
             tau_residual = tau_measured - tau - gravity_measured
+            if self.data_recording_enabled:
+                self.tau_residual_raw_history.append(tau_residual.tolist())
             self.tau_residual_filtered = (
                 0.02 * tau_residual + 0.98 * self.tau_residual_filtered
             )
@@ -566,15 +569,25 @@ class CartesianImpedanceController(Node):
                     tau_res_old = s["tau_res"]
 
                     # 用同一个 delay（秒），把 old 状态推进到它的 future（可选）
-                    delay = float(self.future_delay)   # 例如 0.002s，也可以设成 N*dt
-                    q_future = q_old + dq_old * delay + 0.5 * ddq_old * delay**2
-                    dq_future = dq_old + ddq_old * delay
-                    ddq_future = ddq_old
+                    delay = float(self.future_delay)
+
+                    q_now = self.q
+                    dq_meas = dq                      # 真实测量速度
+                    dq_ref = self.dq_des_joint        # 参考速度（J^+ * dx_des）
+                    ddq_cmd = self.ddq_des_joint      # 指令加速度（从任务空间映射）
+
+                    # q_future_main  = q_now + dq_meas * delay + 0.5 * ddq_cmd * delay**2
+                    # dq_future_main = dq_meas + ddq_cmd * delay
+                    # ddq_future_main = ddq_cmd
+
+                    q_future_main  = q_now + dq_ref * delay + 0.5 * ddq_cmd * delay**2
+                    dq_future_main = dq_ref + ddq_cmd * delay
+                    ddq_future_main = ddq_cmd
 
                     self.y_hat_cloud = self._gp_predict_and_update(
-                        q_future,
-                        dq_future,
-                        ddq_future,
+                        q_future_main,
+                        dq_future_main,
+                        ddq_future_main,
                         self.tau_residual_filtered,          # ✅ 更新用旧残差更一致
                         self.gp_models_big,
                         update = False
@@ -1004,15 +1017,15 @@ class CartesianImpedanceController(Node):
         per_joint_cfg = {
             "default": dict(
                 max_data_per_expert=50,
-                nearest_k=4,
-                max_experts=50,
+                nearest_k=2,
+                max_experts=100,
                 timescale=0.03,
             ),
             # 举例：如果你想让 6 号关节忘得快一点、专家少一点，可以单独改：
             6: dict(
                 max_data_per_expert=50,
-                nearest_k=4,
-                max_experts=50,
+                nearest_k=2,
+                max_experts=100,
                 timescale=0.05,
             ),
         }
@@ -1201,6 +1214,7 @@ class CartesianImpedanceController(Node):
                 self.ddq_des_joint_history,
                 self.y_hat_history,            # <--- 新增
                 self.tau_residual_history,     # <--- 新增
+                self.tau_residual_raw_history,
             ]
 
             min_len = min(len(s) for s in series_list)
@@ -1226,6 +1240,7 @@ class CartesianImpedanceController(Node):
                 header.extend([f'y_hat_cloud_{i+1}' for i in range(7)])    # cloud
                 header.extend([f'y_hat_mem_{i+1}' for i in range(7)])    # cloud
                 header.extend([f'tau_residual_{i+1}' for i in range(7)])
+                header.extend([f'tau_residual_raw_{i+1}' for i in range(7)])
                 writer.writerow(header)
 
                 for i in range(min_len):
@@ -1274,6 +1289,11 @@ class CartesianImpedanceController(Node):
                     
                     if i < len(self.tau_residual_history):
                         row.extend(self.tau_residual_history[i])
+                    else:
+                        row.extend([0.0]*7)
+                    
+                    if i < len(self.tau_residual_raw_history):
+                        row.extend(self.tau_residual_raw_history[i])
                     else:
                         row.extend([0.0]*7)
                     writer.writerow(row)
