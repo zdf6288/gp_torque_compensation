@@ -1,3 +1,4 @@
+# ---- Request ----
 float32[] q
 float32[] dq_des_joint
 float32[] ddq_des_joint
@@ -11,9 +12,17 @@ int32 n_future_samples
 float32[] q_future_samples_flat
 float32[] dq_future_samples_flat
 float32[] ddq_future_samples_flat
+
+# (可选) float64 seq
 ---
+# ---- Response ----
 float32[] y_local
 float32[] y_cloud
 float32[] y_cloud_aggregation
 float32[] y_mem
 float32 mem_dist
+
+# ✅ 新增：方差（Nm^2）
+float32[] var_local
+float32[] var_cloud
+float32[] var_cloud_aggregation

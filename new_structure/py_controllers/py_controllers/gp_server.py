@@ -74,19 +74,15 @@ class GPServer(Node):
                 dq_samples  = np.zeros((0, 7), dtype=np.float32)
                 ddq_samples = np.zeros((0, 7), dtype=np.float32)
 
-            # =====================================================
-            # A) 当前 GP：预测 + 更新（唯一允许 update 的地方）
-            # =====================================================
-            y_gp_cur, _, _, _ = self._gp_predict_vector(
+            # A) 当前：预测 + 更新
+            mu_cur, var_cur, _, _ = self._gp_predict_vector(
                 q, dq, ddq,
                 tau_residual=tau,
                 update=True
             )
 
-            # =====================================================
-            # B) 未来主预测（❌ 不更新）
-            # =====================================================
-            y_gp_fut,_, y_mem_cur, mem_dist_cur = self._gp_predict_vector(
+            # B) 未来主预测（不更新）
+            mu_fut, var_fut, y_mem_cur, mem_dist_cur = self._gp_predict_vector(
                 q_f, dq_f, ddq_f,
                 tau_residual=None,
                 update=False
@@ -98,44 +94,47 @@ class GPServer(Node):
             if N > 0:
                 mu_list  = []
                 var_list = []
-
                 for k in range(N):
                     mu_k, var_k, _, _ = self._gp_predict_vector(
-                        q_samples[k],
-                        dq_samples[k],
-                        ddq_samples[k],
+                        q_samples[k], dq_samples[k], ddq_samples[k],
                         tau_residual=None,
                         update=False
                     )
-
                     mu_list.append(mu_k)
                     var_list.append(var_k)
 
                 mu_arr  = np.stack(mu_list, axis=0)     # (N,7)
                 var_arr = np.stack(var_list, axis=0)    # (N,7)
 
-                # ===== PoE 融合 =====
                 eps = 1e-6
                 precision = 1.0 / (var_arr + eps)       # (N,7)
-
                 precision_sum = np.sum(precision, axis=0)          # (7,)
                 weighted_mu   = np.sum(mu_arr * precision, axis=0) # (7,)
 
                 y_gp_future_agg = weighted_mu / precision_sum
-                # y_gp_future_agg = np.mean(mu_arr, axis=0)   # shape: (7,)
-                # print(y_gp_future_agg)
+
+                # ✅ PoE 聚合方差：1 / sum(precision)
+                var_gp_future_agg = 1.0 / (precision_sum + eps)
+
             else:
                 y_gp_future_agg = np.zeros(7, dtype=np.float32)
+                var_gp_future_agg = np.ones(7, dtype=np.float32) * 1e6   # 或者 zeros，看你习惯
+
 
 
             # =====================================================
             # D) 返回
             # =====================================================
-            response.y_local  = y_gp_cur.tolist()
-            response.y_cloud  = y_gp_fut.tolist()
+            response.y_local  = mu_cur.tolist()
+            response.y_cloud  = mu_fut.tolist()
             response.y_cloud_aggregation = y_gp_future_agg.tolist()
             response.y_mem    = y_mem_cur.tolist()
             response.mem_dist = float(mem_dist_cur)
+
+            # ✅ 新增
+            response.var_local = var_cur.tolist()
+            response.var_cloud = var_fut.tolist()
+            response.var_cloud_aggregation = var_gp_future_agg.tolist()
 
         except Exception as e:
             self.get_logger().error(f"[GPServer] callback error: {e}")
@@ -144,6 +143,9 @@ class GPServer(Node):
             response.y_cloud_aggregation = [0.0] * 7
             response.y_mem    = [0.0] * 7
             response.mem_dist = 1e6
+            response.var_local = [0.0]*7
+            response.var_cloud = [0.0]*7
+            response.var_cloud_aggregation = [0.0]*7
 
         return response
 
@@ -300,14 +302,14 @@ class GPServer(Node):
             "default": dict(
                 max_data_per_expert=50,
                 nearest_k=4,
-                max_experts=100,
+                max_experts=50,
                 timescale=0.03,
             ),
             # 举例：如果你想让 6 号关节忘得快一点、专家少一点，可以单独改：
             6: dict(
                 max_data_per_expert=50,
                 nearest_k=4,
-                max_experts=100,
+                max_experts=50,
                 timescale=0.05,
             ),
         }

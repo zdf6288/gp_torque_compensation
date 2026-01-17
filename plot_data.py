@@ -289,15 +289,18 @@ def plot_data_from_csv(csv_filename):
     yhat_local_cols = cols_1to7(df, 'y_hat_local_')
     yhat_cloud_cols = cols_1to7(df, 'y_hat_cloud_')
     yhat_mem_cols = cols_1to7(df,'y_hat_mem_')
+    yhat_hist_cols = cols_1to7(df, 'y_hat_hist_')
     res_cols        = cols_1to7(df, 'tau_residual_')
 
-    if len(res_cols) == 7 and (len(yhat_comb_cols) == 7 or len(yhat_local_cols) == 7 or len(yhat_cloud_cols) == 7 or len(yhat_mem_cols) == 7):
+    if len(res_cols) == 7 and (len(yhat_comb_cols) == 7 or len(yhat_local_cols) == 7 or len(yhat_cloud_cols) == 7 or len(yhat_mem_cols) == 7 or len(yhat_hist_cols) == 7):
         TR = df[res_cols].values       # shape [N,7]
 
         YH_comb  = df[yhat_comb_cols].values  if len(yhat_comb_cols)  == 7 else None
         YH_local = df[yhat_local_cols].values if len(yhat_local_cols) == 7 else None
         YH_cloud = df[yhat_cloud_cols].values if len(yhat_cloud_cols) == 7 else None
         YH_mem = df[yhat_mem_cols].values if len(yhat_mem_cols) == 7 else None
+        YH_hist = df[yhat_hist_cols].values if len(yhat_hist_cols) == 7 else None
+
 
         fig3, axes3 = plt.subplots(3, 3, figsize=(18, 14))
         fig3.suptitle('Per-Joint: GP predictions vs tau_residual', fontsize=14)
@@ -317,28 +320,53 @@ def plot_data_from_csv(csv_filename):
             #     yh_c = YH_comb[:, j]
             #     ax.plot(time_history, yh_c, '--', linewidth=1.5, label='y_hat_combined')
 
+            # 画 cloud
+            if YH_cloud is not None:
+                yh_cl = YH_cloud[:, j]
+                yh_l  = YH_local[:, j]
+
+                #原有的
+                ax.plot(time_history, yh_cl, ':', linewidth=1.2, alpha=0.8, label='cloud')
+            #     rem = tr - yh_cl
+            #     ax.plot(time_history, rem, linewidth=1.2, alpha=0.8, label='true-cloud')
+
+                # ✅ 新增：|true-cloud| - |true-local|
+                # err_cloud_abs = np.abs(tr - yh_cl)
+                # err_local_abs = np.abs(tr - yh_l)
+                # diff_abs_err  = err_cloud_abs - err_local_abs
+                # ax.plot(time_history, diff_abs_err, '--', linewidth=1.4, alpha=0.9,
+                #         label='|true-cloud| - |true-local|')
+
+
+            # if YH_hist is not None:
+            #     yh_h = YH_hist[:, j]
+            #     ax.plot(time_history, yh_h, '-.', linewidth=1.2, alpha=0.8, label='y_hat_hist')
+            #     rem_h = tr - yh_h
+            #     ax.plot(time_history, rem_h, linewidth=1.2, alpha=0.8, label='true-hist')
+
+            # if YH_mem is not None:
+            #     yh_mem = YH_mem[:, j]
+            #     ax.plot(time_history, yh_mem, ':', linewidth=1.2, alpha=0.8, label='history')
+            #     rem = tr - yh_mem
+            #     ax.plot(time_history, rem, linewidth=1.2, alpha=0.8, label='true - history')
+
             # 画 local
             if YH_local is not None:
                 yh_l = YH_local[:, j]
                 ax.plot(time_history, yh_l, '-', linewidth=1.2, alpha=0.8, label='y_hat_local')
+                # rem = tr - yh_l
+                # ax.plot(time_history, rem, linewidth=1.2, alpha=0.8, label='true-local')
+                err_local_abs = np.abs(tr - yh_l)
+                err_combined_abs = np.abs(tr-YH_comb[:, j])
+                diff_abs_err = err_local_abs-err_combined_abs
+                ax.plot(time_history, diff_abs_err, '--', linewidth=1.4, alpha=0.9,
+                        label='|true-local| - |true-combined|')
 
-            # 画 cloud
-            if YH_cloud is not None:
-                yh_cl = YH_cloud[:, j]
-                ax.plot(time_history, yh_cl, ':', linewidth=1.2, alpha=0.8, label='cloud')
-                rem = tr - yh_cl
-                ax.plot(time_history, rem, linewidth=1.2, alpha=0.8, label='true - cloud')
-
-            if YH_mem is not None:
-                yh_mem = YH_mem[:, j]
-                ax.plot(time_history, yh_mem, ':', linewidth=1.2, alpha=0.8, label='history')
-                rem = tr - yh_mem
-                ax.plot(time_history, rem, linewidth=1.2, alpha=0.8, label='true - history')
 
             # 画剩余误差：残差 - combined（如果有）
-            if YH_comb is not None:
-                rem = tr - YH_comb[:, j]
-                ax.plot(time_history, rem, linewidth=1.0, alpha=0.7, label='residual - combined')
+            # if YH_comb is not None:
+            #     rem = tr - YH_comb[:, j]
+            #     ax.plot(time_history, rem, linewidth=1.0, alpha=0.7, label='residual - combined')
 
             #     # 简单统计：corr / MSE / MAE
             #     mask = np.isfinite(tr) & np.isfinite(YH_comb[:, j])
