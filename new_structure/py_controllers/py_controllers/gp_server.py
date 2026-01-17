@@ -25,6 +25,17 @@ class GPServer(Node):
         self.n_samples = int(self.get_parameter('gp_n_samples').value)
         self.sample_radius = float(self.get_parameter('gp_sample_radius').value)
 
+        self.declare_parameter("corr_kq", 0.2)
+        self.declare_parameter("corr_kdq", 0.1)
+        self.declare_parameter("corr_clip_q", 0.3)    # rad
+        self.declare_parameter("corr_clip_dq", 10.0)   # rad/s
+
+        self.corr_kq = float(self.get_parameter("corr_kq").value)
+        self.corr_kdq = float(self.get_parameter("corr_kdq").value)
+        self.corr_clip_q = float(self.get_parameter("corr_clip_q").value)
+        self.corr_clip_dq = float(self.get_parameter("corr_clip_dq").value)
+
+
         # 先确保 skygp 导入
         self._ensure_skygp_import()
         # 加载离线训练的模型
@@ -54,12 +65,22 @@ class GPServer(Node):
             ddq = np.array(request.ddq_des_joint, dtype=np.float32)
             tau = np.array(request.tau_residual, dtype=np.float32)
 
-            # ===============================
             # 2) 未来主状态（controller 预测的）
             # ===============================
             q_f   = np.array(request.q_future, dtype=np.float32)
             dq_f  = np.array(request.dq_des_joint_future, dtype=np.float32)
             ddq_f = np.array(request.ddq_des_joint_future, dtype=np.float32)
+
+            # ===============================
+            # 2.5) 误差注入校正（把云端用于预测的状态往本地拉近）
+            # ===============================
+            q_corr  = np.array(request.q_correction, dtype=np.float32) if len(request.q_correction) else np.zeros(7, np.float32)
+            dq_corr = np.array(request.dq_correction, dtype=np.float32) if len(request.dq_correction) else np.zeros(7, np.float32)
+
+            # 校正：q_used = q_f + K * corr
+            q_f_used  = q_f  + self.corr_kq  * q_corr
+            dq_f_used = dq_f + self.corr_kdq * dq_corr
+            ddq_f_used = ddq_f
 
             # ===============================
             # 3) 多采样 future
@@ -87,10 +108,10 @@ class GPServer(Node):
             # B) 未来主预测（❌ 不更新）
             # =====================================================
             y_gp_fut,_, y_mem_cur, mem_dist_cur = self._gp_predict_vector(
-                q_f, dq_f, ddq_f,
-                tau_residual=None,
-                update=False
+                q_f_used, dq_f_used, ddq_f_used,
+                tau_residual=None, update=False
             )
+
 
             # =====================================================
             # C) 多采样 future + PoE（❌ 不更新）
@@ -100,13 +121,12 @@ class GPServer(Node):
                 var_list = []
 
                 for k in range(N):
-                    mu_k, var_k, _, _ = self._gp_predict_vector(
-                        q_samples[k],
-                        dq_samples[k],
-                        ddq_samples[k],
-                        tau_residual=None,
-                        update=False
-                    )
+                    qk  = q_samples[k]  + self.corr_kq  * q_corr
+                    dqk = dq_samples[k] + self.corr_kdq * dq_corr
+                    ddqk = ddq_samples[k]
+
+                    mu_k, var_k, _, _ = self._gp_predict_vector(qk, dqk, ddqk, tau_residual=None, update=False)
+
 
                     mu_list.append(mu_k)
                     var_list.append(var_k)
@@ -136,6 +156,12 @@ class GPServer(Node):
             response.y_cloud_aggregation = y_gp_future_agg.tolist()
             response.y_mem    = y_mem_cur.tolist()
             response.mem_dist = float(mem_dist_cur)
+
+                # 把云端实际用的 future 输入返回
+            response.q_used  = q_f_used.astype(np.float32).tolist()
+            response.dq_used = dq_f_used.astype(np.float32).tolist()
+            response.ddq_used = ddq_f_used.astype(np.float32).tolist()
+
 
         except Exception as e:
             self.get_logger().error(f"[GPServer] callback error: {e}")

@@ -186,6 +186,21 @@ class CartesianImpedanceController(Node):
         self.gp_send_seq = 0        # 发送给 cloud 的请求编号
         self.gp_recv_seq = -1      # 最近一次收到的请求编号
 
+        self._cloud_lock = threading.Lock()
+        self.cloud_state_valid = False
+
+        self.q_cloud_used  = np.zeros(7)
+        self.dq_cloud_used = np.zeros(7)
+        self.ddq_cloud_used = np.zeros(7)
+        self.y_hat_cloud_latest = np.zeros(7)
+        self.cloud_seq_latest = -1
+
+        # 记录误差（可选）
+        self.q_err_history = []
+        self.dq_err_history = []
+        self.y_err_history = []
+
+
         # ===== Alpha-Beta filter for tau =====
         self.tau_ab      = np.zeros(7)   # τ̂
         self.dtau_ab     = np.zeros(7)   # τ̇̂
@@ -195,7 +210,7 @@ class CartesianImpedanceController(Node):
 
         #simulated dalay
         self.future_delay = self.declare_parameter(
-            'future_delay', 0.05 # 默认 60 ms
+            'future_delay', 0 # 默认 60 ms
         ).value
         self.delay_steps = 0
         self.state_delay_steps = 50   # 你想模拟的通信延迟：20个周期
@@ -203,7 +218,10 @@ class CartesianImpedanceController(Node):
         self.cloud_delay_steps = 100
         self.y_hat_cloud_buffer = deque(maxlen=self.cloud_delay_steps)
 
-
+        #cloud time pid
+        self.q_corr_to_cloud  = np.zeros(7)
+        self.dq_corr_to_cloud = np.zeros(7)
+        self.corr_alpha = 0.1  # 低通系数
         # Prediction history memory
         self.y_hat_mem = np.zeros(7)
         self.y_hat_mem_history = []
@@ -503,7 +521,33 @@ class CartesianImpedanceController(Node):
                 # 3️⃣ 真正用于控制
                 tau = tau - self.y_hat_combined
                 
+            # === 每周期对比：最近云端回包状态 vs 当前真实状态 ===
+            if self.cloud_state_valid:
+                with self._cloud_lock:
+                    q_used  = self.q_cloud_used.copy()
+                    dq_used = self.dq_cloud_used.copy()
+                    y_cloud = self.y_hat_cloud.copy()
 
+                q_err = q - q_used
+                dq_err = dq - dq_used
+
+                # 也可以对比 y_hat：云端输出 vs 本地输出（如果你要）
+                y_err = y_cloud - self.y_hat_local
+
+                # 想打印就打印（注意别刷屏，建议降频）
+                if (self.gp_counter % 50) == 0:
+                    self.get_logger().info(
+                        f"[Compare] |q_err|={np.linalg.norm(q_err):.4f}, "
+                        f"|dq_err|={np.linalg.norm(dq_err):.4f}, "
+                        f"|y_err|={np.linalg.norm(y_err):.4f}, "
+                        f"seq={self.cloud_seq_latest}"
+                    )
+
+                # 记录下来用于保存CSV/画图（可选）
+                if self.data_recording_enabled:
+                    self.q_err_history.append(q_err.tolist())
+                    self.dq_err_history.append(dq_err.tolist())
+                    self.y_err_history.append(y_err.tolist())
 
             # --- 记录（含最终补偿用的 y_hat_combined）---
             if self.data_recording_enabled:
@@ -543,13 +587,13 @@ class CartesianImpedanceController(Node):
                     self.tau_residual_filtered,
                     self.gp_models_small
                 )
-                self.y_hat_cloud = self._gp_predict_and_update(
-                    self.q,
-                    dq,
-                    self.ddq_des_joint,
-                    self.tau_residual_filtered,
-                    self.gp_models_big
-                )
+                # self.y_hat_cloud = self._gp_predict_and_update(
+                #     self.q,
+                #     dq,
+                #     self.ddq_des_joint,
+                #     self.tau_residual_filtered,
+                #     self.gp_models_big
+                # )
 
                 self.state_buffer.append({
                     "q": self.q.copy(),
@@ -759,7 +803,6 @@ class CartesianImpedanceController(Node):
                     req.ddq_future_samples_flat = np.array(ddq_samples, dtype=np.float32).reshape(-1).tolist()
 
                     self.gp_send_seq = self.gp_send_seq+1
-                    print("gp_send:",self.gp_send_seq)
                     req.seq = float(self.gp_send_seq)
 
                     # ⭐⭐⭐ 缺失的关键两行 ⭐⭐⭐
@@ -831,45 +874,25 @@ class CartesianImpedanceController(Node):
         try:
             resp = future.result()
             if resp is None:
-                print("response not received")
                 return
 
             y_cloud = np.array(resp.y_cloud, dtype=float)
-            y_mem   = np.array(resp.y_cloud_aggregation, dtype=float)
-            print("cloud_response:",resp.seq)
 
-            t_arrive = self.get_clock().now().nanoseconds * 1e-9
-            print("delay_sec:", t_arrive - resp.t_target)
-            # if resp.seq == self.gp_send_seq:
-            #     print(1)
-            # else:
-            #     print(0)
-            # self.y_hat_local = self._gp_predict_and_update(
-            #             self.q,
-            #             self.dq,
-            #             self.ddq_des_joint,
-            #             self.tau_residual_filtered,
-            #         )
-            # with self._gp_lock:
-                # 1️⃣ 保存“最新 cloud（t_now）”
-                # self.y_hat_cloud = y_cloud
+            q_used  = np.array(resp.q_used,  dtype=float) if len(resp.q_used)  else np.zeros(7)
+            dq_used = np.array(resp.dq_used, dtype=float) if len(resp.dq_used) else np.zeros(7)
+            ddq_used = np.array(resp.ddq_used, dtype=float) if len(resp.ddq_used) else np.zeros(7)
 
-                # 2️⃣ 推入 delay buffer（用于 t-Δt）
-                # self.y_hat_cloud_buffer.append(y_cloud)
-                # self.y_hat_cloud_buffer.append(y_mem)
-                
-                # t_now = self.get_clock().now().nanoseconds * 1e-9
-
-            self.y_hat_cloud_buffer.append({
-                "t": resp.t_target,
-                "y": y_cloud
-            })
-
-            # 3️⃣ 其他辅助信息
-            self.y_hat_mem = y_mem
+            with self._cloud_lock:
+                self.y_hat_cloud = y_cloud
+                self.q_cloud_used = q_used
+                self.dq_cloud_used = dq_used
+                self.ddq_cloud_used = ddq_used
+                self.cloud_seq_latest = int(resp.seq) if hasattr(resp, "seq") else self.cloud_seq_latest
+                self.cloud_state_valid = True
 
         except Exception as e:
             self.get_logger().warn(f"[Controller] GP response error: {e}")
+
 
 
     def start_trajectory(self):
