@@ -536,20 +536,20 @@ class CartesianImpedanceController(Node):
                 self.gp_counter += 1
                 # if self.gp_counter % self.gp_stride == 0:
                 # 1) 本地 GP 立刻算一次（同步）
-                # self.y_hat_local = self._gp_predict_and_update(
-                #     self.q,
-                #     dq,
-                #     self.ddq_des_joint,
-                #     self.tau_residual_filtered,
-                #     self.gp_models_small
-                # )
-                # self.y_hat_cloud = self._gp_predict_and_update(
-                #     self.q,
-                #     dq,
-                #     self.ddq_des_joint,
-                #     self.tau_residual_filtered,
-                #     self.gp_models_big
-                # )
+                self.y_hat_local = self._gp_predict_and_update(
+                    self.q,
+                    dq,
+                    self.ddq_des_joint,
+                    self.tau_residual_filtered,
+                    self.gp_models_small
+                )
+                self.y_hat_cloud = self._gp_predict_and_update(
+                    self.q,
+                    dq,
+                    self.ddq_des_joint,
+                    self.tau_residual_filtered,
+                    self.gp_models_big
+                )
 
                 self.state_buffer.append({
                     "q": self.q.copy(),
@@ -584,23 +584,23 @@ class CartesianImpedanceController(Node):
                     dq_future_main = dq_ref + ddq_cmd * delay
                     ddq_future_main = ddq_cmd
 
-                    self.y_hat_cloud = self._gp_predict_and_update(
-                        q_future_main,
-                        dq_future_main,
-                        ddq_future_main,
-                        self.tau_residual_filtered,          # ✅ 更新用旧残差更一致
-                        self.gp_models_big,
-                        update = False
-                    )
-                    _ = self._gp_predict_and_update(
-                        q_old,
-                        dq_old,
-                        ddq_old,
-                        tau_res_old,          # ✅ 更新用旧残差更一致
-                        self.gp_models_big
-                    )
-                else:
-                    self.y_hat_cloud = np.zeros(7)
+                    # self.y_hat_cloud = self._gp_predict_and_update(
+                    #     q_future_main,
+                    #     dq_future_main,
+                    #     ddq_future_main,
+                    #     self.tau_residual_filtered,          # ✅ 更新用旧残差更一致
+                    #     self.gp_models_big,
+                    #     update = False
+                    # )
+                    # _ = self._gp_predict_and_update(
+                    #     q_old,
+                    #     dq_old,
+                    #     ddq_old,
+                    #     tau_res_old,          # ✅ 更新用旧残差更一致
+                    #     self.gp_models_big
+                    # )
+                # else:
+                #     self.y_hat_cloud = np.zeros(7)
                 
                 # self.y_hat_cloud = self._gp_predict_and_update(
                 #     self.q,
