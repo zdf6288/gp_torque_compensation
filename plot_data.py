@@ -12,6 +12,92 @@ def cols_1to7(df, prefix):
     # prefix 末尾自己带下划线，如 'tau_', 'tau_measured_', 'gravity_', 'y_hat_', 'tau_residual_'
     return [f'{prefix}{i}' for i in range(1, 8) if f'{prefix}{i}' in df.columns]
 
+def plot_abs_error_pdf(df, out_prefix, use_kde=True, bins=80):
+    """
+    比较 |tau_residual - y_hat| (combined) vs |tau_residual - y_hat_local| (local) 的分布
+    - use_kde=True: 用 KDE（更像 PDF）
+    - use_kde=False: 用归一化直方图近似 PDF
+    """
+    res_cols   = cols_1to7(df, 'tau_residual_')
+    comb_cols  = cols_1to7(df, 'y_hat_')          # combined
+    local_cols = cols_1to7(df, 'y_hat_local_')    # local
+
+    if len(res_cols) != 7 or len(comb_cols) != 7 or len(local_cols) != 7:
+        print("Skip abs error PDF: need tau_residual_1..7, y_hat_1..7, y_hat_local_1..7")
+        return
+
+    TR = df[res_cols].values
+    YC = df[comb_cols].values
+    YL = df[local_cols].values
+
+    # 误差绝对值
+    E_comb  = np.abs(TR - YC)   # [N,7]
+    E_local = np.abs(TR - YL)   # [N,7]
+
+    # 1) 每关节的 PDF
+    fig, axes = plt.subplots(3, 3, figsize=(18, 14))
+    fig.suptitle('|Error| PDF per joint: combined vs local', fontsize=14)
+    ax_list = [ax for row in axes for ax in row]
+
+    for j in range(7):
+        ax = ax_list[j]
+        ec = E_comb[:, j]
+        el = E_local[:, j]
+
+        # 去掉 NaN/Inf
+        ec = ec[np.isfinite(ec)]
+        el = el[np.isfinite(el)]
+
+        if use_kde:
+            # KDE 需要 pandas.Series.plot.kde
+            pd.Series(ec).plot.kde(ax=ax, linewidth=2, label='|err| combined')
+            pd.Series(el).plot.kde(ax=ax, linewidth=2, label='|err| local')
+        else:
+            ax.hist(ec, bins=bins, density=True, alpha=0.5, label='|err| combined')
+            ax.hist(el, bins=bins, density=True, alpha=0.5, label='|err| local')
+
+        # 简单统计（放标题里）
+        med_c = np.median(ec) if len(ec) else np.nan
+        med_l = np.median(el) if len(el) else np.nan
+        ax.set_title(f'Joint {j+1}  median: comb={med_c:.3f}, local={med_l:.3f}')
+        ax.set_xlabel('|Torque error| [Nm]')
+        ax.set_ylabel('PDF')
+        ax.grid(True)
+        ax.legend()
+
+    ax_list[7].axis('off')
+    ax_list[8].axis('off')
+    plt.tight_layout()
+    out1 = out_prefix + "_abs_error_pdf_per_joint.png"
+    fig.savefig(out1, dpi=300, bbox_inches='tight')
+    print(f"Saved: {out1}")
+
+    # 2) 全关节合并的 PDF（把 7 个关节拼一起）
+    ec_all = E_comb.reshape(-1)
+    el_all = E_local.reshape(-1)
+    ec_all = ec_all[np.isfinite(ec_all)]
+    el_all = el_all[np.isfinite(el_all)]
+
+    fig2 = plt.figure(figsize=(10, 6))
+    ax2 = plt.gca()
+    if use_kde:
+        pd.Series(ec_all).plot.kde(ax=ax2, linewidth=2, label='|err| combined (all joints)')
+        pd.Series(el_all).plot.kde(ax=ax2, linewidth=2, label='|err| local (all joints)')
+    else:
+        ax2.hist(ec_all, bins=bins, density=True, alpha=0.5, label='|err| combined (all joints)')
+        ax2.hist(el_all, bins=bins, density=True, alpha=0.5, label='|err| local (all joints)')
+
+    ax2.set_title('Absolute torque error PDF (all joints)')
+    ax2.set_xlabel('|Torque error| [Nm]')
+    ax2.set_ylabel('PDF')
+    ax2.grid(True)
+    ax2.legend()
+    plt.tight_layout()
+    out2 = out_prefix + "_abs_error_pdf_all_joints.png"
+    fig2.savefig(out2, dpi=300, bbox_inches='tight')
+    print(f"Saved: {out2}")
+
+
 
 def plot_data_from_csv(csv_filename):
     """plot data from CSV file"""
@@ -39,6 +125,9 @@ def plot_data_from_csv(csv_filename):
 
         # 用平滑后的数据替换原 df，避免后面改很多
         df = df_smooth.dropna().reset_index(drop=True)
+
+        out_prefix = csv_filename.replace('.csv', '')
+        plot_abs_error_pdf(df, out_prefix, use_kde=True, bins=80)
 
         print(f"✅ Applied decimation (/{DECIMATE}) and smoothing (window={SMOOTH_WINDOW})")
         print(f"Resulting data points: {len(df)}")
@@ -218,7 +307,7 @@ def plot_data_from_csv(csv_filename):
         plt.savefig(output_filename, dpi=300, bbox_inches='tight')
         print(f'Figure saved as {output_filename}')
         
-        plt.show()
+        # plt.show()
         
     except Exception as e:
         print(f'Error when plotting data: {str(e)}')
@@ -313,11 +402,11 @@ def plot_data_from_csv(csv_filename):
             ax.plot(time_history, tr, label='tau_residual', linewidth=1.8)
 
             # 画 combined
-            # if YH_comb is not None:
-            #     yh_c = YH_comb[:, j]
-            #     ax.plot(time_history, yh_c, '--', linewidth=1.5, label='y_hat_combined')
+            if YH_comb is not None:
+                yh_c = YH_comb[:, j]
+                ax.plot(time_history, yh_c, '--', linewidth=1.5, label='y_hat_combined')
 
-            # 画 local
+            # # 画 local
             if YH_local is not None:
                 yh_l = YH_local[:, j]
                 ax.plot(time_history, yh_l, '-', linewidth=1.2, alpha=0.8, label='y_hat_local')
@@ -326,8 +415,8 @@ def plot_data_from_csv(csv_filename):
             if YH_cloud is not None:
                 yh_cl = YH_cloud[:, j]
                 ax.plot(time_history, yh_cl, ':', linewidth=1.2, alpha=0.8, label='cloud')
-                rem = tr - yh_cl
-                ax.plot(time_history, rem, linewidth=1.2, alpha=0.8, label='true - cloud')
+            #     rem = tr - yh_cl
+            #     ax.plot(time_history, rem, linewidth=1.2, alpha=0.8, label='true - cloud')
 
             # if YH_mem is not None:
             #     yh_mem = YH_mem[:, j]
@@ -336,9 +425,9 @@ def plot_data_from_csv(csv_filename):
             #     ax.plot(time_history, rem, linewidth=1.2, alpha=0.8, label='true - history')
 
             # 画剩余误差：残差 - combined（如果有）
-            # if YH_comb is not None:
-            #     rem = tr - YH_comb[:, j]
-            #     ax.plot(time_history, rem, linewidth=1.0, alpha=0.7, label='residual - combined')
+            if YH_comb is not None:
+                rem = tr - YH_comb[:, j]
+                ax.plot(time_history, rem, linewidth=1.0, alpha=0.7, label='residual - combined')
 
             if YH_comb is not None:
                 rem = tr - YH_local[:, j]

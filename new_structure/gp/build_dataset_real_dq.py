@@ -98,6 +98,7 @@ def build_xy_full_input(
     tau_cmd    = np.stack([df[f"tau_{j}"].values             for j in range(1,8)], axis=1)
     tau_meas   = np.stack([df[f"tau_measured_{j}"].values    for j in range(1,8)], axis=1)
     g_mat      = np.stack([df[f"gravity_{j}"].values         for j in range(1,8)], axis=1)
+    tau_residual = np.stack([df[f"tau_residual_{j}"].values         for j in range(1,8)], axis=1)
 
     # -----------------------
     # 构造 X_full
@@ -112,7 +113,8 @@ def build_xy_full_input(
     # -----------------------
     # 输出 y
     # -----------------------
-    Y_full = (tau_meas - g_mat - tau_cmd).astype(np.float32)
+    # Y_full = (tau_meas - g_mat - tau_cmd).astype(np.float32)
+    Y_full = (tau_residual).astype(np.float32)
 
     # -----------------------
     # 按关节构造 X_j, Y_j

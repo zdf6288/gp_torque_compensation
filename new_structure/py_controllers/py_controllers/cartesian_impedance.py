@@ -213,10 +213,14 @@ class CartesianImpedanceController(Node):
             'future_delay', 0 # 默认 60 ms
         ).value
         self.delay_steps = 0
-        self.state_delay_steps = 50   # 你想模拟的通信延迟：20个周期
+        self.state_delay_steps = 0   # 你想模拟的通信延迟：20个周期
         self.state_buffer = deque(maxlen=1000)  # 存2秒(1kHz)都够
         self.cloud_delay_steps = 100
         self.y_hat_cloud_buffer = deque(maxlen=self.cloud_delay_steps)
+        
+        # variance
+        self.var_local = np.ones(7) * 1e6
+        self.var_cloud = np.ones(7) * 1e6
 
         #cloud time pid
         self.q_corr_to_cloud  = np.zeros(7)
@@ -500,26 +504,26 @@ class CartesianImpedanceController(Node):
                 # self.y_hat_cloud = y_cloud_delayed
 
                 # 2️⃣ 融合策略（你原来的 mode 放这里）
-                mode = self.gp_mode
-                mode = "local"
+                # mode = self.gp_mode
+                # mode = "local"
 
-                if mode == "local":
-                    self.y_hat_combined = self.y_hat_local
+                # if mode == "local":
+                #     self.y_hat_combined = self.y_hat_local
 
-                elif mode == "cloud":
-                    self.y_hat_combined = y_cloud_delayed
+                # elif mode == "cloud":
+                #     self.y_hat_combined = y_cloud_delayed
 
-                elif mode == "fusion":
-                    self.y_hat_combined = 0.5 * self.y_hat_local + 0.5 * y_cloud_delayed
+                # elif mode == "fusion":
+                #     self.y_hat_combined = 0.5 * self.y_hat_local + 0.5 * y_cloud_delayed
 
-                elif mode == "none":
-                    self.y_hat_combined = np.zeros(7)
+                # elif mode == "none":
+                #     self.y_hat_combined = np.zeros(7)
 
-                else:
-                    self.y_hat_combined = 0.5 * self.y_hat_local + 0.5 * y_cloud_delayed
+                # else:
+                #     self.y_hat_combined = 0.5 * self.y_hat_local + 0.5 * y_cloud_delayed
 
                 # 3️⃣ 真正用于控制
-                tau = tau - self.y_hat_combined
+                tau = tau
                 
             # === 每周期对比：最近云端回包状态 vs 当前真实状态 ===
             if self.cloud_state_valid:
@@ -580,12 +584,13 @@ class CartesianImpedanceController(Node):
                 self.gp_counter += 1
                 # if self.gp_counter % self.gp_stride == 0:
                 # 1) 本地 GP 立刻算一次（同步）
-                self.y_hat_local = self._gp_predict_and_update(
+                self.y_hat_local, self.var_local = self._gp_predict_and_update(
                     self.q,
                     dq,
                     self.ddq_des_joint,
                     self.tau_residual_filtered,
-                    self.gp_models_small
+                    self.gp_models_small,
+                    update=True
                 )
                 # self.y_hat_cloud = self._gp_predict_and_update(
                 #     self.q,
@@ -603,59 +608,58 @@ class CartesianImpedanceController(Node):
                 })
 
                 N = self.state_delay_steps
-
                 if len(self.state_buffer) > N:
-                    s = self.state_buffer[-1 - N]   # ✅ N步前的状态（关键行）
+                    s = self.state_buffer[-1 - N]
+                    q_old, dq_old, ddq_old, tau_res_old = s["q"], s["dq"], s["ddq"], s["tau_res"]
 
-                    q_old   = s["q"]
-                    dq_old  = s["dq"]
-                    ddq_old = s["ddq"]
-                    tau_res_old = s["tau_res"]
-
-                    # 用同一个 delay（秒），把 old 状态推进到它的 future（可选）
                     delay = float(self.future_delay)
 
                     q_now = self.q
-                    dq_meas = dq                      # 真实测量速度
-                    dq_ref = self.dq_des_joint        # 参考速度（J^+ * dx_des）
-                    ddq_cmd = self.ddq_des_joint      # 指令加速度（从任务空间映射）
-
-                    # q_future_main  = q_now + dq_meas * delay + 0.5 * ddq_cmd * delay**2
-                    # dq_future_main = dq_meas + ddq_cmd * delay
-                    # ddq_future_main = ddq_cmd
+                    dq_ref = self.dq_des_joint
+                    ddq_cmd = self.ddq_des_joint
 
                     q_future_main  = q_now + dq_ref * delay + 0.5 * ddq_cmd * delay**2
                     dq_future_main = dq_ref + ddq_cmd * delay
                     ddq_future_main = ddq_cmd
 
-                    # self.y_hat_cloud = self._gp_predict_and_update(
-                    #     q_future_main,
-                    #     dq_future_main,
-                    #     ddq_future_main,
-                    #     self.tau_residual_filtered,          # ✅ 更新用旧残差更一致
-                    #     self.gp_models_big,
-                    #     update = False
-                    # )
-                    # _ = self._gp_predict_and_update(
-                    #     q_old,
-                    #     dq_old,
-                    #     ddq_old,
-                    #     tau_res_old,          # ✅ 更新用旧残差更一致
-                    #     self.gp_models_big
-                    # )
-                # else:
-                #     self.y_hat_cloud = np.zeros(7)
-                
-                # self.y_hat_cloud = self._gp_predict_and_update(
-                #     self.q,
-                #     dq,
-                #     self.ddq_des_joint,
-                #     self.tau_residual_filtered,
-                #     self.gp_models_big
-                # )
+                    # 2) big model：用 future 输入做“预测”（不更新）
+                    self.y_hat_cloud, self.var_cloud = self._gp_predict_and_update(
+                        q_future_main,
+                        dq_future_main,
+                        ddq_future_main,
+                        self.tau_residual_filtered,
+                        self.gp_models_big,
+                        update=False
+                    )
 
-                # self.y_hat_local = np.zeros(7)
-                # print(self.gp_counter)
+                    # 3) big model：用 old 状态做“更新”
+                    _mu, _var = self._gp_predict_and_update(
+                        q_old,
+                        dq_old,
+                        ddq_old,
+                        tau_res_old,
+                        self.gp_models_big,
+                        update=True
+                    )
+                else:
+                    self.y_hat_cloud = np.zeros(7)
+                    self.var_cloud   = np.ones(7) * 1e6
+                # 4) 方差加权融合（逐关节）
+                eps = 1e-8
+                v_l = np.maximum(self.var_local, eps)
+                v_c = np.maximum(self.var_cloud, eps)
+
+                # 可选：考虑 big/future 更不确定，给它膨胀一下（工程上很常用）
+                # v_c *= 1.5
+
+                prec_l = 1.0 / v_l
+                prec_c = 1.0 / v_c
+
+                w_l = prec_l / (prec_l + prec_c)      # local 权重
+                # w_c = 1 - w_l
+
+                self.y_hat_combined = w_l * self.y_hat_local + (1.0 - w_l) * self.y_hat_cloud
+
             # 2) 云端 GP：发异步请求（同一时刻的 q/dq/ddq/残差）
             # === CLOUD GP 调用 === 
                 if self.gp_client.service_is_ready():
@@ -883,7 +887,7 @@ class CartesianImpedanceController(Node):
             ddq_used = np.array(resp.ddq_used, dtype=float) if len(resp.ddq_used) else np.zeros(7)
 
             with self._cloud_lock:
-                self.y_hat_cloud = y_cloud
+                # self.y_hat_cloud = y_cloud
                 self.q_cloud_used = q_used
                 self.dq_cloud_used = dq_used
                 self.ddq_cloud_used = ddq_used
@@ -965,15 +969,15 @@ class CartesianImpedanceController(Node):
         per_joint_cfg = {
             "default": dict(
                 max_data_per_expert=25,
-                nearest_k=2,
-                max_experts=4,
+                nearest_k=1,
+                max_experts=1,
                 timescale=0.03,
             ),
             # 举例：如果你想让 6 号关节忘得快一点、专家少一点，可以单独改：
             6: dict(
                 max_data_per_expert=25,
-                nearest_k=2,
-                max_experts=4,
+                nearest_k=1,
+                max_experts=1,
                 timescale=0.05,
             ),
         }
@@ -1040,15 +1044,15 @@ class CartesianImpedanceController(Node):
         per_joint_cfg = {
             "default": dict(
                 max_data_per_expert=50,
-                nearest_k=2,
-                max_experts=100,
+                nearest_k=4,
+                max_experts=50,
                 timescale=0.03,
             ),
             # 举例：如果你想让 6 号关节忘得快一点、专家少一点，可以单独改：
             6: dict(
                 max_data_per_expert=50,
-                nearest_k=2,
-                max_experts=100,
+                nearest_k=4,
+                max_experts=50,
                 timescale=0.05,
             ),
         }
@@ -1125,7 +1129,7 @@ class CartesianImpedanceController(Node):
             return np.zeros(7, dtype=float)
 
         y_hat = np.zeros(7, dtype=float)
-
+        y_var = np.ones(7, dtype=float) * 1e6  # 默认给大方差，表示“不可信”
         # ==================================================
         # 1) 构造统一的高维输入 x_full
         # ==================================================
@@ -1157,12 +1161,14 @@ class CartesianImpedanceController(Node):
 
             # -------- GP 预测 --------
             mu_std, var_std = model.predict(x_std.astype(np.float32))
-            mu_std = float(mu_std[0])
+            mu_std  = float(mu_std[0])
+            var_std = float(var_std[0])
 
-            # -------- 反标准化 --------
             y_pred = mu_std * Ys + Ym
+            y_hat[j-1] = y_pred
 
-            y_hat[j - 1] = y_pred
+            # 反标准化方差
+            y_var[j-1] = max(var_std * (Ys**2), 1e-8)  # 防止为 0
 
             # -------- 在线更新 --------
             y_real = float(tau_residual[j - 1])
@@ -1179,7 +1185,7 @@ class CartesianImpedanceController(Node):
                 except Exception as e:
                     self.get_logger().error(f"[GP] joint{j} add_point failed: {e}")
 
-        return y_hat
+        return y_hat, y_var
 
 
     def _ensure_skygp_import(self):
