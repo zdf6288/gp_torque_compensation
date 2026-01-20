@@ -107,8 +107,8 @@ class GPServer(Node):
             # =====================================================
             # B) 未来主预测（❌ 不更新）
             # =====================================================
-            y_gp_fut,_, y_mem_cur, mem_dist_cur = self._gp_predict_vector(
-                q_f_used, dq_f_used, ddq_f_used,
+            y_gp_fut, var_gp_future, y_mem_cur, mem_dist_cur = self._gp_predict_vector(
+                q_f, dq_f, ddq_f,
                 tau_residual=None, update=False
             )
 
@@ -121,8 +121,8 @@ class GPServer(Node):
                 var_list = []
 
                 for k in range(N):
-                    qk  = q_samples[k]  + self.corr_kq  * q_corr
-                    dqk = dq_samples[k] + self.corr_kdq * dq_corr
+                    qk  = q_samples[k]  
+                    dqk = dq_samples[k]
                     ddqk = ddq_samples[k]
 
                     mu_k, var_k, _, _ = self._gp_predict_vector(qk, dqk, ddqk, tau_residual=None, update=False)
@@ -153,6 +153,7 @@ class GPServer(Node):
             # =====================================================
             response.y_local  = y_gp_cur.tolist()
             response.y_cloud  = y_gp_fut.tolist()
+            response.y_cloud_var = var_gp_future.tolist()
             response.y_cloud_aggregation = y_gp_future_agg.tolist()
             response.y_mem    = y_mem_cur.tolist()
             response.mem_dist = float(mem_dist_cur)
@@ -326,16 +327,16 @@ class GPServer(Node):
         # key = 关节号（1..6），"default" 为所有关节的默认配置
         per_joint_cfg = {
             "default": dict(
-                max_data_per_expert=100,
+                max_data_per_expert=50,
                 nearest_k=4,
-                max_experts=100,
+                max_experts=50,
                 timescale=0.03,
             ),
             # 举例：如果你想让 6 号关节忘得快一点、专家少一点，可以单独改：
             6: dict(
-                max_data_per_expert=100,
+                max_data_per_expert=50,
                 nearest_k=4,
-                max_experts=100,
+                max_experts=50,
                 timescale=0.05,
             ),
         }

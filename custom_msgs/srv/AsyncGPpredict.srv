@@ -23,6 +23,7 @@ float32[] dq_correction
 ---
 float32[] y_local
 float32[] y_cloud
+float32[] y_cloud_var
 float32[] y_cloud_aggregation
 float32[] y_mem
 float32 mem_dist

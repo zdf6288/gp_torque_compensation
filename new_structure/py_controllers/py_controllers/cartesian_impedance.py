@@ -135,7 +135,7 @@ class CartesianImpedanceController(Node):
         self.ddq_des_joint = np.zeros(7)
         self.tau_residual = np.zeros(7)
 
-        self.gp_stride = 0      # 每 10 个 state callback 做一次 GP（你可以调）
+        self.gp_stride = 5      # 每 10 个 state callback 做一次 GP（你可以调）
         self.gp_counter = 0
 
         self.y_hat_filtered = np.zeros(7)
@@ -210,10 +210,10 @@ class CartesianImpedanceController(Node):
 
         #simulated dalay
         self.future_delay = self.declare_parameter(
-            'future_delay', 0 # 默认 60 ms
+            'future_delay', 0.015 # 默认 60 ms
         ).value
         self.delay_steps = 0
-        self.state_delay_steps = 0   # 你想模拟的通信延迟：20个周期
+        self.state_delay_steps = 10   # 你想模拟的通信延迟：20个周期
         self.state_buffer = deque(maxlen=1000)  # 存2秒(1kHz)都够
         self.cloud_delay_steps = 100
         self.y_hat_cloud_buffer = deque(maxlen=self.cloud_delay_steps)
@@ -582,17 +582,20 @@ class CartesianImpedanceController(Node):
             # print("use:",self.use_gp)
             if self.gp_active and self.use_gp:
                 self.gp_counter += 1
-                # if self.gp_counter % self.gp_stride == 0:
+                if self.gp_counter % self.gp_stride == 0:
                 # 1) 本地 GP 立刻算一次（同步）
-                self.y_hat_local, self.var_local = self._gp_predict_and_update(
-                    self.q,
-                    dq,
-                    self.ddq_des_joint,
-                    self.tau_residual_filtered,
-                    self.gp_models_small,
-                    update=True
-                )
-                # self.y_hat_cloud = self._gp_predict_and_update(
+                    self.y_hat_local, self.var_local = self._gp_predict_and_update(
+                        self.q,
+                        dq,
+                        self.ddq_des_joint,
+                        self.tau_residual_filtered,
+                        self.gp_models_small,
+                        update=True
+                    )
+                else:
+                    self.y_hat_local = self.y_hat_local
+                    self.var_local = self.var_local
+                # self.y_hat_cloud, self.var_cloud = self._gp_predict_and_update(
                 #     self.q,
                 #     dq,
                 #     self.ddq_des_joint,
@@ -607,43 +610,43 @@ class CartesianImpedanceController(Node):
                     "tau_res": self.tau_residual_filtered.copy()
                 })
 
-                N = self.state_delay_steps
-                if len(self.state_buffer) > N:
-                    s = self.state_buffer[-1 - N]
-                    q_old, dq_old, ddq_old, tau_res_old = s["q"], s["dq"], s["ddq"], s["tau_res"]
+                # N = self.state_delay_steps
+                # if len(self.state_buffer) > N:
+                #     s = self.state_buffer[-1 - N]
+                #     q_old, dq_old, ddq_old, tau_res_old = s["q"], s["dq"], s["ddq"], s["tau_res"]
 
-                    delay = float(self.future_delay)
+                #     delay = float(self.future_delay)
 
-                    q_now = self.q
-                    dq_ref = self.dq_des_joint
-                    ddq_cmd = self.ddq_des_joint
+                #     q_now = self.q
+                #     dq_ref = self.dq_des_joint
+                #     ddq_cmd = self.ddq_des_joint
 
-                    q_future_main  = q_now + dq_ref * delay + 0.5 * ddq_cmd * delay**2
-                    dq_future_main = dq_ref + ddq_cmd * delay
-                    ddq_future_main = ddq_cmd
+                #     q_future_main  = q_now + dq_ref * delay + 0.5 * ddq_cmd * delay**2
+                #     dq_future_main = dq_ref + ddq_cmd * delay
+                #     ddq_future_main = ddq_cmd
 
                     # 2) big model：用 future 输入做“预测”（不更新）
-                    self.y_hat_cloud, self.var_cloud = self._gp_predict_and_update(
-                        q_future_main,
-                        dq_future_main,
-                        ddq_future_main,
-                        self.tau_residual_filtered,
-                        self.gp_models_big,
-                        update=False
-                    )
+                    # self.y_hat_cloud, self.var_cloud = self._gp_predict_and_update(
+                    #     q_now,
+                    #     dq_ref,
+                    #     ddq_cmd,
+                    #     self.tau_residual_filtered,
+                    #     self.gp_models_big,
+                    #     update=True
+                    # )
 
                     # 3) big model：用 old 状态做“更新”
-                    _mu, _var = self._gp_predict_and_update(
-                        q_old,
-                        dq_old,
-                        ddq_old,
-                        tau_res_old,
-                        self.gp_models_big,
-                        update=True
-                    )
-                else:
-                    self.y_hat_cloud = np.zeros(7)
-                    self.var_cloud   = np.ones(7) * 1e6
+                    # _mu, _var = self._gp_predict_and_update(
+                    #     q_old,
+                    #     dq_old,
+                    #     ddq_old,
+                    #     tau_res_old,
+                    #     self.gp_models_big,
+                    #     update=True
+                    # )
+                # else:
+                #     self.y_hat_cloud = np.zeros(7)
+                #     self.var_cloud   = np.ones(7) * 1e6
                 # 4) 方差加权融合（逐关节）
                 eps = 1e-8
                 v_l = np.maximum(self.var_local, eps)
@@ -674,7 +677,7 @@ class CartesianImpedanceController(Node):
                     #   未来输入（不依赖 future_traj，不依赖任务空间）
                     #   永远可计算 —— 保证 cloud GP 每次都能收到预测输入
                     # ============================================================
-                    sigma_ddq = 0.01                    # rad/s^2
+                    sigma_ddq = 0.005                    # rad/s^2
                     delay = float(self.future_delay)
 
                     q_now   = self.q
@@ -682,74 +685,28 @@ class CartesianImpedanceController(Node):
                     ddq_now = self.ddq_des_joint
 
                     # 主预测（deterministic）
-                    q_future_main  = q_now + dq_now * delay + 0.5 * ddq_now * delay**2
-                    dq_future_main = dq_now + ddq_now * delay
-                    ddq_future_main = ddq_now
+                    # q_future_main  = q_now + dq_now * delay + 0.5 * ddq_now * delay**2
+                    # dq_future_main = dq_now + ddq_now * delay
+                    # ddq_future_main = ddq_now
 
-                    # N = self.state_delay_steps
+                    N = self.state_delay_steps
 
-                    # if len(self.state_buffer) > N:
-                    #     s = self.state_buffer[-1 - N]   # ✅ N步前的状态（关键行）
+                    if len(self.state_buffer) > N:
+                        s = self.state_buffer[-1 - N]   # ✅ N步前的状态（关键行）
 
-                    #     q_old   = s["q"]
-                    #     dq_old  = s["dq"]
-                    #     ddq_old = s["ddq"]
-                    #     tau_res_old = s["tau_res"]
+                        q_old   = s["q"]
+                        dq_old  = s["dq"]
+                        ddq_old = s["ddq"]
+                        tau_res_old = s["tau_res"]
 
-                    #     # 用同一个 delay（秒），把 old 状态推进到它的 future（可选）
-                    #     delay = float(self.future_delay)   # 例如 0.002s，也可以设成 N*dt
-                    #     q_future = q_old + dq_old * delay + 0.5 * ddq_old * delay**2
-                    #     dq_future = dq_old + ddq_old * delay
-                    #     ddq_future = ddq_old
-
-                    #     # self.y_hat_cloud = self._gp_predict_and_update(
-                    #     #     q_future,
-                    #     #     dq_future,
-                    #     #     ddq_future,
-                    #     #     tau_res_old,          # ✅ 更新用旧残差更一致
-                    #     #     self.gp_models_big,
-                    #     #     update = False
-                    #     # )
-                    #     # _ = self._gp_predict_and_update(
-                    #     #     self.q,
-                    #     #     dq,
-                    #     #     self.ddq_des_joint,
-                    #     #     tau_res_old,          # ✅ 更新用旧残差更一致
-                    #     #     self.gp_models_big
-                    #     # )
-                    #     self.y_hat_cloud = np.zeros(7)
-                    # else:
-                    #     self.y_hat_cloud = np.zeros(7)
-
-                    # ============================================================
-                    # ✅ 使用 future_traj_service 给出的未来任务空间轨迹
-                    # ============================================================
-                    # if self._latest_future_traj is not None:
-
-                    #     x_f  = self._latest_future_traj["x_des"]
-                    #     dx_f = self._latest_future_traj["dx_des"]
-                    #     ddx_f = self._latest_future_traj["ddx_des"]
-
-                    #     # 你的控制是 5 DoF（3 pos + 2 rot）
-                    #     dx_f_5  = dx_f[:5]
-                    #     ddx_f_5 = ddx_f[:5]
-
-                    #     # 逆雅可比（当前时刻）
-                    #     dq_future_main  = jacobian_pinv @ dx_f_5
-                    #     ddq_future_main = jacobian_pinv @ (ddx_f_5 - djacobian @ dq)
-
-                    #     # 积分得到 q_future（用于 GP 特征）
-                    #     q_future_main = self.q + dq_future_main * delay \
-                    #                         + 0.5 * ddq_future_main * delay**2
-
-                    # else:
-                    #     # fallback（极少发生）
-                    #     q_future_main  = self.q
-                    #     dq_future_main = dq
-                    #     ddq_future_main = self.ddq_des_joint
+                        # 用同一个 delay（秒），把 old 状态推进到它的 future（可选）
+                        delay = float(self.future_delay)   # 例如 0.002s，也可以设成 N*dt
+                        q_future_main = q_old + dq_old * delay + 0.5 * ddq_old * delay**2
+                        dq_future_main = dq_old + ddq_old * delay
+                        ddq_future_main = ddq_old
 
 
-                    N = 0
+                    N = 10
                     noise_std = self.future_ddq_noise_std
 
                     q_samples  = []
@@ -881,13 +838,15 @@ class CartesianImpedanceController(Node):
                 return
 
             y_cloud = np.array(resp.y_cloud, dtype=float)
-
+            y_cloud_aggregated = np.array(resp.y_cloud_aggregation, dtype=float)
+            var_cloud = np.array(resp.y_cloud_var, dtype=float)
             q_used  = np.array(resp.q_used,  dtype=float) if len(resp.q_used)  else np.zeros(7)
             dq_used = np.array(resp.dq_used, dtype=float) if len(resp.dq_used) else np.zeros(7)
             ddq_used = np.array(resp.ddq_used, dtype=float) if len(resp.ddq_used) else np.zeros(7)
 
             with self._cloud_lock:
-                # self.y_hat_cloud = y_cloud
+                self.y_hat_cloud = y_cloud_aggregated
+                self.var_cloud = var_cloud
                 self.q_cloud_used = q_used
                 self.dq_cloud_used = dq_used
                 self.ddq_cloud_used = ddq_used

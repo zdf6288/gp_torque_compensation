@@ -59,7 +59,7 @@ def fit_global_hparams(
 
 
 def build_rBCM(x_dim, hps,
-               max_data_per_expert=64,
+               max_data_per_expert=100,
                nearest_k=4,
                max_experts=64,
                replacement=False,

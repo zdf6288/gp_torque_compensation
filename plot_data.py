@@ -12,6 +12,133 @@ def cols_1to7(df, prefix):
     # prefix 末尾自己带下划线，如 'tau_', 'tau_measured_', 'gravity_', 'y_hat_', 'tau_residual_'
     return [f'{prefix}{i}' for i in range(1, 8) if f'{prefix}{i}' in df.columns]
 
+def plot_abs_error_frequency_hist(df, out_prefix, bins=80, max_err=None, per_joint=True):
+    """
+    x轴: |error|
+    y轴: 频率(占比) = count / N
+    """
+    res_cols   = cols_1to7(df, 'tau_residual_')
+    comb_cols  = cols_1to7(df, 'y_hat_')          # combined
+    local_cols = cols_1to7(df, 'y_hat_local_')    # local
+
+    if len(res_cols) != 7 or len(comb_cols) != 7 or len(local_cols) != 7:
+        print("Skip frequency hist: need tau_residual_1..7, y_hat_1..7, y_hat_local_1..7")
+        return
+
+    TR = df[res_cols].values
+    YC = df[comb_cols].values
+    YL = df[local_cols].values
+
+    E_comb  = np.abs(TR - YC)   # [N,7]
+    E_local = np.abs(TR - YL)   # [N,7]
+
+        # ===== 打印绝对误差均值/中位数/95分位（全关节 + 每关节）=====
+    ec_all = E_comb.reshape(-1)
+    el_all = E_local.reshape(-1)
+    ec_all = ec_all[np.isfinite(ec_all)]
+    el_all = el_all[np.isfinite(el_all)]
+
+    print("\n=== |error| stats (ALL joints combined) ===")
+    print(f"combined: mean={np.mean(ec_all):.6f}, median={np.median(ec_all):.6f}, p95={np.percentile(ec_all,95):.6f}")
+    print(f"local   : mean={np.mean(el_all):.6f}, median={np.median(el_all):.6f}, p95={np.percentile(el_all,95):.6f}")
+
+    print("\n=== |error| stats (PER joint) ===")
+    for j in range(7):
+        ec = E_comb[:, j]
+        el = E_local[:, j]
+        ec = ec[np.isfinite(ec)]
+        el = el[np.isfinite(el)]
+        print(f"Joint {j+1}: "
+              f"comb_mean={np.mean(ec):.6f}, local_mean={np.mean(el):.6f} | "
+              f"comb_med={np.median(ec):.6f}, local_med={np.median(el):.6f} | "
+              f"comb_p95={np.percentile(ec,95):.6f}, local_p95={np.percentile(el,95):.6f}")
+
+    # 统一范围，保证对比公平
+    all_err = np.concatenate([E_comb.reshape(-1), E_local.reshape(-1)])
+    all_err = all_err[np.isfinite(all_err)]
+    if all_err.size == 0:
+        print("Skip: no finite error samples")
+        return
+
+    if max_err is None:
+        xmax = np.percentile(all_err, 99.5)  # 自动砍掉极端长尾
+    else:
+        xmax = float(max_err)
+
+    hist_range = (0.0, xmax)
+
+    # =========================
+    # 1) 全关节合并频率直方图
+    # =========================
+    ec_all = E_comb.reshape(-1)
+    el_all = E_local.reshape(-1)
+    ec_all = ec_all[np.isfinite(ec_all)]
+    el_all = el_all[np.isfinite(el_all)]
+
+    fig = plt.figure(figsize=(10, 6))
+    ax = plt.gca()
+
+    # 用 weights 实现“频率 = count/N”
+    ax.hist(el_all, bins=bins, range=hist_range,
+            weights=np.ones_like(el_all) / len(el_all),
+            alpha=0.5, label='local |err| (freq)')
+
+    ax.hist(ec_all, bins=bins, range=hist_range,
+            weights=np.ones_like(ec_all) / len(ec_all),
+            alpha=0.5, label='combined |err| (freq)')
+
+    ax.set_title('Absolute torque error frequency histogram (all joints)')
+    ax.set_xlabel('|Torque error| [Nm]')
+    ax.set_ylabel('Frequency (count / N)')
+    ax.grid(True)
+    ax.legend()
+    plt.tight_layout()
+
+    out1 = out_prefix + "_abs_error_freqhist_all_joints.png"
+    fig.savefig(out1, dpi=300, bbox_inches='tight')
+    print(f"Saved: {out1}")
+
+    # =========================
+    # 2) 每关节频率直方图（可选）
+    # =========================
+    if not per_joint:
+        return
+
+    fig2, axes2 = plt.subplots(3, 3, figsize=(18, 14))
+    fig2.suptitle('Per-joint |error| frequency histogram: combined vs local', fontsize=14)
+    ax_list = [ax for row in axes2 for ax in row]
+
+    for j in range(7):
+        axj = ax_list[j]
+        el = E_local[:, j]
+        ec = E_comb[:, j]
+        el = el[np.isfinite(el)]
+        ec = ec[np.isfinite(ec)]
+
+        if el.size > 0:
+            axj.hist(el, bins=bins, range=hist_range,
+                     weights=np.ones_like(el) / len(el),
+                     alpha=0.5, label='local (freq)')
+        if ec.size > 0:
+            axj.hist(ec, bins=bins, range=hist_range,
+                     weights=np.ones_like(ec) / len(ec),
+                     alpha=0.5, label='combined (freq)')
+
+        axj.set_title(f'Joint {j+1}')
+        axj.set_xlabel('|error| [Nm]')
+        axj.set_ylabel('Frequency')
+        axj.grid(True)
+        axj.legend(fontsize=8)
+
+    ax_list[7].axis('off')
+    ax_list[8].axis('off')
+    plt.tight_layout()
+
+    out2 = out_prefix + "_abs_error_freqhist_per_joint.png"
+    fig2.savefig(out2, dpi=300, bbox_inches='tight')
+    print(f"Saved: {out2}")
+
+
 def plot_abs_error_pdf(df, out_prefix, use_kde=True, bins=80):
     """
     比较 |tau_residual - y_hat| (combined) vs |tau_residual - y_hat_local| (local) 的分布
@@ -127,7 +254,11 @@ def plot_data_from_csv(csv_filename):
         df = df_smooth.dropna().reset_index(drop=True)
 
         out_prefix = csv_filename.replace('.csv', '')
-        plot_abs_error_pdf(df, out_prefix, use_kde=True, bins=80)
+        plot_abs_error_frequency_hist(df, out_prefix, bins=80, max_err=10.0, per_joint=True)
+
+
+        # out_prefix = csv_filename.replace('.csv', '')
+        # plot_abs_error_pdf(df, out_prefix, use_kde=True, bins=80)
 
         print(f"✅ Applied decimation (/{DECIMATE}) and smoothing (window={SMOOTH_WINDOW})")
         print(f"Resulting data points: {len(df)}")
@@ -402,21 +533,48 @@ def plot_data_from_csv(csv_filename):
             ax.plot(time_history, tr, label='tau_residual', linewidth=1.8)
 
             # 画 combined
-            if YH_comb is not None:
-                yh_c = YH_comb[:, j]
-                ax.plot(time_history, yh_c, '--', linewidth=1.5, label='y_hat_combined')
+            # if YH_comb is not None:
+            #     yh_c = YH_comb[:, j]
+            #     ax.plot(time_history, yh_c, '--', linewidth=1.5, label='y_hat_combined')
 
-            # # 画 local
-            if YH_local is not None:
-                yh_l = YH_local[:, j]
-                ax.plot(time_history, yh_l, '-', linewidth=1.2, alpha=0.8, label='y_hat_local')
-
-            # # 画 cloud
+            # if YH_local is not None:
+            #     yh_l = YH_local[:, j]
+            #     ax.plot(time_history, yh_l, '--', linewidth=1.5, label='y_hat_local')
+            
             if YH_cloud is not None:
-                yh_cl = YH_cloud[:, j]
-                ax.plot(time_history, yh_cl, ':', linewidth=1.2, alpha=0.8, label='cloud')
-            #     rem = tr - yh_cl
-            #     ax.plot(time_history, rem, linewidth=1.2, alpha=0.8, label='true - cloud')
+                yh_cloud = YH_cloud[:, j]
+                ax.plot(time_history, yh_cloud, '--', linewidth=1.5, label='y_hat_cloud')
+
+            # ---- 每点误差：local vs combined ----
+            if (YH_local is not None) and (YH_comb is not None):
+                err_local = tr - YH_local[:, j]
+                err_comb  = tr - YH_comb[:, j]
+
+                abs_local = np.abs(err_local)
+                abs_comb  = np.abs(err_comb)
+
+                # # 画每点绝对误差（两条曲线）
+                # ax.plot(time_history, abs_local, linewidth=1.2, alpha=0.8, label='|err| local')
+                # ax.plot(time_history, abs_comb,  linewidth=1.2, alpha=0.8, label='|err| combined')
+
+                # 画“对比差值”：combined - local （<0 表示 combined 更好）
+                diff = abs_comb - abs_local
+                ax.plot(time_history, diff, linewidth=1.0, alpha=0.7, label='(|err| comb) - (|err| local)')
+
+                # 统计：combined 更好的比例（每点比较）
+                win_rate = np.mean(abs_comb < abs_local) * 100.0
+                ax.set_title(f'Joint {j+1}  WinRate(comb<local)={win_rate:.1f}%')
+
+            # elif YH_comb is not None:
+            #     # 只有 combined
+            #     abs_comb = np.abs(tr - YH_comb[:, j])
+            #     ax.plot(time_history, abs_comb, linewidth=1.2, alpha=0.8, label='|err| combined')
+
+            # elif YH_local is not None:
+            #     # 只有 local
+            #     abs_local = np.abs(tr - YH_local[:, j])
+            #     ax.plot(time_history, abs_local, linewidth=1.2, alpha=0.8, label='|err| local')
+
 
             # if YH_mem is not None:
             #     yh_mem = YH_mem[:, j]
@@ -425,13 +583,13 @@ def plot_data_from_csv(csv_filename):
             #     ax.plot(time_history, rem, linewidth=1.2, alpha=0.8, label='true - history')
 
             # 画剩余误差：残差 - combined（如果有）
-            if YH_comb is not None:
-                rem = tr - YH_comb[:, j]
-                ax.plot(time_history, rem, linewidth=1.0, alpha=0.7, label='residual - combined')
+            # if YH_comb is not None:
+            #     rem = tr - YH_comb[:, j]
+            #     ax.plot(time_history, rem, linewidth=1.0, alpha=0.7, label='residual - combined')
 
-            if YH_comb is not None:
-                rem = tr - YH_local[:, j]
-                ax.plot(time_history, rem, linewidth=1.0, alpha=0.7, label='true - local')
+            # if YH_comb is not None:
+            #     rem = tr - YH_local[:, j]
+            #     ax.plot(time_history, rem, linewidth=1.0, alpha=0.7, label='true - local')
 
 
             #     # 简单统计：corr / MSE / MAE
