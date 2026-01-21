@@ -1,7 +1,11 @@
+# ===== Request =====
 float32[] q
 float32[] dq_des_joint
 float32[] ddq_des_joint
 float32[] tau_residual
+
+float32 t_target
+float32 seq
 
 float32[] q_future
 float32[] dq_des_joint_future
@@ -12,26 +16,29 @@ float32[] q_future_samples_flat
 float32[] dq_future_samples_flat
 float32[] ddq_future_samples_flat
 
-float64 t_target
-float64 seq
-float64 t_send
-
 float32[] q_correction
 float32[] dq_correction
-# （可选）float32[] ddq_correction
+
+int32 rollout_steps          # ✅新增：希望 server rollout 多少步（可选，也可以用参数）
 
 ---
+# ===== Response =====
 float32[] y_local
 float32[] y_cloud
 float32[] y_cloud_var
 float32[] y_cloud_aggregation
+
 float32[] y_mem
 float32 mem_dist
-float64 t_target
-float64 seq
-float64 t_send
 
-# 新增：云端回传“用于预测的状态”（先做echo）
 float32[] q_used
 float32[] dq_used
 float32[] ddq_used
+
+float32 t_target
+float32 seq
+
+# ✅新增：把每一步 mu/var 全部回传（flatten）
+int32 rollout_steps_used
+float32[] y_rollout_mu_flat      # len = rollout_steps_used * 7
+float32[] y_rollout_var_flat     # len = rollout_steps_used * 7

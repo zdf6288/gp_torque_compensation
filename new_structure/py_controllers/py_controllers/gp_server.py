@@ -50,6 +50,10 @@ class GPServer(Node):
         self.mem_Y = []      # list of (7,)
         self.mem_max = 10000  # 最大容量（你可以调）
 
+        #rollout
+        self.declare_parameter('rollout_steps', 5)
+        self.rollout_steps = int(self.get_parameter('rollout_steps').value)
+
     # ============================================================
     # 主 Service 回调
     # ============================================================
@@ -107,11 +111,38 @@ class GPServer(Node):
             # =====================================================
             # B) 未来主预测（❌ 不更新）
             # =====================================================
-            y_gp_fut, var_gp_future, y_mem_cur, mem_dist_cur = self._gp_predict_vector(
-                q_f, dq_f, ddq_f,
-                tau_residual=None, update=False
-            )
+            # -------- 多步 rollout 参数 --------
+            M = max(1, int(self.rollout_steps))
+            dt = 0.001
 
+            # -------- rollout 起点：用当前状态（或你希望的起点）--------
+            q_i  = q.copy()
+            dq_i = dq.copy()
+            ddq_i = ddq.copy()   # 或用 ddq_cmd（通常更稳）
+
+            mu_last  = np.zeros(7, np.float32)
+            var_last = np.full(7, np.inf, np.float32)
+
+            # （可选）存每步预测，做“沿途融合”
+            mu_steps  = []
+            var_steps = []
+
+            for i in range(M):
+                mu_i, var_i, y_mem_cur, mem_dist_cur = self._gp_predict_vector(q_i, dq_i, ddq_i, tau_residual=None, update=False)
+                mu_steps.append(mu_i)
+                var_steps.append(var_i)
+
+                # 推进到下一小步
+                q_i  = q_i  + dq_i * dt + 0.5 * ddq_i * (dt**2)
+                dq_i = dq_i + ddq_i * dt
+                # ddq_i 如果你有 jerk/未来轨迹，可以在这里更新；否则保持常值
+
+            mu_last  = mu_steps[-1]
+            var_last = var_steps[-1]
+
+            # 未来主预测就用最后一步的输出
+            y_gp_fut = mu_last
+            var_gp_future = var_last    
 
             # =====================================================
             # C) 多采样 future + PoE（❌ 不更新）
@@ -158,7 +189,15 @@ class GPServer(Node):
             response.y_mem    = y_mem_cur.tolist()
             response.mem_dist = float(mem_dist_cur)
 
-                # 把云端实际用的 future 输入返回
+            mu_steps_arr  = np.stack(mu_steps, axis=0).astype(np.float32)   # (M,7)
+            var_steps_arr = np.stack(var_steps, axis=0).astype(np.float32)  # (M,7)
+
+            response.rollout_steps_used = int(M)
+            response.y_rollout_mu_flat  = mu_steps_arr.reshape(-1).tolist()
+            response.y_rollout_var_flat = var_steps_arr.reshape(-1).tolist()
+
+
+            # 把云端实际用的 future 输入返回
             response.q_used  = q_f_used.astype(np.float32).tolist()
             response.dq_used = dq_f_used.astype(np.float32).tolist()
             response.ddq_used = ddq_f_used.astype(np.float32).tolist()
@@ -327,16 +366,16 @@ class GPServer(Node):
         # key = 关节号（1..6），"default" 为所有关节的默认配置
         per_joint_cfg = {
             "default": dict(
-                max_data_per_expert=50,
-                nearest_k=4,
-                max_experts=50,
+                max_data_per_expert=25,
+                nearest_k=2,
+                max_experts=25,
                 timescale=0.03,
             ),
             # 举例：如果你想让 6 号关节忘得快一点、专家少一点，可以单独改：
             6: dict(
-                max_data_per_expert=50,
-                nearest_k=4,
-                max_experts=50,
+                max_data_per_expert=25,
+                nearest_k=2,
+                max_experts=25,
                 timescale=0.05,
             ),
         }

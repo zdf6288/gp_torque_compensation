@@ -537,13 +537,15 @@ def plot_data_from_csv(csv_filename):
             #     yh_c = YH_comb[:, j]
             #     ax.plot(time_history, yh_c, '--', linewidth=1.5, label='y_hat_combined')
 
-            # if YH_local is not None:
-            #     yh_l = YH_local[:, j]
-            #     ax.plot(time_history, yh_l, '--', linewidth=1.5, label='y_hat_local')
+            if YH_local is not None:
+                yh_l = YH_local[:, j]
+                ax.plot(time_history, yh_l, '--', linewidth=1.5, label='y_hat_local')
             
             if YH_cloud is not None:
                 yh_cloud = YH_cloud[:, j]
                 ax.plot(time_history, yh_cloud, '--', linewidth=1.5, label='y_hat_cloud')
+                rem = tr - yh_cloud
+                ax.plot(time_history, rem, '--', linewidth=1.5, label='true - cloud')
 
             # ---- 每点误差：local vs combined ----
             if (YH_local is not None) and (YH_comb is not None):

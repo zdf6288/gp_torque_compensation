@@ -213,11 +213,18 @@ class CartesianImpedanceController(Node):
             'future_delay', 0.015 # 默认 60 ms
         ).value
         self.delay_steps = 0
-        self.state_delay_steps = 10   # 你想模拟的通信延迟：20个周期
+        self.state_delay_steps = 0   # 你想模拟的通信延迟：20个周期
         self.state_buffer = deque(maxlen=1000)  # 存2秒(1kHz)都够
         self.cloud_delay_steps = 100
         self.y_hat_cloud_buffer = deque(maxlen=self.cloud_delay_steps)
         
+        # cloud queue
+        self.cloud_queue = deque(maxlen=500)        # 存 cloud rollout 点 (7,)
+        self.cloud_var_queue = deque(maxlen=500)    # 存对应方差 (7,)
+
+        self.y_hat_cloud_hold = np.zeros(7)
+        self.var_cloud_hold = np.ones(7) * 1e6
+
         # variance
         self.var_local = np.ones(7) * 1e6
         self.var_cloud = np.ones(7) * 1e6
@@ -476,91 +483,7 @@ class CartesianImpedanceController(Node):
             # self.tau_residual_filtered = self.alpha_beta_filter_tau(tau_residual, dt)
             # print("tau_residual:", tau_residual)
 
-            # === 云端延迟补偿 ===
-            # === 云端延迟补偿（时间戳对齐版）===
-            if self.gp_active:
-
-                t_now = self.get_clock().now().nanoseconds * 1e-9
-
-                # with self._gp_lock:
-                if len(self.y_hat_cloud_buffer) > 0:
-                    # 找“预测时间最接近当前时刻”的 cloud 结果
-                    best = min(
-                        self.y_hat_cloud_buffer,
-                        key=lambda e: abs(e["t"] - t_now)
-                    )
-                    y_cloud_delayed = best["y"]
-                else:
-                    y_cloud_delayed = np.zeros(7)
-
-                # self.y_hat_cloud = y_cloud_delayed
-
-
-                # 1️⃣ 取“最老”的 cloud（≈ t - Δt）
-                # if len(self.y_hat_cloud_buffer) > 0:
-                #     y_cloud_delayed = self.y_hat_cloud_buffer[0]
-                # else:
-                #     y_cloud_delayed = np.zeros(7)
-                # self.y_hat_cloud = y_cloud_delayed
-
-                # 2️⃣ 融合策略（你原来的 mode 放这里）
-                # mode = self.gp_mode
-                # mode = "local"
-
-                # if mode == "local":
-                #     self.y_hat_combined = self.y_hat_local
-
-                # elif mode == "cloud":
-                #     self.y_hat_combined = y_cloud_delayed
-
-                # elif mode == "fusion":
-                #     self.y_hat_combined = 0.5 * self.y_hat_local + 0.5 * y_cloud_delayed
-
-                # elif mode == "none":
-                #     self.y_hat_combined = np.zeros(7)
-
-                # else:
-                #     self.y_hat_combined = 0.5 * self.y_hat_local + 0.5 * y_cloud_delayed
-
-                # 3️⃣ 真正用于控制
-                tau = tau
-                
-            # === 每周期对比：最近云端回包状态 vs 当前真实状态 ===
-            if self.cloud_state_valid:
-                with self._cloud_lock:
-                    q_used  = self.q_cloud_used.copy()
-                    dq_used = self.dq_cloud_used.copy()
-                    y_cloud = self.y_hat_cloud.copy()
-
-                q_err = q - q_used
-                dq_err = dq - dq_used
-
-                # 也可以对比 y_hat：云端输出 vs 本地输出（如果你要）
-                y_err = y_cloud - self.y_hat_local
-
-                # 想打印就打印（注意别刷屏，建议降频）
-                if (self.gp_counter % 50) == 0:
-                    self.get_logger().info(
-                        f"[Compare] |q_err|={np.linalg.norm(q_err):.4f}, "
-                        f"|dq_err|={np.linalg.norm(dq_err):.4f}, "
-                        f"|y_err|={np.linalg.norm(y_err):.4f}, "
-                        f"seq={self.cloud_seq_latest}"
-                    )
-
-                # 记录下来用于保存CSV/画图（可选）
-                if self.data_recording_enabled:
-                    self.q_err_history.append(q_err.tolist())
-                    self.dq_err_history.append(dq_err.tolist())
-                    self.y_err_history.append(y_err.tolist())
-
-            # --- 记录（含最终补偿用的 y_hat_combined）---
-            if self.data_recording_enabled:
-                self.y_hat_history.append(self.y_hat_combined.tolist())      # combined
-                self.y_hat_local_history.append(self.y_hat_local.tolist())    # 上一帧或刚更新的 local
-                self.y_hat_cloud_history.append(self.y_hat_cloud.tolist())    # 上一帧或刚更新的 cloud
-                self.y_hat_mem_history.append(self.y_hat_mem.tolist())
-                self.tau_residual_history.append(self.tau_residual_filtered.tolist())
-
+            tau = tau
 
             # === 异步请求未来轨迹（给 GP 用），比如 100Hz 请求一次 ===
             if self.future_traj_client.service_is_ready():
@@ -578,200 +501,69 @@ class CartesianImpedanceController(Node):
                     self._future_traj_warned = True
 
             # === 控制循环的最后：按节拍触发一次“GP 更新”（本地 + 云端） ===
-            # print("active:",self.gp_active)
-            # print("use:",self.use_gp)
             if self.gp_active and self.use_gp:
                 self.gp_counter += 1
-                if self.gp_counter % self.gp_stride == 0:
-                # 1) 本地 GP 立刻算一次（同步）
+                tick = (self.gp_counter % self.gp_stride == 0)
+
+                # ---------------------------------------------------------
+                # A) 每帧：先消费 cloud 队列（填补空隙）
+                # ---------------------------------------------------------
+                if len(self.cloud_queue) > 0:
+                    self.y_hat_cloud_hold = self.cloud_queue.popleft()
+                    self.var_cloud_hold   = self.cloud_var_queue.popleft()
+
+                self.y_hat_cloud = self.y_hat_cloud_hold
+                self.var_cloud   = self.var_cloud_hold
+                # ---------------------------------------------------------
+                # B) local：只有 tick 更新，否则 hold
+                # ---------------------------------------------------------
+                if tick:
+                    # 1) local：当前帧更新一次（真实残差）
                     self.y_hat_local, self.var_local = self._gp_predict_and_update(
-                        self.q,
-                        dq,
-                        self.ddq_des_joint,
+                        self.q, dq, self.ddq_des_joint,
                         self.tau_residual_filtered,
                         self.gp_models_small,
                         update=True
                     )
+
+                    # 2) rollout：生成未来 M 步预测，塞进队列（只预测，不更新）
+                    M = 5
+                    dt_step = self.gp_stride * dt   # 每个点对应一个真实控制周期跨度（因为你 tick=每stride一次）
+                    q_i  = self.q.copy()
+                    dq_i = dq.copy()
+                    ddq_i = self.ddq_des_joint.copy()
+                    tau_recursive = self.tau_residual_filtered
+                    for i in range(M):
+                        y_i, v_i = self._gp_predict_and_update(
+                            q_i, dq_i, ddq_i,
+                            tau_recursive,
+                            self.gp_models_small,
+                            update=True            # ✅ 关键：rollout 不更新
+                        )
+                        tau_recursive = 1 * y_i + 0 * tau_recursive
+                        # 塞进 cloud 队列，后续帧逐帧消费
+                        self.cloud_queue.append(y_i.copy())
+                        self.cloud_var_queue.append(v_i.copy())
+
+                        # 推进状态（用 dt_step 而不是 dt）
+                        q_i  = q_i  + dq_i * dt_step + 0.5 * ddq_i * (dt_step**2)
+                        dq_i = dq_i + ddq_i * dt_step
                 else:
-                    self.y_hat_local = self.y_hat_local
-                    self.var_local = self.var_local
-                # self.y_hat_cloud, self.var_cloud = self._gp_predict_and_update(
-                #     self.q,
-                #     dq,
-                #     self.ddq_des_joint,
-                #     self.tau_residual_filtered,
-                #     self.gp_models_big
-                # )
-
-                self.state_buffer.append({
-                    "q": self.q.copy(),
-                    "dq": dq.copy(),
-                    "ddq": self.ddq_des_joint.copy(),     # 推荐用命令加速度
-                    "tau_res": self.tau_residual_filtered.copy()
-                })
-
-                # N = self.state_delay_steps
-                # if len(self.state_buffer) > N:
-                #     s = self.state_buffer[-1 - N]
-                #     q_old, dq_old, ddq_old, tau_res_old = s["q"], s["dq"], s["ddq"], s["tau_res"]
-
-                #     delay = float(self.future_delay)
-
-                #     q_now = self.q
-                #     dq_ref = self.dq_des_joint
-                #     ddq_cmd = self.ddq_des_joint
-
-                #     q_future_main  = q_now + dq_ref * delay + 0.5 * ddq_cmd * delay**2
-                #     dq_future_main = dq_ref + ddq_cmd * delay
-                #     ddq_future_main = ddq_cmd
-
-                    # 2) big model：用 future 输入做“预测”（不更新）
-                    # self.y_hat_cloud, self.var_cloud = self._gp_predict_and_update(
-                    #     q_now,
-                    #     dq_ref,
-                    #     ddq_cmd,
-                    #     self.tau_residual_filtered,
-                    #     self.gp_models_big,
-                    #     update=True
-                    # )
-
-                    # 3) big model：用 old 状态做“更新”
-                    # _mu, _var = self._gp_predict_and_update(
-                    #     q_old,
-                    #     dq_old,
-                    #     ddq_old,
-                    #     tau_res_old,
-                    #     self.gp_models_big,
-                    #     update=True
-                    # )
-                # else:
-                #     self.y_hat_cloud = np.zeros(7)
-                #     self.var_cloud   = np.ones(7) * 1e6
-                # 4) 方差加权融合（逐关节）
+                    # 可选：local 不更新的帧，方差稍微膨胀，表示“信息变旧”
+                    self.var_local = np.minimum(self.var_local * 1.02, 1e6)
+                
+                # ---------------------------------------------------------
+                # C) 每帧融合（不要只在 else 融合）
+                # ---------------------------------------------------------
                 eps = 1e-8
                 v_l = np.maximum(self.var_local, eps)
                 v_c = np.maximum(self.var_cloud, eps)
 
-                # 可选：考虑 big/future 更不确定，给它膨胀一下（工程上很常用）
-                # v_c *= 1.5
-
                 prec_l = 1.0 / v_l
                 prec_c = 1.0 / v_c
-
-                w_l = prec_l / (prec_l + prec_c)      # local 权重
-                # w_c = 1 - w_l
+                w_l = prec_l / (prec_l + prec_c)
 
                 self.y_hat_combined = w_l * self.y_hat_local + (1.0 - w_l) * self.y_hat_cloud
-
-            # 2) 云端 GP：发异步请求（同一时刻的 q/dq/ddq/残差）
-            # === CLOUD GP 调用 === 
-                if self.gp_client.service_is_ready():
-                    req = AsyncGPpredict.Request()
-                    # ---- 当前输入 ----
-                    req.q = self.q.astype(np.float32).tolist()
-                    req.dq_des_joint = dq.astype(np.float32).tolist()
-                    req.ddq_des_joint = self.ddq_des_joint.astype(np.float32).tolist()
-                    req.tau_residual = self.tau_residual_filtered.astype(np.float32).tolist()
-
-                    # ============================================================
-                    #   未来输入（不依赖 future_traj，不依赖任务空间）
-                    #   永远可计算 —— 保证 cloud GP 每次都能收到预测输入
-                    # ============================================================
-                    sigma_ddq = 0.005                    # rad/s^2
-                    delay = float(self.future_delay)
-
-                    q_now   = self.q
-                    dq_now  = dq
-                    ddq_now = self.ddq_des_joint
-
-                    # 主预测（deterministic）
-                    # q_future_main  = q_now + dq_now * delay + 0.5 * ddq_now * delay**2
-                    # dq_future_main = dq_now + ddq_now * delay
-                    # ddq_future_main = ddq_now
-
-                    N = self.state_delay_steps
-
-                    if len(self.state_buffer) > N:
-                        s = self.state_buffer[-1 - N]   # ✅ N步前的状态（关键行）
-
-                        q_old   = s["q"]
-                        dq_old  = s["dq"]
-                        ddq_old = s["ddq"]
-                        tau_res_old = s["tau_res"]
-
-                        # 用同一个 delay（秒），把 old 状态推进到它的 future（可选）
-                        delay = float(self.future_delay)   # 例如 0.002s，也可以设成 N*dt
-                        q_future_main = q_old + dq_old * delay + 0.5 * ddq_old * delay**2
-                        dq_future_main = dq_old + ddq_old * delay
-                        ddq_future_main = ddq_old
-
-
-                    N = 10
-                    noise_std = self.future_ddq_noise_std
-
-                    q_samples  = []
-                    dq_samples = []
-                    ddq_samples = []
-
-                    for _ in range(N):
-                        # 1️⃣ 在加速度层加噪声（唯一噪声源）
-                        ddq_k = ddq_now + np.random.normal(
-                            loc=0.0,
-                            scale=sigma_ddq,
-                            size=ddq_now.shape
-                        )
-
-                        # 2️⃣ 积分得到速度
-                        dq_k = dq_now + ddq_k * delay
-
-                        # 3️⃣ 再积分得到位置
-                        q_k = q_now + dq_now * delay + 0.5 * ddq_k * delay**2
-
-                        q_samples.append(q_k)
-                        dq_samples.append(dq_k)
-                        ddq_samples.append(ddq_k)
-                    # N = 0
-                    # q_samples, dq_samples, ddq_samples = [], [], []
-
-                    # for _ in range(N):
-                    #     ddx_f_k = ddx_f.copy()
-                    #     ddx_f_k[:5] += np.random.normal(0, sigma_ddq, size=5)
-
-                    #     dq_k  = jacobian_pinv @ dx_f_5
-                    #     ddq_k = jacobian_pinv @ (ddx_f_k[:5] - djacobian @ dq)
-
-                    #     q_k = self.q + dq_k * delay + 0.5 * ddq_k * delay**2
-
-                    #     q_samples.append(q_k)
-                    #     dq_samples.append(dq_k)
-                    #     ddq_samples.append(ddq_k)
-
-                    # ---- cloud GP 特征输入 ----
-                    t_now = self.get_clock().now().nanoseconds * 1e-9
-                    t_target = t_now + self.future_delay
-
-                    req.t_target = t_target
-
-                    # ---- 主 future ----
-                    req.q_future = q_future_main.astype(np.float32).tolist()
-                    req.dq_des_joint_future  = dq_future_main.astype(np.float32).tolist()
-                    req.ddq_des_joint_future = ddq_future_main.astype(np.float32).tolist()
-                    
-                    # ---- 多采样 future ----
-                    req.n_future_samples = N
-                    req.q_future_samples_flat = np.array(q_samples,dtype=np.float32).reshape(-1).tolist()
-                    req.dq_future_samples_flat = np.array(dq_samples, dtype=np.float32).reshape(-1).tolist()
-                    req.ddq_future_samples_flat = np.array(ddq_samples, dtype=np.float32).reshape(-1).tolist()
-
-                    self.gp_send_seq = self.gp_send_seq+1
-                    req.seq = float(self.gp_send_seq)
-
-                    # ⭐⭐⭐ 缺失的关键两行 ⭐⭐⭐
-                    future = self.gp_client.call_async(req)
-                    future.add_done_callback(self._gp_response_callback)
-
-                else:
-                    print("service not ready!!!!!!!!!!!!!!!!!")
 
             # publish on topic /effort_command
             self.effort_msg.efforts = tau.tolist()
@@ -789,6 +581,12 @@ class CartesianImpedanceController(Node):
                 self.gravity_history.append(np.array(msg.gravity).tolist())
                 self.q_history.append(q.tolist())
                 self.dq_history.append(dq.tolist())
+
+                self.y_hat_history.append(self.y_hat_combined.tolist())      # combined
+                self.y_hat_local_history.append(self.y_hat_local.tolist())    # 上一帧或刚更新的 local
+                self.y_hat_cloud_history.append(self.y_hat_cloud.tolist())    # 上一帧或刚更新的 cloud
+                self.y_hat_mem_history.append(self.y_hat_mem.tolist())
+                self.tau_residual_history.append(self.tau_residual_filtered.tolist())
 
         except Exception as e:
             self.get_logger().error(f'Parameter error: {str(e)}')
@@ -837,16 +635,27 @@ class CartesianImpedanceController(Node):
             if resp is None:
                 return
 
-            y_cloud = np.array(resp.y_cloud, dtype=float)
-            y_cloud_aggregated = np.array(resp.y_cloud_aggregation, dtype=float)
-            var_cloud = np.array(resp.y_cloud_var, dtype=float)
-            q_used  = np.array(resp.q_used,  dtype=float) if len(resp.q_used)  else np.zeros(7)
+            q_used = np.array(resp.q_used, dtype=float) if len(resp.q_used) else np.zeros(7)
             dq_used = np.array(resp.dq_used, dtype=float) if len(resp.dq_used) else np.zeros(7)
             ddq_used = np.array(resp.ddq_used, dtype=float) if len(resp.ddq_used) else np.zeros(7)
 
+            # 解析出 rollout 每步预测
+            M = int(resp.rollout_steps_used)
+            if M > 0 and len(resp.y_rollout_mu_flat) == M*7:
+                mu_steps  = np.array(resp.y_rollout_mu_flat, dtype=float).reshape(M, 7)
+                var_steps = np.array(resp.y_rollout_var_flat, dtype=float).reshape(M, 7)
+
+                # # 防止积压：队列太长就丢旧的，保证新预测优先
+                # while len(self.cloud_queue) > 0:
+                #     self.cloud_queue.popleft()
+                #     self.cloud_var_queue.popleft()
+
+                # for i in range(M):
+                #     self.cloud_queue.append(mu_steps[i].copy())
+                #     self.cloud_var_queue.append(var_steps[i].copy())
+
+
             with self._cloud_lock:
-                self.y_hat_cloud = y_cloud_aggregated
-                self.var_cloud = var_cloud
                 self.q_cloud_used = q_used
                 self.dq_cloud_used = dq_used
                 self.ddq_cloud_used = ddq_used
@@ -1002,16 +811,16 @@ class CartesianImpedanceController(Node):
         
         per_joint_cfg = {
             "default": dict(
-                max_data_per_expert=50,
-                nearest_k=4,
-                max_experts=50,
+                max_data_per_expert=25,
+                nearest_k=2,
+                max_experts=25,
                 timescale=0.03,
             ),
             # 举例：如果你想让 6 号关节忘得快一点、专家少一点，可以单独改：
             6: dict(
-                max_data_per_expert=50,
-                nearest_k=4,
-                max_experts=50,
+                max_data_per_expert=25,
+                nearest_k=2,
+                max_experts=25,
                 timescale=0.05,
             ),
         }
