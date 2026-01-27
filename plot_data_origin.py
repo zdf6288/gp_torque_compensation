@@ -7,12 +7,11 @@ import pandas as pd
 import argparse
 import sys
 import os
-import matplotlib.pyplot as plt
-import scienceplots
 
 def cols_1to7(df, prefix):
     # prefix 末尾自己带下划线，如 'tau_', 'tau_measured_', 'gravity_', 'y_hat_', 'tau_residual_'
     return [f'{prefix}{i}' for i in range(1, 8) if f'{prefix}{i}' in df.columns]
+
 
 def plot_data_from_csv(csv_filename):
     """plot data from CSV file"""
@@ -41,10 +40,6 @@ def plot_data_from_csv(csv_filename):
         # 用平滑后的数据替换原 df，避免后面改很多
         df = df_smooth.dropna().reset_index(drop=True)
 
-        out_prefix = csv_filename.replace('.csv', '')
-        # out_prefix = csv_filename.replace('.csv', '')
-        # plot_abs_error_pdf(df, out_prefix, use_kde=True, bins=80)
-
         print(f"✅ Applied decimation (/{DECIMATE}) and smoothing (window={SMOOTH_WINDOW})")
         print(f"Resulting data points: {len(df)}")
         
@@ -70,8 +65,7 @@ def plot_data_from_csv(csv_filename):
         tau_measured_history_array = df[meas_cols].values
         gravity_history_array      = df[grav_cols].values
         
-        fig, axes = plt.subplots(2, 3, figsize=(18, 10))
-
+        fig, axes = plt.subplots(3, 3, figsize=(18, 14))
         fig.suptitle('Cartesian Impedance Controller Data', fontsize=14)
         
         # plot tau for 7 joints
@@ -224,7 +218,47 @@ def plot_data_from_csv(csv_filename):
         plt.savefig(output_filename, dpi=300, bbox_inches='tight')
         print(f'Figure saved as {output_filename}')
         
-        # plt.show()
+        plt.show()
+
+        # ===== 新增：6个子图，分别画 joint 的 q & qdot（双y轴） =====
+        q_cols  = [f'joint_pos_{i}' for i in range(1, 8) if f'joint_pos_{i}' in df.columns]
+        dq_cols = [f'joint_vel_{i}' for i in range(1, 8) if f'joint_vel_{i}' in df.columns]
+
+        if len(q_cols) >= 6 and len(dq_cols) >= 6:
+            figq, axesq = plt.subplots(3, 2, figsize=(16, 10), sharex=True)
+            figq.suptitle('Joint Position q and Velocity qdot (J1–J6)', fontsize=14)
+
+            axes_flat = [ax for row in axesq for ax in row]
+
+            for j in range(6):  # 只画 1..6
+                ax = axes_flat[j]
+                qj  = df[f'joint_pos_{j+1}'].values
+                dqj = df[f'joint_vel_{j+1}'].values
+
+                # 左轴：q
+                l1, = ax.plot(time_history, qj, linewidth=2, label='q [rad]')
+                ax.set_ylabel('q [rad]')
+                ax.grid(True)
+
+                # 右轴：qdot
+                ax2 = ax.twinx()
+                l2, = ax2.plot(time_history, dqj, linestyle='--', linewidth=1.8, label='qdot [rad/s]')
+                ax2.set_ylabel('qdot [rad/s]')
+
+                ax.set_title(f'Joint {j+1}')
+                if j >= 4:  # 最后一行加 x 标签
+                    ax.set_xlabel('Time (s)')
+
+                # 合并 legend
+                ax.legend([l1, l2], ['q [rad]', 'qdot [rad/s]'], loc='upper right')
+
+            plt.tight_layout()
+            outq = csv_filename.replace('.csv', '_joint_q_qdot_6j.png')
+            figq.savefig(outq, dpi=300, bbox_inches='tight')
+            print(f'Figure saved as {outq}')
+        else:
+            print('Skip joint q/qdot plot: missing joint_pos_* or joint_vel_* columns.')
+
         
     except Exception as e:
         print(f'Error when plotting data: {str(e)}')
@@ -245,7 +279,7 @@ def plot_data_from_csv(csv_filename):
         # 只用到前 7 个子图
         import itertools
         grid_axes = list(itertools.chain.from_iterable(axes2))
-        for j in range(6):
+        for j in range(7):
             ax = grid_axes[j]
             qj = q_all[:, j]
             ej = tau_err[:, j]
@@ -291,370 +325,86 @@ def plot_data_from_csv(csv_filename):
         # ===== 逐关节：local / cloud / combined y_hat vs tau_residual =====
     # 允许下面三种命名：
     #   y_hat_local_1..7, y_hat_cloud_1..7, y_hat_1..7 (combined)
-    from matplotlib.lines import Line2D
-
-    legend_handles = [
-        Line2D([0], [0], color='k', linestyle='-',  linewidth=2.0,
-            label=r'$\tau_{\mathrm{res}}$'),
-        Line2D([0], [0], color='tab:blue', linestyle='--', linewidth=1.6,
-            label=r'$\hat{\tau}_{\mathrm{local}}$'),
-        Line2D([0], [0], color='tab:orange', linestyle='-.', linewidth=1.6,
-            label=r'$\hat{\tau}_{\mathrm{cloud}}$'),
-        Line2D([0], [0], color='tab:red', linestyle='-', linewidth=1.2,
-            label=r'$\Delta |e|$')
-    ]
-
     yhat_comb_cols  = cols_1to7(df, 'y_hat_')
     yhat_local_cols = cols_1to7(df, 'y_hat_local_')
     yhat_cloud_cols = cols_1to7(df, 'y_hat_cloud_')
     yhat_mem_cols = cols_1to7(df,'y_hat_mem_')
-    res_cols        = cols_1to7(df, 'tau_residual_')    
-    if len(res_cols) == 7 and (len(yhat_comb_cols) == 7 or len(yhat_local_cols) == 7 or len(yhat_cloud_cols) == 7 or len(yhat_mem_cols) == 7):
+    res_cols        = cols_1to7(df, 'tau_residual_')
 
-        # ================== 数据读取 ==================
-        TR = df[res_cols].values              # tau_residual, shape [N, 7]
+    if len(res_cols) == 7 and (len(yhat_comb_cols) == 7 or len(yhat_local_cols) == 7 or len(yhat_cloud_cols) == 7 or len(yhat_mem_cols) == 7):
+        TR = df[res_cols].values       # shape [N,7]
+
+        YH_comb  = df[yhat_comb_cols].values  if len(yhat_comb_cols)  == 7 else None
         YH_local = df[yhat_local_cols].values if len(yhat_local_cols) == 7 else None
         YH_cloud = df[yhat_cloud_cols].values if len(yhat_cloud_cols) == 7 else None
-        YH_comb  = df[yhat_comb_cols].values  if len(yhat_comb_cols)  == 7 else None
+        YH_mem = df[yhat_mem_cols].values if len(yhat_mem_cols) == 7 else None
 
-        # ================== Figure ==================
-        fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+        fig3, axes3 = plt.subplots(3, 3, figsize=(18, 14))
+        fig3.suptitle('Per-Joint: GP predictions vs tau_residual', fontsize=14)
 
-        ax_list = [ax for row in axes for ax in row]
+        ax_list = [ax for row in axes3 for ax in row]
 
-        # ---- 主标题 ----
-        # fig.suptitle(
-        #     r'Per-Joint GP-Based Residual Torque Prediction',
-        #     fontsize=15,
-        #     y=0.96
-        # )
-
-        # ================== 子图绘制 ==================
-        for j in range(6):
+        print('\n=== GP predictions vs tau_residual statistics (combined/local/cloud) ===')
+        for j in range(7):
             ax = ax_list[j]
+            tr = TR[:, j]
 
-            # ---- Ground truth residual ----
-            tau_res = TR[:, j]
-            ax.plot(
-                time_history, tau_res,
-                color='k', linestyle='-',
-                linewidth=2.0
-            )
+            # 残差
+            # ax.plot(time_history, tr, label='tau_residual', linewidth=1.8)
 
-            # ---- Local GP ----
-            if YH_local is not None:
-                tau_hat_local = YH_local[:, j]
-                ax.plot(
-                    time_history, tau_hat_local,
-                    color='tab:blue', linestyle='--',
-                    linewidth=1.6
-                )
+            # 画 combined
+            # if YH_comb is not None:
+            #     yh_c = YH_comb[:, j]
+            #     ax.plot(time_history, yh_c, '--', linewidth=1.5, label='y_hat_combined')
 
-            # ---- Cloud GP ----
+            # 画 local
+            # if YH_local is not None:
+            #     yh_l = YH_local[:, j]
+            #     ax.plot(time_history, yh_l, '-', linewidth=1.2, alpha=0.8, label='y_hat_local')
+
+            # 画 cloud
             if YH_cloud is not None:
-                tau_hat_cloud = YH_cloud[:, j]
-                ax.plot(
-                    time_history, tau_hat_cloud,
-                    color='tab:orange', linestyle='-.',
-                    linewidth=1.6
-                )
+                yh_cl = YH_cloud[:, j]
+                # ax.plot(time_history, yh_cl, ':', linewidth=1.2, alpha=0.8, label='cloud')
+                rem = tr - yh_cl
+                ax.plot(time_history, rem, linewidth=1.2, alpha=0.8, label='true - cloud')
 
-            # ---- Error improvement (fused vs local) ----
-            if (YH_local is not None) and (YH_comb is not None):
-                e_local = tau_res - YH_local[:, j]
-                e_fused = tau_res - YH_comb[:, j]
+            if YH_mem is not None:
+                yh_mem = YH_mem[:, j]
+                # ax.plot(time_history, yh_mem, ':', linewidth=1.2, alpha=0.8, label='history')
+                rem = tr - yh_mem
+                ax.plot(time_history, rem, linewidth=1.2, alpha=0.8, label='true - history')
 
-                delta_abs_err = np.abs(e_fused) - np.abs(e_local)
+            # 画剩余误差：残差 - combined（如果有）
+            # if YH_comb is not None:
+            #     rem = tr - YH_comb[:, j]
+            #     ax.plot(time_history, rem, linewidth=1.0, alpha=0.7, label='residual - combined')
 
-                ax.plot(
-                    time_history, delta_abs_err,
-                    color='tab:red', linestyle='-',
-                    linewidth=1.2,
-                    alpha=0.85
-                )
+            #     # 简单统计：corr / MSE / MAE
+            #     mask = np.isfinite(tr) & np.isfinite(YH_comb[:, j])
+            #     if mask.sum() >= 2:
+            #         corr = np.corrcoef(tr[mask], YH_comb[mask, j])[0, 1]
+            #         mse  = np.mean((tr[mask] - YH_comb[mask, j])**2)
+            #         mae  = np.mean(np.abs(tr[mask] - YH_comb[mask, j]))
+            #         print(f'Joint {j+1} (combined): corr={corr:.4f}, MSE={mse:.6f}, MAE={mae:.6f}')
 
-                win_rate = np.mean(np.abs(e_fused) < np.abs(e_local)) * 100.0
-                ax.set_title(
-                    rf'Joint {j+1}  (Improvement: {win_rate:.1f}\%)',
-                    fontsize=11
-                )
-            else:
-                ax.set_title(rf'Joint {j+1}', fontsize=11)
-
-            # ---- 轴 & 网格 ----
+            ax.set_title(f'Joint {j+1}')
             ax.set_xlabel('Time (s)')
             ax.set_ylabel('Torque (Nm)')
-            ax.grid(True, which='both', linestyle=':', linewidth=0.6)
+            ax.grid(True)
+            ax.legend()
 
-        # ================== Layout & Save ==================
-        plt.tight_layout(rect=[0, 0, 1, 0.88])
+        # 把多出来的两个子图关掉
+        ax_list[7].axis('off')
+        ax_list[8].axis('off')
 
-        out_fig = csv_filename.replace(
-            '.csv',
-            '_gp_residual_prediction_per_joint.png'
-        )
-        fig.legend(
-            handles=legend_handles,
-            loc='upper center',
-            ncol=4,
-            frameon=True,
-            fontsize=11,
-            bbox_to_anchor=(0.5, 0.915)
-        )
-        
-        fig.savefig(out_fig, dpi=300, bbox_inches='tight')
-        print(f'Figure saved as {out_fig}')
+        plt.tight_layout()
+        out3 = csv_filename.replace('.csv', '_yhat_local_cloud_vs_residual.png')
+        fig3.savefig(out3, dpi=300, bbox_inches='tight')
+        print(f'Figure saved as {out3}')
     else:
         print('Skip y_hat(local/cloud) vs tau_residual plot: missing columns.')
 
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-from scipy.stats import gaussian_kde
-
-
-def plot_kde_from_csv(
-    csv_file,
-    error_type='abs',   # 'abs' or 'mse'
-    use_log_x=False,
-    save_path=None
-):
-    """
-    Pure KDE plot of prediction error distributions from CSV.
-
-    Parameters
-    ----------
-    csv_file : str
-        Path to CSV file.
-    error_type : str
-        'abs' -> |error|
-        'mse' -> error^2
-    use_log_x : bool
-        Whether to use log-scale on x-axis.
-    save_path : str or None
-        If provided, save figure to this path.
-    """
-
-    df = pd.read_csv(csv_file)
-
-    # ---------- column detection ----------
-    def cols(prefix):
-        return [f'{prefix}{i}' for i in range(1, 8) if f'{prefix}{i}' in df.columns]
-
-    res_cols   = cols('tau_residual_')
-    local_cols = cols('y_hat_local_')
-    cloud_cols = cols('y_hat_cloud_')
-    comb_cols  = cols('y_hat_')
-
-    if len(res_cols) != 7 or len(local_cols) != 7:
-        raise RuntimeError('CSV must contain tau_residual_1..7 and y_hat_local_1..7')
-
-    TR = df[res_cols].values
-    YL = df[local_cols].values
-    YC = df[cloud_cols].values if len(cloud_cols) == 7 else None
-    YF = df[comb_cols].values  if len(comb_cols)  == 7 else None
-
-    # ---------- error aggregation ----------
-    err_local = []
-    err_cloud = []
-    err_fused = []
-
-    for j in range(6):
-        e_l = TR[:, j] - YL[:, j]
-        err_local.append(e_l)
-
-        if YC is not None:
-            err_cloud.append(TR[:, j] - YC[:, j])
-
-        if YF is not None:
-            err_fused.append(TR[:, j] - YF[:, j])
-
-    err_local = np.concatenate(err_local)
-    err_cloud = np.concatenate(err_cloud) if err_cloud else None
-    err_fused = np.concatenate(err_fused) if err_fused else None
-
-    # ---------- choose metric ----------
-    def transform(e):
-        e = e[np.isfinite(e)]
-        if error_type == 'abs':
-            return np.abs(e)
-        elif error_type == 'mse':
-            return e ** 2
-        else:
-            raise ValueError("error_type must be 'abs' or 'mse'")
-
-    err_local = transform(err_local)
-    err_cloud = transform(err_cloud) if err_cloud is not None else None
-    err_fused = transform(err_fused) if err_fused is not None else None
-
-    # ---------- KDE plot ----------
-    fig, ax = plt.subplots(figsize=(7.5, 5.5))
-
-    def plot_kde(data, label, color, linestyle, fill=False):
-        kde = gaussian_kde(data, bw_method='scott')
-        xmin, xmax = np.percentile(data, [1, 99])
-        x = np.linspace(xmin, xmax, 400)
-        y = kde(x)
-        ax.plot(x, y, color=color, linestyle=linestyle, linewidth=2.0, label=label)
-        if fill:
-            ax.fill_between(x, y, color=color, alpha=0.25)
-
-    plot_kde(err_local, 'Local GP', 'tab:blue', '--')
-
-    if err_cloud is not None:
-        plot_kde(err_cloud, 'Cloud GP', 'tab:orange', '-.', fill=True)
-
-    if err_fused is not None:
-        plot_kde(err_fused, 'Fused (SkyGP)', 'k', '-')
-
-    # ---------- axis styling ----------
-    xlabel = r'$|e|$ (Nm)' if error_type == 'abs' else r'$e^2$ (Nm$^2$)'
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel('Probability Density')
-    ax.grid(True, linestyle=':', linewidth=0.6)
-    ax.legend(frameon=True)
-
-    if use_log_x:
-        ax.set_xscale('log')
-        ax.set_xlabel(xlabel + ' [log scale]')
-
-    plt.tight_layout()
-
-    if save_path is not None:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f'KDE figure saved as {save_path}')
-
-    return fig, ax
-
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-from scipy.stats import gaussian_kde
-
-
-def plot_kde_per_joint_from_csv(
-    csv_file,
-    error_type='abs',   # 'abs' or 'mse'
-    num_joints=6,
-    use_log_x=True,
-    save_path=None
-):
-    """
-    Plot per-joint KDE (PDF) of prediction errors from CSV.
-
-    Parameters
-    ----------
-    csv_file : str
-        Path to CSV file.
-    error_type : str
-        'abs' -> |error|,  'mse' -> error^2
-    num_joints : int
-        Number of joints to plot (default: 6).
-    use_log_x : bool
-        Use log scale on x-axis (recommended for MSE).
-    save_path : str or None
-        Save figure if provided.
-    """
-
-    df = pd.read_csv(csv_file)
-
-    # ---------- column detection ----------
-    def cols(prefix):
-        return [f'{prefix}{i}' for i in range(1, 8) if f'{prefix}{i}' in df.columns]
-
-    res_cols   = cols('tau_residual_')
-    local_cols = cols('y_hat_local_')
-    cloud_cols = cols('y_hat_cloud_')
-    comb_cols  = cols('y_hat_')
-
-    if len(res_cols) != 7 or len(local_cols) != 7:
-        raise RuntimeError('CSV must contain tau_residual_1..7 and y_hat_local_1..7')
-
-    TR = df[res_cols].values
-    YL = df[local_cols].values
-    YC = df[cloud_cols].values if len(cloud_cols) == 7 else None
-    YF = df[comb_cols].values  if len(comb_cols)  == 7 else None
-
-    # ---------- error transform ----------
-    def transform(e):
-        e = e[np.isfinite(e)]
-        if error_type == 'abs':
-            return np.abs(e)
-        elif error_type == 'mse':
-            return e ** 2
-        else:
-            raise ValueError("error_type must be 'abs' or 'mse'")
-
-    # ---------- figure ----------
-    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
-
-    ax_list = [ax for row in axes for ax in row]
-
-    # fig.suptitle(
-    #     r'Per-Joint Prediction Error Density (KDE)',
-    #     fontsize=15,
-    #     y=0.96
-    # )
-
-    def plot_kde(ax, data, label, color, linestyle, fill=False):
-        kde = gaussian_kde(data, bw_method='scott')
-        xmin, xmax = np.percentile(data, [1, 99])
-        x = np.linspace(xmin, xmax, 400)
-        y = kde(x)
-        ax.plot(x, y, color=color, linestyle=linestyle,
-                linewidth=2.0, label=label)
-        if fill:
-            ax.fill_between(x, y, color=color, alpha=0.25)
-
-    # ---------- per joint ----------
-    for j in range(num_joints):
-        ax = ax_list[j]
-
-        # Local
-        err_local = transform(TR[:, j] - YL[:, j])
-        plot_kde(ax, err_local, 'Local GP', 'tab:blue', '--')
-
-        # Cloud
-        if YC is not None:
-            err_cloud = transform(TR[:, j] - YC[:, j])
-            plot_kde(ax, err_cloud, 'Cloud GP', 'tab:orange', '-.', fill=True)
-
-        # Fused
-        if YF is not None:
-            err_fused = transform(TR[:, j] - YF[:, j])
-            plot_kde(ax, err_fused, 'Fused (SkyGP)', 'k', '-')
-
-        ax.set_title(f'Joint {j+1}', fontsize=11)
-        ax.grid(True, linestyle=':', linewidth=0.6)
-
-        if use_log_x:
-            ax.set_xscale('log')
-
-    # ---------- shared labels ----------
-    xlabel = r'$|e|$ (Nm)' if error_type == 'abs' else r'$e^2$ (Nm$^2$)'
-    fig.text(0.5, 0.04, xlabel, ha='center', fontsize=12)
-    fig.text(0.03, 0.5, 'Probability Density', va='center',
-             rotation='vertical', fontsize=12)
-
-    # ---------- legend (only once) ----------
-    handles, labels = ax_list[0].get_legend_handles_labels()
-    fig.legend(
-        handles,
-        labels,
-        loc='upper center',
-        ncol=3,
-        frameon=True,
-        fontsize=11,
-        bbox_to_anchor=(0.5, 0.94)
-    )
-
-    plt.tight_layout(rect=[0.05, 0.06, 0.95, 0.90])
-
-    if save_path is not None:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f'Per-joint KDE figure saved as {save_path}')
-
-    return fig, axes
 
 
 
@@ -670,11 +420,6 @@ def main():
         sys.exit(1)
     
     plot_data_from_csv(args.csv_file)
-    plot_kde_per_joint_from_csv(
-        csv_file=args.csv_file,
-        error_type='abs',
-        save_path='kde_abs_error_per_joint.png'
-    )
 
 if __name__ == '__main__':
     main() 

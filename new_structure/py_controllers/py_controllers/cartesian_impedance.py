@@ -53,22 +53,22 @@ class CartesianImpedanceController(Node):
             Bool, "/shutdown_control", self.shutdown_callback, 10
         )
         
-        self.declare_parameter('k_pd', [24.0, 24.0, 24.0, 24.0, 10.0, 6.0, 2.0])    # k_gains in PD control (joint space)
-        self.declare_parameter('d_pd', [16.0, 16.0, 16.0, 16.0, 10.0, 6.0, 2.0])    # d_gains in PD control (joint space)
-        self.declare_parameter('i_pid', [1.0, 1.0, 1.0, 1.0, 0.5, 0.5, 0.5])        # i_gains supplement to PD control (joint space)
+        self.declare_parameter('k_pd', [10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 0.0])    # k_gains in PD control (joint space)
+        self.declare_parameter('d_pd', [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0])    # d_gains in PD control (joint space)
+        self.declare_parameter('i_pid', [0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.0])        # i_gains supplement to PD control (joint space)
         self.k_pd = np.array(self.get_parameter('k_pd').value, dtype=float)
         self.d_pd = np.array(self.get_parameter('d_pd').value, dtype=float)
         self.i_pid = np.array(self.get_parameter('i_pid').value, dtype=float)
         self.i_error = np.zeros(7)
 
-        self.declare_parameter('k_gains', [1500.0, 1000.0, 1000.0, 75.0, 75.0, 0.0])   # k_gains in impedance control (task space)
+        self.declare_parameter('k_gains', [1000.0, 1000.0, 1000.0, 75.0, 75.0, 0.0])   # k_gains in impedance control (task space)
         self.k_gains = np.array(self.get_parameter('k_gains').value, dtype=float)
         self.K_gains = np.diag(self.k_gains)
-        self.eta = 1.0                                                              # for calculating d_gains
+        self.eta = 1.2                                                              # for calculating d_gains
 
-        self.declare_parameter('kpn_gains', [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0])    # kpn_gains for nullspace 
+        self.declare_parameter('kpn_gains', [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0])    # kpn_gains for nullspace 
         self.kpn_gains = np.array(self.get_parameter('kpn_gains').value, dtype=float)
-        self.dpn_gains = 2 * np.sqrt(np.array(self.kpn_gains))                      # dpn_gains for nullspace
+        self.dpn_gains = 1 * np.sqrt(np.array(self.kpn_gains))                        # dpn_gains for nullspace
         
         # Joint position control parameters
         self.declare_parameter('q_des', [0.0, -0.7854, 0.0, -2.3562, 0.0, 1.5708, 0.0])     # desired joint positions
@@ -134,8 +134,9 @@ class CartesianImpedanceController(Node):
         self.dq_des_joint = np.zeros(7)
         self.ddq_des_joint = np.zeros(7)
         self.tau_residual = np.zeros(7)
+        self.tau_memory = np.zeros(7)
 
-        self.gp_stride = 5      # 每 10 个 state callback 做一次 GP（你可以调）
+        self.gp_stride = 1      # 每 10 个 state callback 做一次 GP（你可以调）
         self.gp_counter = 0
 
         self.y_hat_filtered = np.zeros(7)
@@ -386,8 +387,20 @@ class CartesianImpedanceController(Node):
                         self.start_trajectory()
                 else:
                     # PD control for joint positions
-                    self.i_error = self.i_error + (self.q_des - q) * dt
-                    tau = self.k_pd * (self.q_des - q) + self.d_pd * (self.dq_des - dq) + self.i_pid * self.i_error
+                    e_q  = (self.q_des - q)
+                    e_dq = (self.dq_des - dq)
+
+                    tau_unsat = self.k_pd * e_q + self.d_pd * e_dq + self.i_pid * self.i_error
+                    tau_sat   = np.clip(tau_unsat, -50.0, 50.0)
+
+                    # anti-windup gain（每关节都可以不同）
+                    k_aw = 15.0  # 典型 1~20 之间调；越大回退越快
+
+                    # back-calculation: 积分更新（注意是用“力矩差”回退）
+                    self.i_error = self.i_error + (e_q + k_aw * (tau_sat - tau_unsat)) * dt
+
+                    # final command
+                    tau = self.k_pd * e_q + self.d_pd * e_dq + self.i_pid * self.i_error
                     tau = np.clip(tau, -50.0, 50.0)
                     
                     # publish effort command
@@ -433,11 +446,8 @@ class CartesianImpedanceController(Node):
             dx_des_5  = self.dx_des[:5]
             ddx_des_5 = self.ddx_des[:5]
 
-            # dq_des (joint) = J^+ * dx_des
             dq_des_joint = jacobian_pinv @ dx_des_5
             self.dq_des_joint = dq_des_joint
-            # ddq_des (joint) = J^+ * (ddx_des - dJ * dq)
-            # 数值防护：dt很小时 dJ 可能抖；已按你代码用差分得到 djacobian
             ddq_des_joint = jacobian_pinv @ (ddx_des_5 - djacobian @ dq)
             self.ddq_des_joint = ddq_des_joint
 
@@ -445,7 +455,6 @@ class CartesianImpedanceController(Node):
             if self.data_recording_enabled:
                 self.dq_des_joint_history.append(dq_des_joint.tolist())
                 self.ddq_des_joint_history.append(ddq_des_joint.tolist())
-            # ddx = zero_jacobian @ ddq + dzero_jacobian @ dq
 
             rotation_matrix = o_t_f[:3, :3]     # 3x3 rotation matrix
             r_error = - 0.5 * (np.cross(rotation_matrix[:, 2], self.rotation_matrix_des[:, 2])
@@ -463,14 +472,16 @@ class CartesianImpedanceController(Node):
             
             pd_term = self.K_gains @ x_error + D_gains @ dx_error
             tau = (
-                mass_matrix @ jacobian_pinv @ self.ddx_des[:5]
+                # mass_matrix @ jacobian_pinv @ self.ddx_des[:5]
                 + (coriolis_matrix - mass_matrix @ jacobian_pinv@ djacobian)
                     @ jacobian_pinv @ dx[:5]
                 - jacobian_t @ pd_term[:5]
             )
 
-            tau_nullspace = ((np.eye(7) - zero_jacobian_pinv @ zero_jacobian) 
-                @ (self.kpn_gains * (self.q_des - q) + self.dpn_gains * (self.dq_des - dq)))
+            # tau_nullspace = ((np.eye(7) - zero_jacobian_pinv @ zero_jacobian) 
+            #     @ (self.dpn_gains * (self.dq_des - dq)))
+            N = np.eye(7) - zero_jacobian_pinv @ zero_jacobian   # or using your 5DoF jacobian
+            tau_nullspace = N.T @ (- self.dpn_gains * dq)        # dq_des = 0 时就是减振
             tau = tau + tau_nullspace
 
             # === 计算残差 ===
@@ -480,9 +491,8 @@ class CartesianImpedanceController(Node):
             self.tau_residual_filtered = (
                 0.02 * tau_residual + 0.98 * self.tau_residual_filtered
             )
-            # self.tau_residual_filtered = self.alpha_beta_filter_tau(tau_residual, dt)
-            # print("tau_residual:", tau_residual)
 
+            # tau = tau - self.y_hat_combined
             tau = tau
 
             # === 异步请求未来轨迹（给 GP 用），比如 100Hz 请求一次 ===
@@ -519,6 +529,7 @@ class CartesianImpedanceController(Node):
                 # ---------------------------------------------------------
                 if tick:
                     # 1) local：当前帧更新一次（真实残差）
+                    self.tau_memory = self.tau_residual_filtered
                     self.y_hat_local, self.var_local = self._gp_predict_and_update(
                         self.q, dq, self.ddq_des_joint,
                         self.tau_residual_filtered,
@@ -527,27 +538,32 @@ class CartesianImpedanceController(Node):
                     )
 
                     # 2) rollout：生成未来 M 步预测，塞进队列（只预测，不更新）
-                    M = 5
-                    dt_step = self.gp_stride * dt   # 每个点对应一个真实控制周期跨度（因为你 tick=每stride一次）
+                    M = self.gp_stride
+                    dt_step = 0.001   # 每个点对应一个真实控制周期跨度（因为你 tick=每stride一次）
                     q_i  = self.q.copy()
                     dq_i = dq.copy()
                     ddq_i = self.ddq_des_joint.copy()
                     tau_recursive = self.tau_residual_filtered
-                    for i in range(M):
+                    y_i, v_i = self._gp_predict_and_update(
+                            q_i, dq_i, ddq_i,
+                            tau_recursive,
+                            self.gp_models_big,
+                            update=True            # ✅ 关键：rollout 不更新
+                        )
+                    for i in range(M-1):
+                         # 推进状态（用 dt_step 而不是 dt）
+                        q_i  = q_i  + dq_i * dt_step + 0.5 * ddq_i * (dt_step**2)
+                        dq_i = dq_i + ddq_i * dt_step
                         y_i, v_i = self._gp_predict_and_update(
                             q_i, dq_i, ddq_i,
                             tau_recursive,
-                            self.gp_models_small,
-                            update=True            # ✅ 关键：rollout 不更新
+                            self.gp_models_big,
+                            update=False            # ✅ 关键：rollout 不更新
                         )
                         tau_recursive = 1 * y_i + 0 * tau_recursive
                         # 塞进 cloud 队列，后续帧逐帧消费
-                        self.cloud_queue.append(y_i.copy())
-                        self.cloud_var_queue.append(v_i.copy())
-
-                        # 推进状态（用 dt_step 而不是 dt）
-                        q_i  = q_i  + dq_i * dt_step + 0.5 * ddq_i * (dt_step**2)
-                        dq_i = dq_i + ddq_i * dt_step
+                    self.cloud_queue.append(y_i.copy())
+                    self.cloud_var_queue.append(v_i.copy())
                 else:
                     # 可选：local 不更新的帧，方差稍微膨胀，表示“信息变旧”
                     self.var_local = np.minimum(self.var_local * 1.02, 1e6)
@@ -811,16 +827,16 @@ class CartesianImpedanceController(Node):
         
         per_joint_cfg = {
             "default": dict(
-                max_data_per_expert=25,
-                nearest_k=2,
-                max_experts=25,
+                max_data_per_expert=50,
+                nearest_k=4,
+                max_experts=50,
                 timescale=0.03,
             ),
             # 举例：如果你想让 6 号关节忘得快一点、专家少一点，可以单独改：
             6: dict(
-                max_data_per_expert=25,
-                nearest_k=2,
-                max_experts=25,
+                max_data_per_expert=50,
+                nearest_k=4,
+                max_experts=50,
                 timescale=0.05,
             ),
         }
