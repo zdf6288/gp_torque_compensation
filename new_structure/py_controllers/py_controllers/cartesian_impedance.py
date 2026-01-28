@@ -61,11 +61,11 @@ class CartesianImpedanceController(Node):
         self.i_pid = np.array(self.get_parameter('i_pid').value, dtype=float)
         self.i_error = np.zeros(7)
 
-        self.declare_parameter('k_gains', [750.0, 750.0, 750.0, 25.0, 25.0, 0.0])   # k_gains in impedance control (task space)
+        self.declare_parameter('k_gains', [1250.0, 750.0, 1250.0, 25.0, 25.0, 0.0])   # k_gains in impedance control (task space)
         self.k_gains = np.array(self.get_parameter('k_gains').value, dtype=float)
         self.K_gains = np.diag(self.k_gains)
 
-        self.declare_parameter('D_gains', [175.0, 125.0, 175.0, 1.0, 1.0, 0.0])   # k_gains in impedance control (task space)
+        self.declare_parameter('D_gains', [150.0, 125.0, 150.0, 1.0, 1.0, 0.0])   # k_gains in impedance control (task space)
         self.d_gains = np.array(self.get_parameter('D_gains').value, dtype=float)
         self.d_gains = np.diag(self.d_gains)
         self.eta = 1                                                              # for calculating d_gains
@@ -629,7 +629,7 @@ class CartesianImpedanceController(Node):
 
                 self.y_hat_combined = w_l * self.y_hat_local + (1.0 - w_l) * self.y_hat_cloud
 
-            tau = tau - self.y_hat_combined
+            tau = tau
             # publish on topic /effort_command
             self.effort_msg.efforts = tau.tolist()
             self.effort_publisher.publish(self.effort_msg)
