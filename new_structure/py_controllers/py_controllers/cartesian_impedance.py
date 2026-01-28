@@ -53,27 +53,39 @@ class CartesianImpedanceController(Node):
             Bool, "/shutdown_control", self.shutdown_callback, 10
         )
         
-        self.declare_parameter('k_pd', [10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 0.0])    # k_gains in PD control (joint space)
-        self.declare_parameter('d_pd', [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0])    # d_gains in PD control (joint space)
+        self.declare_parameter('k_pd', [30.0, 30.0, 30.0, 30.0, 30.0, 30.0, 1.0])    # k_gains in PD control (joint space)
+        self.declare_parameter('d_pd', [10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 1.0])    # d_gains in PD control (joint space)
         self.declare_parameter('i_pid', [0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.0])        # i_gains supplement to PD control (joint space)
         self.k_pd = np.array(self.get_parameter('k_pd').value, dtype=float)
         self.d_pd = np.array(self.get_parameter('d_pd').value, dtype=float)
         self.i_pid = np.array(self.get_parameter('i_pid').value, dtype=float)
         self.i_error = np.zeros(7)
 
-        self.declare_parameter('k_gains', [1000.0, 1000.0, 1000.0, 75.0, 75.0, 0.0])   # k_gains in impedance control (task space)
+        self.declare_parameter('k_gains', [750.0, 750.0, 750.0, 25.0, 25.0, 0.0])   # k_gains in impedance control (task space)
         self.k_gains = np.array(self.get_parameter('k_gains').value, dtype=float)
         self.K_gains = np.diag(self.k_gains)
-        self.eta = 1.2                                                              # for calculating d_gains
 
-        self.declare_parameter('kpn_gains', [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0])    # kpn_gains for nullspace 
+        self.declare_parameter('D_gains', [175.0, 125.0, 175.0, 1.0, 1.0, 0.0])   # k_gains in impedance control (task space)
+        self.d_gains = np.array(self.get_parameter('D_gains').value, dtype=float)
+        self.d_gains = np.diag(self.d_gains)
+        self.eta = 1                                                              # for calculating d_gains
+
+        self.declare_parameter('kpn_gains', [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0])    # kpn_gains for nullspace 
         self.kpn_gains = np.array(self.get_parameter('kpn_gains').value, dtype=float)
         self.dpn_gains = 1 * np.sqrt(np.array(self.kpn_gains))                        # dpn_gains for nullspace
         
+        # --- task-space integral ---
+        self.declare_parameter('ki_task', [200.0, 0.0, 2000.0, 0.0, 0.0, 0.0])  # 先只给 z 积分
+        self.ki_task = np.array(self.get_parameter('ki_task').value, dtype=float)
+        self.Ki_task = np.diag(self.ki_task)
+
+        self.e_int = np.zeros(6)          # 对应 x_error/dx_error 的6维
+        self.e_int_limit = np.array([1.0, 1.0, 1.0, 1.0, 1.0, 1.0])  # 防止windup，可调
+
         # Joint position control parameters
         self.declare_parameter('q_des', [0.0, -0.7854, 0.0, -2.3562, 0.0, 1.5708, 0.0])     # desired joint positions
         self.declare_parameter('dq_des', [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])               # desired joint velocities
-        self.declare_parameter('joint_position_threshold', 0.2)                             # threshold for joint position convergence
+        self.declare_parameter('joint_position_threshold', 0.4)                             # threshold for joint position convergence
         self.q_des = np.array(self.get_parameter('q_des').value, dtype=float)
         self.dq_des = np.array(self.get_parameter('dq_des').value, dtype=float)
         self.joint_position_threshold = self.get_parameter('joint_position_threshold').value
@@ -85,6 +97,12 @@ class CartesianImpedanceController(Node):
         self.dq = None
         self.zero_jacobian_buffer = None    # buffer for zero jacobian matrix in flange frame
         self.jacobian_buffer = None         # buffer for jacobian matrix in flange frame
+        self.declare_parameter("dls_lambda", 0.1)     # 阻尼系数 λ，0.01~0.2 常用
+        self.declare_parameter("dls_lambda_ns", 0.1)  # nullspace 用的 λ（可与上面一样）
+        self.dls_lambda = float(self.get_parameter("dls_lambda").value)
+        self.dls_lambda_ns = float(self.get_parameter("dls_lambda_ns").value)
+
+        self.djacobian = None
 
         self.task_command_received = False  # flag for task space command received
         self.x_des = None                   # desired position from task space command
@@ -264,6 +282,18 @@ class CartesianImpedanceController(Node):
         self._future_traj_counter = 0
         self._future_traj_warned = False
 
+    def dls_dyn_pinv(self, J, M, lam):
+        """
+        Dynamically consistent DLS pseudoinverse:
+        J# = M^{-1} J^T (J M^{-1} J^T + lam^2 I)^{-1}
+        J: m×n, M: n×n
+        """
+        m = J.shape[0]
+        Minv = np.linalg.inv(M)
+
+        A = J @ Minv @ J.T + (lam**2) * np.eye(m)   # m×m
+        return Minv @ J.T @ np.linalg.solve(A, np.eye(m))  # n×m
+
     def taskCommandCallback(self, msg):
         """callback function for /task_space_command subscriber"""
         self.task_command_received = True
@@ -344,7 +374,7 @@ class CartesianImpedanceController(Node):
             # ------------------------------------------
             rclpy.shutdown()
             os._exit(0)
-
+    
 
     def stateParameterCallback(self, msg):
         """callback function for /state_parameter subscriber"""
@@ -426,16 +456,24 @@ class CartesianImpedanceController(Node):
             coriolis_matrix = np.diag(coriolis_matrix_array)                # 7x7
             zero_jacobian = zero_jacobian_array.reshape(6, 7, order='F')    # 6x7
             zero_jacobian_t = zero_jacobian.T                               # 7x6, transpose of zero_jacobian
-            zero_jacobian_pinv = np.linalg.pinv(zero_jacobian)              # 7x6, pseudoinverse obtained by SVD
+            # zero_jacobian_pinv = np.linalg.pinv(zero_jacobian)              # 7x6, pseudoinverse obtained by SVD
+            lam = self.dls_lambda
+            lam_ns = self.dls_lambda_ns
+            # 6×7
+            zero_jacobian_pinv = self.dls_dyn_pinv(zero_jacobian, mass_matrix, lam_ns)   # 7×6       
 
             # to control the z axis perpendicular to ground, use 4*7 jacobian matrix
-            jacobian = zero_jacobian[:5, :]                                 # 5x7
-            jacobian_t = jacobian.T                                         # 7x5
-            jacobian_pinv = np.linalg.pinv(jacobian)                        # 5x7, pseudoinverse obtained by SVD
+            # to control the z axis perpendicular to ground, use 5x7 Jacobian (3 pos + 2 rot constraints)
+            jacobian = zero_jacobian[:5, :]        # 5x7
+            jacobian_t = jacobian.T                # 7x5
+
+            # DLS pseudoinverse: 7x5
+            jacobian_pinv = self.dls_dyn_pinv(jacobian, mass_matrix, lam)   # 7x5
             if self.jacobian_buffer is None:
                 djacobian = np.zeros_like(jacobian)
             else:
                 djacobian = (jacobian - self.jacobian_buffer) / dt
+                
             self.jacobian_buffer = jacobian.copy()
             # get x and dx
             x = o_t_f[:3, 3]            # 3x1 position, only x-y-z
@@ -467,12 +505,23 @@ class CartesianImpedanceController(Node):
             # get K_gains and D_gains
             lambda_matrix = np.linalg.inv(zero_jacobian @ np.linalg.inv(mass_matrix) @ zero_jacobian.T)
             eigvals, _ = np.linalg.eig(lambda_matrix)
-            d_gains = 2 * self.eta * np.sqrt(eigvals @ self.K_gains)
-            D_gains = np.diag(d_gains)
-            
-            pd_term = self.K_gains @ x_error + D_gains @ dx_error
+            # d_gains = 2 * self.eta * np.sqrt(eigvals @ self.K_gains)
+            # D_gains = np.diag(d_gains)
+            D_gains = self.d_gains
+            # D_gains = 2*self.eta*np.diag(np.sqrt(self.k_gains))
+
+            # --- integrate task-space error (use dt) ---
+            self.e_int += x_error * dt
+
+            # clamp (anti-windup simplest)
+            self.e_int = np.clip(self.e_int, -self.e_int_limit, self.e_int_limit)
+            i_term = self.Ki_task @ self.e_int
+
+            pd_term = self.K_gains @ x_error + D_gains @ dx_error 
+            # + i_term
+
             tau = (
-                # mass_matrix @ jacobian_pinv @ self.ddx_des[:5]
+                mass_matrix @ jacobian_pinv @ self.ddx_des[:5]
                 + (coriolis_matrix - mass_matrix @ jacobian_pinv@ djacobian)
                     @ jacobian_pinv @ dx[:5]
                 - jacobian_t @ pd_term[:5]
@@ -492,8 +541,7 @@ class CartesianImpedanceController(Node):
                 0.02 * tau_residual + 0.98 * self.tau_residual_filtered
             )
 
-            # tau = tau - self.y_hat_combined
-            tau = tau
+            # tau = tau
 
             # === 异步请求未来轨迹（给 GP 用），比如 100Hz 请求一次 ===
             if self.future_traj_client.service_is_ready():
@@ -581,6 +629,7 @@ class CartesianImpedanceController(Node):
 
                 self.y_hat_combined = w_l * self.y_hat_local + (1.0 - w_l) * self.y_hat_cloud
 
+            tau = tau - self.y_hat_combined
             # publish on topic /effort_command
             self.effort_msg.efforts = tau.tolist()
             self.effort_publisher.publish(self.effort_msg)
