@@ -53,15 +53,15 @@ class CartesianImpedanceController(Node):
             Bool, "/shutdown_control", self.shutdown_callback, 10
         )
         
-        self.declare_parameter('k_pd', [24.0, 24.0, 24.0, 24.0, 10.0, 6.0, 2.0])    # k_gains in PD control (joint space)
-        self.declare_parameter('d_pd', [16.0, 16.0, 16.0, 16.0, 10.0, 6.0, 2.0])    # d_gains in PD control (joint space)
+        self.declare_parameter('k_pd', [24.0, 24.0, 24.0, 24.0, 10.0, 6.0, 4.0])    # k_gains in PD control (joint space)
+        self.declare_parameter('d_pd', [16.0, 16.0, 16.0, 16.0, 10.0, 6.0, 1.0])    # d_gains in PD control (joint space)
         self.declare_parameter('i_pid', [1.0, 1.0, 1.0, 1.0, 0.5, 0.5, 0.5])        # i_gains supplement to PD control (joint space)
         self.k_pd = np.array(self.get_parameter('k_pd').value, dtype=float)
         self.d_pd = np.array(self.get_parameter('d_pd').value, dtype=float)
         self.i_pid = np.array(self.get_parameter('i_pid').value, dtype=float)
         self.i_error = np.zeros(7)
 
-        self.declare_parameter('k_gains', [1500.0, 1000.0, 1000.0, 75.0, 75.0, 0.0])   # k_gains in impedance control (task space)
+        self.declare_parameter('k_gains', [1750.0, 1250.0, 1250.0, 75.0, 75.0, 0.0])   # k_gains in impedance control (task space)
         self.k_gains = np.array(self.get_parameter('k_gains').value, dtype=float)
         self.K_gains = np.diag(self.k_gains)
         self.eta = 1.0                                                              # for calculating d_gains
@@ -89,6 +89,12 @@ class CartesianImpedanceController(Node):
         self.x_des = None                   # desired position from task space command
         self.dx_des = None                  # desired velocity from task space command
         self.ddx_des = None                 # desired acceleration from task space command
+
+        self.x_i_error = np.zeros(6, dtype=float)
+        self.i_gains = np.array([600.0, 300.0, 400.0, 0.0, 0.0, 0.0], dtype=float)
+        self.prev_x_error = np.zeros(6, dtype=float)
+        self.prev_dx_error = np.zeros(6, dtype=float)
+
         self.rotation_matrix_des = np.array(
             [[1, 0, 0], [0, -1, 0], [0, 0, -1]], dtype=float)   # desired rotation matrix, z axis perpendicular to ground
         # joint position control state
@@ -392,6 +398,7 @@ class CartesianImpedanceController(Node):
                     # PD control for joint positions
                     self.i_error = self.i_error + (self.q_des - q) * dt
                     tau = self.k_pd * (self.q_des - q) + self.d_pd * (self.dq_des - dq) + self.i_pid * self.i_error
+                    # tau = self.k_pd * (self.q_des - q) + self.d_pd * (self.dq_des - dq)
                     tau = np.clip(tau, -50.0, 50.0)
                     
                     # publish effort command
@@ -465,7 +472,27 @@ class CartesianImpedanceController(Node):
             d_gains = 2 * self.eta * np.sqrt(eigvals @ self.K_gains)
             D_gains = np.diag(d_gains)
             
-            pd_term = self.K_gains @ x_error + D_gains @ dx_error
+            # 只对 Z 轴积分
+            # 分别对 x / y / z 三个方向积分
+
+            self.x_i_error[0] += x_error[0] * dt
+            self.x_i_error[0] = np.clip(self.x_i_error[0], -0.02, 0.02)
+
+            self.x_i_error[1] += x_error[1] * dt
+            self.x_i_error[1] = np.clip(self.x_i_error[1], -0.15, 0.15)
+
+            self.x_i_error[2] += x_error[2] * dt
+            self.x_i_error[2] = np.clip(self.x_i_error[2], -0.15, 0.15)
+
+            # 三个方向各自的积分项
+            i_term = np.zeros(6)
+            i_term[0] = self.i_gains[0] * self.x_i_error[0]   # X
+            i_term[1] = self.i_gains[1] * self.x_i_error[1]   # Y
+            i_term[2] = self.i_gains[2] * self.x_i_error[2]   # Z
+
+            pd_term = self.K_gains @ x_error + D_gains @ dx_error + i_term
+            
+            # pd_term = self.K_gains @ x_error + D_gains @ dx_error
             tau = (
                 mass_matrix @ jacobian_pinv @ self.ddx_des[:5]
                 + (coriolis_matrix - mass_matrix @ jacobian_pinv@ djacobian)
