@@ -61,11 +61,11 @@ class CartesianImpedanceController(Node):
         self.i_pid = np.array(self.get_parameter('i_pid').value, dtype=float)
         self.i_error = np.zeros(7)
 
-        self.declare_parameter('k_gains', [1250.0, 750.0, 1250.0, 25.0, 25.0, 0.0])   # k_gains in impedance control (task space)
+        self.declare_parameter('k_gains', [1500.0, 1250.0, 1000.0, 25.0, 25.0, 0.0])   # k_gains in impedance control (task space)
         self.k_gains = np.array(self.get_parameter('k_gains').value, dtype=float)
         self.K_gains = np.diag(self.k_gains)
 
-        self.declare_parameter('D_gains', [150.0, 125.0, 150.0, 1.0, 1.0, 0.0])   # k_gains in impedance control (task space)
+        self.declare_parameter('D_gains', [150.0, 125.0, 150.0, 1.0, 1.0, 0.0])   # d_gains in impedance control (task space)
         self.d_gains = np.array(self.get_parameter('D_gains').value, dtype=float)
         self.d_gains = np.diag(self.d_gains)
         self.eta = 1                                                              # for calculating d_gains
@@ -73,6 +73,11 @@ class CartesianImpedanceController(Node):
         self.declare_parameter('kpn_gains', [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0])    # kpn_gains for nullspace 
         self.kpn_gains = np.array(self.get_parameter('kpn_gains').value, dtype=float)
         self.dpn_gains = 1 * np.sqrt(np.array(self.kpn_gains))                        # dpn_gains for nullspace
+
+        self.x_i_error = np.zeros(6, dtype=float)
+        self.i_gains = np.array([400.0, 400.0, 600.0, 0.0, 0.0, 0.0], dtype=float)
+        self.prev_x_error = np.zeros(6, dtype=float)
+        self.prev_dx_error = np.zeros(6, dtype=float)
         
         # --- task-space integral ---
         self.declare_parameter('ki_task', [200.0, 0.0, 2000.0, 0.0, 0.0, 0.0])  # 先只给 z 积分
@@ -95,6 +100,15 @@ class CartesianImpedanceController(Node):
         self.t_last = None                  # last time
         self.dq_buffer = None               # buffer for joint velocity dq
         self.dq = None
+
+        self.dq_raw = np.zeros(7)
+        self.dq_filt = np.zeros(7)
+        self.dq_filt_initialized = False
+
+        # dq 一阶低通截止频率，先保守一点
+        self.declare_parameter("dq_lpf_hz", 30.0)
+        self.dq_lpf_hz = float(self.get_parameter("dq_lpf_hz").value)
+
         self.zero_jacobian_buffer = None    # buffer for zero jacobian matrix in flange frame
         self.jacobian_buffer = None         # buffer for jacobian matrix in flange frame
         self.declare_parameter("dls_lambda", 0.1)     # 阻尼系数 λ，0.01~0.2 常用
@@ -177,6 +191,21 @@ class CartesianImpedanceController(Node):
         self.y_hat_local = np.zeros(7)
         self.y_hat_local_history = []
         self.offline_limit = 0
+
+        # ===== local GP history memory =====
+        self.gp_hist_len = 500              # 固定长度，可调
+        self.gp_hist_topk = 2                # 最近邻个数
+        self.gp_hist_alpha_max = 0.35        # 历史项最多占比
+        self.gp_hist_min_points = 20         # 少于这个数量不启用历史项
+
+        # 每个元素：
+        # {
+        #   "x": np.ndarray(shape=(d,)),
+        #   "y": np.ndarray(shape=(7,)),
+        #   "var": np.ndarray(shape=(7,))
+        # }
+        self.local_gp_history = deque(maxlen=self.gp_hist_len)
+
 
         # 本地加载离线训练模型
         self._load_gp_models("./new_structure/gp/gp_models")
@@ -382,23 +411,48 @@ class CartesianImpedanceController(Node):
             # initialize t_initial, get t_elapsed, t_last and dt
             # initialize q_initial, get q, dq and ddq
             t_now = self.get_clock().now()
-            q = np.array(msg.position)
+            q = np.array(msg.position, dtype=float)
             self.q = q
-            dq = np.array(msg.velocity)
-            self.dq = dq
+
+            dq_raw = np.array(msg.velocity, dtype=float)
+            self.dq_raw = dq_raw
             if self.t_initial is None:
                 self.t_initial = t_now
                 self.t_last = t_now
                 t_elapsed = 0.0
-                dt = 1e-1
+                dt = 1e-3   # 比原来的 1e-1 更合理，避免初值太怪
+
+                self.dq_filt = dq_raw.copy()
+                self.dq_filt_initialized = True
+
+                # dq = self.dq_filt.copy()
+                # self.dq = dq
+                dq = dq_raw
+                self.dq = dq
+
                 ddq = np.zeros_like(dq)
                 self.dq_buffer = dq.copy()
             else:
                 t_elapsed = (t_now - self.t_initial).nanoseconds / 1e9
                 dt = (t_now - self.t_last).nanoseconds / 1e9
                 self.t_last = t_now
+
+                # 防止极小 dt
+                dt = max(dt, 1e-6)
+
+                if not self.dq_filt_initialized:
+                    self.dq_filt = dq_raw.copy()
+                    self.dq_filt_initialized = True
+                else:
+                    self.dq_filt = self._lowpass_vector(
+                        dq_raw, self.dq_filt, dt, self.dq_lpf_hz
+                    )
+
+                dq = self.dq_filt.copy()
+                self.dq = dq
+
                 ddq = (dq - self.dq_buffer) / dt
-                self.dq_buffer = dq.copy()                         
+                self.dq_buffer = dq.copy()                    
 
             # joint position control (for joint position adjustment before trajectory_publisher starts to work)
             if self.joint_position_control_active and not self.joint_position_adjusted:
@@ -505,20 +559,28 @@ class CartesianImpedanceController(Node):
             # get K_gains and D_gains
             lambda_matrix = np.linalg.inv(zero_jacobian @ np.linalg.inv(mass_matrix) @ zero_jacobian.T)
             eigvals, _ = np.linalg.eig(lambda_matrix)
-            # d_gains = 2 * self.eta * np.sqrt(eigvals @ self.K_gains)
-            # D_gains = np.diag(d_gains)
-            D_gains = self.d_gains
-            # D_gains = 2*self.eta*np.diag(np.sqrt(self.k_gains))
+            d_gains = 2 * self.eta * np.sqrt(eigvals @ self.K_gains)
+            D_gains = np.diag(d_gains)
+            
+            # 只对 Z 轴积分
+            # 分别对 x / y / z 三个方向积分
 
-            # --- integrate task-space error (use dt) ---
-            self.e_int += x_error * dt
+            self.x_i_error[0] += x_error[0] * dt
+            self.x_i_error[0] = np.clip(self.x_i_error[0], -0.02, 0.02)
 
-            # clamp (anti-windup simplest)
-            self.e_int = np.clip(self.e_int, -self.e_int_limit, self.e_int_limit)
-            i_term = self.Ki_task @ self.e_int
+            self.x_i_error[1] += x_error[1] * dt
+            self.x_i_error[1] = np.clip(self.x_i_error[1], -0.15, 0.15)
 
-            pd_term = self.K_gains @ x_error + D_gains @ dx_error 
-            # + i_term
+            self.x_i_error[2] += x_error[2] * dt
+            self.x_i_error[2] = np.clip(self.x_i_error[2], -0.15, 0.15)
+
+            # 三个方向各自的积分项
+            i_term = np.zeros(6)
+            i_term[0] = self.i_gains[0] * self.x_i_error[0]   # X
+            i_term[1] = self.i_gains[1] * self.x_i_error[1]   # Y
+            i_term[2] = self.i_gains[2] * self.x_i_error[2]   # Z
+
+            pd_term = self.K_gains @ x_error + D_gains @ dx_error + i_term
 
             tau = (
                 mass_matrix @ jacobian_pinv @ self.ddx_des[:5]
@@ -576,44 +638,57 @@ class CartesianImpedanceController(Node):
                 # B) local：只有 tick 更新，否则 hold
                 # ---------------------------------------------------------
                 if tick:
-                    # 1) local：当前帧更新一次（真实残差）
                     self.tau_memory = self.tau_residual_filtered
-                    self.y_hat_local, self.var_local = self._gp_predict_and_update(
+
+                    x_query = self._build_gp_feature(self.q, dq, self.ddq_des_joint)
+
+                    # 1) 当前 local GP
+                    y_hat_local_now, var_local_now = self._gp_predict_and_update(
                         self.q, dq, self.ddq_des_joint,
                         self.tau_residual_filtered,
                         self.gp_models_small,
                         update=True
                     )
 
-                    # 2) rollout：生成未来 M 步预测，塞进队列（只预测，不更新）
+                    # 2) 历史最近邻记忆项
+                    y_hat_hist, var_hist, alpha_hist = self._query_local_gp_history(x_query)
+                    self.y_hat_mem = y_hat_hist
+
+                    # 3) 融合
+                    self.y_hat_local = (1.0 - alpha_hist) * y_hat_local_now + alpha_hist * y_hat_hist
+                    self.var_local   = (1.0 - alpha_hist) * var_local_now   + alpha_hist * var_hist
+
+                    # 4) 当前结果写入历史池
+                    self._append_local_gp_history(x_query, y_hat_local_now, var_local_now)
+
+                    # 5) rollout 保持你原来的逻辑
                     M = self.gp_stride
-                    dt_step = 0.001   # 每个点对应一个真实控制周期跨度（因为你 tick=每stride一次）
+                    dt_step = 0.001
                     q_i  = self.q.copy()
                     dq_i = dq.copy()
                     ddq_i = self.ddq_des_joint.copy()
                     tau_recursive = self.tau_residual_filtered
+
                     y_i, v_i = self._gp_predict_and_update(
-                            q_i, dq_i, ddq_i,
-                            tau_recursive,
-                            self.gp_models_big,
-                            update=True            # ✅ 关键：rollout 不更新
-                        )
-                    for i in range(M-1):
-                         # 推进状态（用 dt_step 而不是 dt）
+                        q_i, dq_i, ddq_i,
+                        tau_recursive,
+                        self.gp_models_big,
+                        update=True
+                    )
+                    for i in range(M - 1):
                         q_i  = q_i  + dq_i * dt_step + 0.5 * ddq_i * (dt_step**2)
                         dq_i = dq_i + ddq_i * dt_step
                         y_i, v_i = self._gp_predict_and_update(
                             q_i, dq_i, ddq_i,
                             tau_recursive,
                             self.gp_models_big,
-                            update=False            # ✅ 关键：rollout 不更新
+                            update=False
                         )
-                        tau_recursive = 1 * y_i + 0 * tau_recursive
-                        # 塞进 cloud 队列，后续帧逐帧消费
+                        tau_recursive = 1.0 * y_i + 0.0 * tau_recursive
+
                     self.cloud_queue.append(y_i.copy())
                     self.cloud_var_queue.append(v_i.copy())
                 else:
-                    # 可选：local 不更新的帧，方差稍微膨胀，表示“信息变旧”
                     self.var_local = np.minimum(self.var_local * 1.02, 1e6)
                 
                 # ---------------------------------------------------------
@@ -655,26 +730,6 @@ class CartesianImpedanceController(Node):
 
         except Exception as e:
             self.get_logger().error(f'Parameter error: {str(e)}')
-    
-    def alpha_beta_filter_tau(self, tau_meas, dt):
-        """
-        tau_meas : (7,) 原始计算得到的 tau
-        dt       : 控制周期
-        """
-
-        # ---------- prediction ----------
-        tau_pred  = self.tau_ab + self.dtau_ab * dt
-        dtau_pred = self.dtau_ab
-
-        # ---------- innovation ----------
-        err = tau_meas - tau_pred
-
-        # ---------- update ----------
-        self.tau_ab  = tau_pred  + self.tau_alpha * err
-        self.dtau_ab = dtau_pred + (self.tau_beta / max(dt, 1e-6)) * err
-
-        return self.tau_ab.copy()
-
 
     def predict_future_joint_state(q, dq, ddq_des, delay):
         dq_future = dq + ddq_des * delay
@@ -694,43 +749,110 @@ class CartesianImpedanceController(Node):
             samples.append((dx_f_i, ddx_f_i))
         return samples
 
-    def _gp_response_callback(self, future):
-        try:
-            resp = future.result()
-            if resp is None:
-                return
+    def _build_gp_feature(self, q, dq_des_joint, ddq_des_joint=None):
+        """
+        和 local GP 使用同一套输入特征。
+        当前版本使用 14 维: [q, dq_des_joint]
+        如果你以后训练改成 21 维，再切到 [q, dq_des_joint, ddq_des_joint]
+        """
+        x_full = np.concatenate([q, dq_des_joint]).astype(np.float32)
+        return x_full
+    
+    def _query_local_gp_history(self, x_query):
+        """
+        在固定长度历史池中找最近邻，用历史记录的预测值做加权平均。
+        返回:
+            y_hist: (7,)
+            var_hist: (7,)
+            alpha_hist: float  历史项建议融合权重
+        """
+        if len(self.local_gp_history) < self.gp_hist_min_points:
+            return np.zeros(7, dtype=float), np.ones(7, dtype=float) * 1e6, 0.0
 
-            q_used = np.array(resp.q_used, dtype=float) if len(resp.q_used) else np.zeros(7)
-            dq_used = np.array(resp.dq_used, dtype=float) if len(resp.dq_used) else np.zeros(7)
-            ddq_used = np.array(resp.ddq_used, dtype=float) if len(resp.ddq_used) else np.zeros(7)
+        # 取一个统一的标准化尺度，这里用 joint1 的 stats
+        ref_pack = self.gp_models_small.get(1, None)
+        if ref_pack is None:
+            return np.zeros(7, dtype=float), np.ones(7, dtype=float) * 1e6, 0.0
 
-            # 解析出 rollout 每步预测
-            M = int(resp.rollout_steps_used)
-            if M > 0 and len(resp.y_rollout_mu_flat) == M*7:
-                mu_steps  = np.array(resp.y_rollout_mu_flat, dtype=float).reshape(M, 7)
-                var_steps = np.array(resp.y_rollout_var_flat, dtype=float).reshape(M, 7)
+        Xm, Xs, Ym, Ys = ref_pack["stats"]
+        x_dim = ref_pack["x_dim"]
 
-                # # 防止积压：队列太长就丢旧的，保证新预测优先
-                # while len(self.cloud_queue) > 0:
-                #     self.cloud_queue.popleft()
-                #     self.cloud_var_queue.popleft()
+        Xm = np.asarray(Xm[:x_dim], dtype=np.float32)
+        Xs = np.asarray(Xs[:x_dim], dtype=np.float32)
+        Xs = np.where(np.abs(Xs) < 1e-8, 1.0, Xs)
 
-                # for i in range(M):
-                #     self.cloud_queue.append(mu_steps[i].copy())
-                #     self.cloud_var_queue.append(var_steps[i].copy())
+        xq = ((x_query[:x_dim] - Xm) / Xs).astype(np.float32)
 
+        dists = []
+        ys = []
+        vars_ = []
 
-            with self._cloud_lock:
-                self.q_cloud_used = q_used
-                self.dq_cloud_used = dq_used
-                self.ddq_cloud_used = ddq_used
-                self.cloud_seq_latest = int(resp.seq) if hasattr(resp, "seq") else self.cloud_seq_latest
-                self.cloud_state_valid = True
+        for item in self.local_gp_history:
+            xh = item["x"][:x_dim]
+            yh = item["y"]
+            vh = item["var"]
 
-        except Exception as e:
-            self.get_logger().warn(f"[Controller] GP response error: {e}")
+            dist = np.linalg.norm(xq - xh)
+            dists.append(dist)
+            ys.append(yh)
+            vars_.append(vh)
 
+        dists = np.asarray(dists, dtype=float)
+        ys = np.asarray(ys, dtype=float)         # (N, 7)
+        vars_ = np.asarray(vars_, dtype=float)   # (N, 7)
 
+        k = min(self.gp_hist_topk, len(dists))
+        idx = np.argpartition(dists, k - 1)[:k]
+
+        d_k = dists[idx]
+        y_k = ys[idx]
+        v_k = vars_[idx]
+
+        # ===== 用方差 PoE / precision weighting 替代距离加权 =====
+        eps = 1e-8
+
+        # precision: (k, 7)
+        prec_k = 1.0 / np.maximum(v_k, eps)
+
+        # 归一化后的每关节权重: (k, 7)
+        w = prec_k / (np.sum(prec_k, axis=0, keepdims=True) + eps)
+
+        # 历史融合预测：每个关节单独按 precision 加权
+        y_hist = np.sum(y_k * w, axis=0)   # (7,)
+
+        # PoE 合成后的历史方差：1 / sum(precision)
+        var_hist = 1.0 / np.maximum(np.sum(prec_k, axis=0), eps)   # (7,)
+
+        # 用历史融合后的整体置信度决定 alpha
+        # 方差越小，alpha 越大
+        conf_hist = 1.0 / (np.mean(var_hist) + eps)
+        alpha_hist = self.gp_hist_alpha_max * (conf_hist / (conf_hist + 1.0))
+        alpha_hist = float(np.clip(alpha_hist, 0.0, self.gp_hist_alpha_max))
+
+        return y_hist, var_hist, alpha_hist
+    
+    def _append_local_gp_history(self, x_raw, y_hat, y_var):
+        """
+        把当前 local GP 查询点和预测结果塞进固定长度历史池
+        """
+        ref_pack = self.gp_models_small.get(1, None)
+        if ref_pack is None:
+            return
+
+        Xm, Xs, Ym, Ys = ref_pack["stats"]
+        x_dim = ref_pack["x_dim"]
+
+        Xm = np.asarray(Xm[:x_dim], dtype=np.float32)
+        Xs = np.asarray(Xs[:x_dim], dtype=np.float32)
+        Xs = np.where(np.abs(Xs) < 1e-8, 1.0, Xs)
+
+        x_std = ((x_raw[:x_dim] - Xm) / Xs).astype(np.float32)
+
+        self.local_gp_history.append({
+            "x": x_std.copy(),
+            "y": np.asarray(y_hat, dtype=float).copy(),
+            "var": np.asarray(y_var, dtype=float).copy(),
+        })
 
     def start_trajectory(self):
         """start trajectory by calling the joint position adjust service"""
@@ -876,16 +998,16 @@ class CartesianImpedanceController(Node):
         
         per_joint_cfg = {
             "default": dict(
-                max_data_per_expert=50,
+                max_data_per_expert=25,
                 nearest_k=4,
-                max_experts=50,
+                max_experts=25,
                 timescale=0.03,
             ),
             # 举例：如果你想让 6 号关节忘得快一点、专家少一点，可以单独改：
             6: dict(
-                max_data_per_expert=50,
+                max_data_per_expert=25,
                 nearest_k=4,
-                max_experts=50,
+                max_experts=25,
                 timescale=0.05,
             ),
         }
@@ -951,6 +1073,21 @@ class CartesianImpedanceController(Node):
 
         self.gp_ready = (loaded > 0)
         self.get_logger().info(f"[GP] 共加载 {loaded} 个模型，ready={self.gp_ready}")
+
+    def _lowpass_vector(self, x_raw, x_prev, dt, cutoff_hz):
+        """
+        一阶低通:
+            y_k = alpha * x_k + (1-alpha) * y_{k-1}
+        alpha = dt / (tau + dt), tau = 1 / (2*pi*f_c)
+        """
+        if cutoff_hz <= 0.0:
+            return x_raw.copy()
+
+        tau = 1.0 / (2.0 * np.pi * cutoff_hz)
+        alpha = dt / (tau + dt)
+        alpha = np.clip(alpha, 0.0, 1.0)
+
+        return alpha * x_raw + (1.0 - alpha) * x_prev
 
     def _gp_predict_and_update(self, q, dq_des_joint, ddq_des_joint, tau_residual, models, update = True):
         """

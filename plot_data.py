@@ -316,7 +316,7 @@ def plot_data_from_csv(csv_filename):
         YH_local = df[yhat_local_cols].values if len(yhat_local_cols) == 7 else None
         YH_cloud = df[yhat_cloud_cols].values if len(yhat_cloud_cols) == 7 else None
         YH_comb  = df[yhat_comb_cols].values  if len(yhat_comb_cols)  == 7 else None
-
+        YH_mem = df[yhat_mem_cols].values  if len(yhat_mem_cols)  == 7 else None
         # ================== Figure ==================
         fig, axes = plt.subplots(2, 3, figsize=(18, 10))
 
@@ -356,6 +356,14 @@ def plot_data_from_csv(csv_filename):
                 ax.plot(
                     time_history, tau_hat_cloud,
                     color='tab:orange', linestyle='-.',
+                    linewidth=1.6
+                )
+            
+            if YH_mem is not None:
+                tau_hat_mem = YH_mem[:, j]
+                ax.plot(
+                    time_history, tau_hat_mem,
+                    color='tab:green', linestyle='-.',
                     linewidth=1.6
                 )
 
