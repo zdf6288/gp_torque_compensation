@@ -166,7 +166,7 @@ class CartesianImpedanceController(Node):
         self.offline_limit = 0
 
         # ===== Local history pool (memory / replay buffer) =====
-        self.hist_maxlen = int(self.declare_parameter("hist_maxlen", 1000).value)   # 2s@1kHz
+        self.hist_maxlen = int(self.declare_parameter("hist_maxlen", 3000).value)   # 2s@1kHz
         self.hist_k = int(self.declare_parameter("hist_k", 20).value)              # top-K neighbors
         self.hist_sigma = float(self.declare_parameter("hist_sigma", 1.0).value)   # 距离权重尺度(需调)
         self.hist_min_neighbors = int(self.declare_parameter("hist_min_neighbors", 5).value)
@@ -537,11 +537,11 @@ class CartesianImpedanceController(Node):
 
                 elif mode == "fusion":
                     # 当前输入特征（用于查历史）
-                    # x_query = self.build_feature(self.q, self.dq_des_joint, self.ddq_des_joint)
-                    # mu_hist, var_hist = self.query_history_pool(x_query)
+                    x_query = self.build_feature(self.q, self.dq_des_joint, self.ddq_des_joint)
+                    mu_hist, var_hist = self.query_history_pool(x_query)
 
-                    # self.y_hat_hist = mu_hist
-                    # self.var_hat_hist = var_hist
+                    self.y_hat_hist = mu_hist
+                    self.var_hat_hist = var_hist
 
                     # 先 local vs cloud 融合
                     mu_lc, var_lc = self.fuse_by_variance(
@@ -565,9 +565,8 @@ class CartesianImpedanceController(Node):
                     self.y_hat_combined = 0.5 * self.y_hat_local + 0.5 * y_cloud_delayed
 
                 # 3️⃣ 真正用于控制
-                # tau = tau - self.y_hat_combined
+                tau = tau - self.y_hat_combined
                 
-
 
             # --- 记录（含最终补偿用的 y_hat_combined）---
             if self.data_recording_enabled:
@@ -782,8 +781,6 @@ class CartesianImpedanceController(Node):
         var = 1.0 / p_sum
         return mu, var
 
-
-
     def start_trajectory(self):
         """start trajectory by calling the joint position adjust service"""
         try:
@@ -989,8 +986,6 @@ class CartesianImpedanceController(Node):
         var_hist = np.maximum(var_hist, 1e-6)
 
         return mu_hist, var_hist
-
-
 
 
     def _ensure_skygp_import(self):

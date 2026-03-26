@@ -321,12 +321,12 @@ def plot_data_from_csv(csv_filename):
             #     ax.plot(time_history, yh_c, '--', linewidth=1.5, label='y_hat_combined')
 
             # 画 cloud
-            if YH_cloud is not None:
-                yh_cl = YH_cloud[:, j]
-                yh_l  = YH_local[:, j]
+            # if YH_cloud is not None:
+            #     yh_cl = YH_cloud[:, j]
+            #     yh_l  = YH_local[:, j]
 
-                #原有的
-                ax.plot(time_history, yh_cl, ':', linewidth=1.2, alpha=0.8, label='cloud')
+            #     #原有的
+            #     ax.plot(time_history, yh_cl, ':', linewidth=1.2, alpha=0.8, label='cloud')
             #     rem = tr - yh_cl
             #     ax.plot(time_history, rem, linewidth=1.2, alpha=0.8, label='true-cloud')
 
@@ -338,11 +338,11 @@ def plot_data_from_csv(csv_filename):
                 #         label='|true-cloud| - |true-local|')
 
 
-            # if YH_hist is not None:
-            #     yh_h = YH_hist[:, j]
-            #     ax.plot(time_history, yh_h, '-.', linewidth=1.2, alpha=0.8, label='y_hat_hist')
-            #     rem_h = tr - yh_h
-            #     ax.plot(time_history, rem_h, linewidth=1.2, alpha=0.8, label='true-hist')
+            if YH_hist is not None:
+                yh_h = YH_hist[:, j]
+                ax.plot(time_history, yh_h, '-.', linewidth=1.2, alpha=0.8, label='y_hat_hist')
+                rem_h = tr - yh_h
+                ax.plot(time_history, rem_h, linewidth=1.2, alpha=0.8, label='true-hist')
 
             # if YH_mem is not None:
             #     yh_mem = YH_mem[:, j]
@@ -354,8 +354,8 @@ def plot_data_from_csv(csv_filename):
             if YH_local is not None:
                 yh_l = YH_local[:, j]
                 ax.plot(time_history, yh_l, '-', linewidth=1.2, alpha=0.8, label='y_hat_local')
-                # rem = tr - yh_l
-                # ax.plot(time_history, rem, linewidth=1.2, alpha=0.8, label='true-local')
+                rem = tr - yh_l
+                ax.plot(time_history, rem, linewidth=1.2, alpha=0.8, label='true-local')
                 err_local_abs = np.abs(tr - yh_l)
                 err_combined_abs = np.abs(tr-YH_comb[:, j])
                 diff_abs_err = err_local_abs-err_combined_abs
