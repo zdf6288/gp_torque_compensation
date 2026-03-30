@@ -61,23 +61,28 @@ class CartesianImpedanceController(Node):
         self.i_pid = np.array(self.get_parameter('i_pid').value, dtype=float)
         self.i_error = np.zeros(7)
 
-        self.declare_parameter('k_gains', [1500.0, 1250.0, 1000.0, 25.0, 25.0, 0.0])   # k_gains in impedance control (task space)
+        self.declare_parameter('k_gains', [1750.0, 1250.0, 1250.0, 25.0, 25.0, 0.0])   # k_gains in impedance control (task space)
         self.k_gains = np.array(self.get_parameter('k_gains').value, dtype=float)
         self.K_gains = np.diag(self.k_gains)
 
         self.declare_parameter('D_gains', [150.0, 125.0, 150.0, 1.0, 1.0, 0.0])   # d_gains in impedance control (task space)
         self.d_gains = np.array(self.get_parameter('D_gains').value, dtype=float)
         self.d_gains = np.diag(self.d_gains)
-        self.eta = 1                                                              # for calculating d_gains
+        self.eta = 1.0                                                              # for calculating d_gains
 
         self.declare_parameter('kpn_gains', [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0])    # kpn_gains for nullspace 
         self.kpn_gains = np.array(self.get_parameter('kpn_gains').value, dtype=float)
         self.dpn_gains = 1 * np.sqrt(np.array(self.kpn_gains))                        # dpn_gains for nullspace
 
         self.x_i_error = np.zeros(6, dtype=float)
-        self.i_gains = np.array([400.0, 400.0, 600.0, 0.0, 0.0, 0.0], dtype=float)
+        self.i_gains = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=float)
         self.prev_x_error = np.zeros(6, dtype=float)
         self.prev_dx_error = np.zeros(6, dtype=float)
+
+        #friction compensation
+        self.Fc = np.array([0.3, 1.2, 1.1, 0.3, 0.2, 0.3, 0.0], dtype=float)
+        self.Bv = np.array([0, 0, 0, 0, 0, 0, 0.0], dtype=float)
+        self.v_eps = 0.01
         
         # --- task-space integral ---
         self.declare_parameter('ki_task', [200.0, 0.0, 2000.0, 0.0, 0.0, 0.0])  # 先只给 z 积分
@@ -560,6 +565,10 @@ class CartesianImpedanceController(Node):
             lambda_matrix = np.linalg.inv(zero_jacobian @ np.linalg.inv(mass_matrix) @ zero_jacobian.T)
             eigvals, _ = np.linalg.eig(lambda_matrix)
             d_gains = 2 * self.eta * np.sqrt(eigvals @ self.K_gains)
+            # 单独设置 Z 轴 damping（第 3 个分量，索引 2）
+            print(d_gains)
+            # d_gains[2] = 0.9*d_gains[2]
+
             D_gains = np.diag(d_gains)
             
             # 只对 Z 轴积分
@@ -594,6 +603,7 @@ class CartesianImpedanceController(Node):
             N = np.eye(7) - zero_jacobian_pinv @ zero_jacobian   # or using your 5DoF jacobian
             tau_nullspace = N.T @ (- self.dpn_gains * dq)        # dq_des = 0 时就是减振
             tau = tau + tau_nullspace
+            tau = tau + self.friction_compensation(dq)
 
             # === 计算残差 ===
             tau_residual = tau_measured - tau - gravity_measured
@@ -704,7 +714,7 @@ class CartesianImpedanceController(Node):
 
                 self.y_hat_combined = w_l * self.y_hat_local + (1.0 - w_l) * self.y_hat_cloud
 
-            tau = tau
+            tau = tau - self.y_hat_local
             # publish on topic /effort_command
             self.effort_msg.efforts = tau.tolist()
             self.effort_publisher.publish(self.effort_msg)
@@ -853,6 +863,11 @@ class CartesianImpedanceController(Node):
             "y": np.asarray(y_hat, dtype=float).copy(),
             "var": np.asarray(y_var, dtype=float).copy(),
         })
+
+    #friction compensation
+    def friction_compensation(self, dq):
+        dq = np.asarray(dq, dtype=float)
+        return self.Fc * np.tanh(dq / self.v_eps) + self.Bv * dq
 
     def start_trajectory(self):
         """start trajectory by calling the joint position adjust service"""
