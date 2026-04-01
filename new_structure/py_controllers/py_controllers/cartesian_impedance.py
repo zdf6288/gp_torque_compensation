@@ -175,6 +175,9 @@ class CartesianImpedanceController(Node):
 
         self.gp_stride = 1      # 每 10 个 state callback 做一次 GP（你可以调）
         self.gp_counter = 0
+        self.last_q = np.zeros(7)
+        self.last_dq = np.zeros(7)
+        self.last_ddqq = np.zeros(7)
 
         self.y_hat_filtered = np.zeros(7)
         self.y_hat_alpha = 0.05   # 越小越平滑，0.01~0.1 合理      
@@ -707,6 +710,43 @@ class CartesianImpedanceController(Node):
                     self.cloud_var_queue.append(v_i.copy())
                 else:
                     self.var_local = np.minimum(self.var_local * 1.02, 1e6)
+                # y_hat_local, var_local = self._gp_predict_and_update(
+                #     self.q, dq, self.ddq_des_joint,
+                #     self.tau_residual_filtered,
+                #     self.gp_models_small,
+                #     update=True
+                # )
+                # self.y_hat_local = y_hat_local
+                # self.var_local = var_local
+
+                # q_i  = self.last_q.copy()
+                # dq_i = self.last_dq.copy()
+                # ddq_i = self.last_ddq.copy() 
+
+                # delay = 0.02
+                # q_i  = q_i  + dq_i * delay + 0.5 * ddq_i * (delay**2)
+                # dq_i = dq_i + ddq_i * delay
+
+                # y_hat_cloud, var_cloud = self._gp_predict_and_update(
+                #     q_i, dq_i, self.ddq_des_joint,
+                #     self.tau_residual_filtered,
+                #     self.gp_models_big,
+                #     update=False
+                # )
+                # if self.last_q:
+                #     _, _= self._gp_predict_and_update(
+                #         self.last_q, self.last_dq, self.last_ddq,
+                #         self.last_residual,
+                #         self.gp_models_big,
+                #         update=True
+                #     )
+                
+                # self.last_q = self.q.copy()
+                # self.last_dq = self.dq.copy()
+                # self.last_ddq = self.ddq_des_joint.copy()
+                # self.last_residual = self.tau_residual_filtered
+                # self.y_hat_cloud = y_hat_cloud
+
                 
                 # ---------------------------------------------------------
                 # C) 每帧融合（不要只在 else 融合）
