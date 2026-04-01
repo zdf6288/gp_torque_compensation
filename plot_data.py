@@ -359,18 +359,18 @@ def plot_data_from_csv(csv_filename):
                     linewidth=1.6
                 )
             
-            if YH_mem is not None:
-                tau_hat_mem = YH_mem[:, j]
-                ax.plot(
-                    time_history, tau_hat_mem,
-                    color='tab:green', linestyle='-.',
-                    linewidth=1.6
-                )
+            # if YH_mem is not None:
+            #     tau_hat_mem = YH_mem[:, j]
+            #     ax.plot(
+            #         time_history, tau_hat_mem,
+            #         color='tab:blue', linestyle='-.',
+            #         linewidth=1.6
+            #     )
 
             # ---- Error improvement (fused vs local) ----
             if (YH_local is not None) and (YH_comb is not None):
                 e_local = tau_res - YH_local[:, j]
-                e_fused = tau_res - YH_comb[:, j]
+                e_fused = tau_res - YH_cloud[:, j]
 
                 delta_abs_err = np.abs(e_fused) - np.abs(e_local)
 

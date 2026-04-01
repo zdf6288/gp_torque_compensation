@@ -1,6 +1,6 @@
 controller_manager:
   ros__parameters:
-    update_rate: 1000  # Hz
+    update_rate: 50  # Hz
 
     cpp_relayer:
       type: cpp_relayer/CPPRelayer
