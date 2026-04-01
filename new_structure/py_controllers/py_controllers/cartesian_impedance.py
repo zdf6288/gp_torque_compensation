@@ -177,7 +177,8 @@ class CartesianImpedanceController(Node):
         self.gp_counter = 0
         self.last_q = np.zeros(7)
         self.last_dq = np.zeros(7)
-        self.last_ddqq = np.zeros(7)
+        self.last_ddq = np.zeros(7)
+        self.last_residual = np.zeros(7)
 
         self.y_hat_filtered = np.zeros(7)
         self.y_hat_alpha = 0.05   # 越小越平滑，0.01~0.1 合理      
@@ -653,99 +654,98 @@ class CartesianImpedanceController(Node):
                 # ---------------------------------------------------------
                 # B) local：只有 tick 更新，否则 hold
                 # ---------------------------------------------------------
-                if tick:
-                    self.tau_memory = self.tau_residual_filtered
+                # if tick:
+                #     self.tau_memory = self.tau_residual_filtered
 
-                    x_query = self._build_gp_feature(self.q, dq, self.ddq_des_joint)
+                #     x_query = self._build_gp_feature(self.q, dq, self.ddq_des_joint)
 
-                    # 1) 当前 local GP
-                    y_hat_local_now, var_local_now = self._gp_predict_and_update(
-                        self.q, dq, self.ddq_des_joint,
-                        self.tau_residual_filtered,
-                        self.gp_models_small,
-                        update=True
-                    )
+                #     # 1) 当前 local GP
+                #     y_hat_local_now, var_local_now = self._gp_predict_and_update(
+                #         self.q, dq, self.ddq_des_joint,
+                #         self.tau_residual_filtered,
+                #         self.gp_models_small,
+                #         update=True
+                #     )
 
-                    # 2) 历史最近邻记忆项
-                    y_hat_hist, var_hist, alpha_hist = self._query_local_gp_history(x_query)
-                    self.y_hat_mem = y_hat_hist
+                #     # 2) 历史最近邻记忆项
+                #     y_hat_hist, var_hist, alpha_hist = self._query_local_gp_history(x_query)
+                #     self.y_hat_mem = y_hat_hist
 
-                    # 3) 融合
-                    # self.y_hat_local = (1.0 - alpha_hist) * y_hat_local_now + alpha_hist * y_hat_hist
-                    self.y_hat_local = y_hat_local_now
-                    self.var_local   = (1.0 - alpha_hist) * var_local_now   + alpha_hist * var_hist
+                #     # 3) 融合
+                #     # self.y_hat_local = (1.0 - alpha_hist) * y_hat_local_now + alpha_hist * y_hat_hist
+                #     self.y_hat_local = y_hat_local_now
+                #     self.var_local   = (1.0 - alpha_hist) * var_local_now   + alpha_hist * var_hist
 
-                    # 4) 当前结果写入历史池
-                    self._append_local_gp_history(x_query, y_hat_local_now, var_local_now)
+                #     # 4) 当前结果写入历史池
+                #     self._append_local_gp_history(x_query, y_hat_local_now, var_local_now)
 
-                    # 5) rollout 保持你原来的逻辑
-                    M = self.gp_stride
-                    dt_step = 0.02
-                    q_i  = self.q.copy()
-                    dq_i = dq.copy()
-                    ddq_i = self.ddq_des_joint.copy()
-                    tau_recursive = self.tau_residual_filtered
+                #     # 5) rollout 保持你原来的逻辑
+                #     M = self.gp_stride
+                #     dt_step = 0.02
+                #     q_i  = self.q.copy()
+                #     dq_i = dq.copy()
+                #     ddq_i = self.ddq_des_joint.copy()
+                #     tau_recursive = self.tau_residual_filtered
 
-                    y_i, v_i = self._gp_predict_and_update(
-                        q_i, dq_i, ddq_i,
-                        tau_recursive,
-                        self.gp_models_big,
-                        update=True
-                    )
-                    # self.y_hat_cloud = y_i
-                    self._append_local_gp_history(x_query, y_i, v_i)
-                    for i in range(M - 1):
-                        q_i  = q_i  + dq_i * dt_step + 0.5 * ddq_i * (dt_step**2)
-                        dq_i = dq_i + ddq_i * dt_step
-                        y_i, v_i = self._gp_predict_and_update(
-                            q_i, dq_i, ddq_i,
-                            tau_recursive,
-                            self.gp_models_big,
-                            update=True
-                        )
-                        
-                        tau_recursive = 1.0 * y_i + 0.0 * tau_recursive
-
-                    self.cloud_queue.append(y_i.copy())
-                    self.cloud_var_queue.append(v_i.copy())
-                else:
-                    self.var_local = np.minimum(self.var_local * 1.02, 1e6)
-                # y_hat_local, var_local = self._gp_predict_and_update(
-                #     self.q, dq, self.ddq_des_joint,
-                #     self.tau_residual_filtered,
-                #     self.gp_models_small,
-                #     update=True
-                # )
-                # self.y_hat_local = y_hat_local
-                # self.var_local = var_local
-
-                # q_i  = self.last_q.copy()
-                # dq_i = self.last_dq.copy()
-                # ddq_i = self.last_ddq.copy() 
-
-                # delay = 0.02
-                # q_i  = q_i  + dq_i * delay + 0.5 * ddq_i * (delay**2)
-                # dq_i = dq_i + ddq_i * delay
-
-                # y_hat_cloud, var_cloud = self._gp_predict_and_update(
-                #     q_i, dq_i, self.ddq_des_joint,
-                #     self.tau_residual_filtered,
-                #     self.gp_models_big,
-                #     update=False
-                # )
-                # if self.last_q:
-                #     _, _= self._gp_predict_and_update(
-                #         self.last_q, self.last_dq, self.last_ddq,
-                #         self.last_residual,
+                #     y_i, v_i = self._gp_predict_and_update(
+                #         q_i, dq_i, ddq_i,
+                #         tau_recursive,
                 #         self.gp_models_big,
                 #         update=True
                 #     )
+                #     # self.y_hat_cloud = y_i
+                #     self._append_local_gp_history(x_query, y_i, v_i)
+                #     for i in range(M - 1):
+                #         q_i  = q_i  + dq_i * dt_step + 0.5 * ddq_i * (dt_step**2)
+                #         dq_i = dq_i + ddq_i * dt_step
+                #         y_i, v_i = self._gp_predict_and_update(
+                #             q_i, dq_i, ddq_i,
+                #             tau_recursive,
+                #             self.gp_models_big,
+                #             update=True
+                #         )
+                        
+                #         tau_recursive = 1.0 * y_i + 0.0 * tau_recursive
+
+                #     self.cloud_queue.append(y_i.copy())
+                #     self.cloud_var_queue.append(v_i.copy())
+                # else:
+                #     self.var_local = np.minimum(self.var_local * 1.02, 1e6)
+                y_hat_local, var_local = self._gp_predict_and_update(
+                    self.q, dq, self.ddq_des_joint,
+                    self.tau_residual_filtered,
+                    self.gp_models_small,
+                    update=True
+                )
+                self.y_hat_local = y_hat_local
+                self.var_local = var_local
+
+                q_i  = self.last_q.copy()
+                dq_i = self.last_dq.copy()
+                ddq_i = self.last_ddq.copy() 
+
+                delay = 0.002
+                q_i  = q_i  + dq_i * delay + 0.5 * ddq_i * (delay**2)
+                dq_i = dq_i + ddq_i * delay
+
+                y_hat_cloud, var_cloud = self._gp_predict_and_update(
+                    q_i, dq_i, self.ddq_des_joint,
+                    self.tau_residual_filtered,
+                    self.gp_models_big,
+                    update=False
+                )
+                _, _= self._gp_predict_and_update(
+                    self.last_q, self.last_dq, self.last_ddq,
+                    self.last_residual,
+                    self.gp_models_big,
+                    update=True
+                )
                 
-                # self.last_q = self.q.copy()
-                # self.last_dq = self.dq.copy()
-                # self.last_ddq = self.ddq_des_joint.copy()
-                # self.last_residual = self.tau_residual_filtered
-                # self.y_hat_cloud = y_hat_cloud
+                self.last_q = self.q
+                self.last_dq = self.dq
+                self.last_ddq = self.ddq_des_joint
+                self.last_residual = self.tau_residual_filtered
+                self.y_hat_cloud = y_hat_cloud
 
                 
                 # ---------------------------------------------------------
@@ -1063,14 +1063,14 @@ class CartesianImpedanceController(Node):
         per_joint_cfg = {
             "default": dict(
                 max_data_per_expert=25,
-                nearest_k=4,
+                nearest_k=2,
                 max_experts=25,
                 timescale=0.03,
             ),
             # 举例：如果你想让 6 号关节忘得快一点、专家少一点，可以单独改：
             6: dict(
                 max_data_per_expert=25,
-                nearest_k=4,
+                nearest_k=2,
                 max_experts=25,
                 timescale=0.05,
             ),
