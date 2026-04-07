@@ -24,7 +24,7 @@ class TrajectoryPublisher(Node):
         self.data_recording_publisher = self.create_publisher(
             Bool, '/data_recording_enabled', 10)
         
-        self.timer = self.create_timer(0.1, self.timer_callback)  # publish at 1000 Hz
+        self.timer = self.create_timer(0.001, self.timer_callback)  # publish at 1000 Hz
 
         # subscribe to /state_parameter to get robot current state
         self.state_subscription = self.create_subscription(
@@ -133,6 +133,7 @@ class TrajectoryPublisher(Node):
 
         if future is None:
             # trajectory not ready
+            print(f"[TrajectoryPublisher] Future trajectory not ready for t_delay={t_delay:.3f}s")
             response.x_des = [0.0]*6
             response.dx_des = [0.0]*6
             response.ddx_des = [0.0]*6

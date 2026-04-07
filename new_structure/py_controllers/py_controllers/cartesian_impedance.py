@@ -53,9 +53,9 @@ class CartesianImpedanceController(Node):
             Bool, "/shutdown_control", self.shutdown_callback, 10
         )
         
-        self.declare_parameter('k_pd', [5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 2.0])    # k_gains in PD control (joint space)
-        self.declare_parameter('d_pd', [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0])    # d_gains in PD control (joint space)
-        self.declare_parameter('i_pid', [0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.0])        # i_gains supplement to PD control (joint space)
+        self.declare_parameter('k_pd', [24.0, 24.0, 24.0, 24.0, 10.0, 6.0, 2.0])    # k_gains in PD control (joint space)
+        self.declare_parameter('d_pd', [16.0, 16.0, 16.0, 16.0, 10.0, 6.0, 2.0])    # d_gains in PD control (joint space)
+        self.declare_parameter('i_pid', [1.0, 1.0, 1.0, 1.0, 0.5, 0.5, 0.5])        # i_gains supplement to PD control (joint space)
         self.k_pd = np.array(self.get_parameter('k_pd').value, dtype=float)
         self.d_pd = np.array(self.get_parameter('d_pd').value, dtype=float)
         self.i_pid = np.array(self.get_parameter('i_pid').value, dtype=float)
@@ -113,6 +113,29 @@ class CartesianImpedanceController(Node):
         # dq 一阶低通截止频率，先保守一点
         self.declare_parameter("dq_lpf_hz", 30.0)
         self.dq_lpf_hz = float(self.get_parameter("dq_lpf_hz").value)
+
+        self.dq_future_filt = np.zeros(7)
+        self.dq_future_filt_initialized = False
+
+        self.declare_parameter("dq_future_lpf_hz", 30.0)
+        self.dq_future_lpf_hz = float(self.get_parameter("dq_future_lpf_hz").value)
+
+        # ===== joint rollout for future prediction =====
+        self.dq_prev = np.zeros(7, dtype=float)
+        self.ddq_est = np.zeros(7, dtype=float)
+        self.ddq_est_initialized = False
+
+        self.declare_parameter("ddq_lpf_hz", 15.0)
+        self.ddq_lpf_hz = float(self.get_parameter("ddq_lpf_hz").value)
+
+        self.declare_parameter("delay_steps", 1)
+        self.delay_steps = int(self.get_parameter("delay_steps").value)
+
+        self.declare_parameter("cloud_rollout_n", 7)          # 采样点数
+        self.declare_parameter("cloud_rollout_span", 0.001)    # 在 Td 附近 ±span/2 采样，单位秒
+
+        self.cloud_rollout_n = int(self.get_parameter("cloud_rollout_n").value)
+        self.cloud_rollout_span = float(self.get_parameter("cloud_rollout_span").value)
 
         self.zero_jacobian_buffer = None    # buffer for zero jacobian matrix in flange frame
         self.jacobian_buffer = None         # buffer for jacobian matrix in flange frame
@@ -175,6 +198,7 @@ class CartesianImpedanceController(Node):
 
         self.gp_stride = 1      # 每 10 个 state callback 做一次 GP（你可以调）
         self.gp_counter = 0
+        self.cloud_counter = 0
         self.last_q = np.zeros(7)
         self.last_dq = np.zeros(7)
         self.last_ddq = np.zeros(7)
@@ -268,7 +292,7 @@ class CartesianImpedanceController(Node):
 
         #simulated dalay
         self.future_delay = self.declare_parameter(
-            'future_delay', 0.015 # 默认 60 ms
+            'future_delay', 0.00 # 默认 60 ms
         ).value
         self.delay_steps = 0
         self.state_delay_steps = 0   # 你想模拟的通信延迟：20个周期
@@ -370,7 +394,7 @@ class CartesianImpedanceController(Node):
             "ddx_des": ddx_f,
         }
         # 调试时可以看看
-        # self.get_logger().debug(f"Got future traj: x={x_f[:3]}")
+        self.get_logger().debug(f"Got future traj: x={x_f[:3]}")
     
     def gp_mode_callback(self, msg):
         self.gp_mode = msg.data
@@ -430,22 +454,24 @@ class CartesianImpedanceController(Node):
                 self.t_initial = t_now
                 self.t_last = t_now
                 t_elapsed = 0.0
-                dt = 1e-3   # 比原来的 1e-1 更合理，避免初值太怪
+                dt = 1e-3
 
                 self.dq_filt = dq_raw.copy()
                 self.dq_filt_initialized = True
 
-                # dq = self.dq_filt.copy()
-                # self.dq = dq
                 dq = dq_raw
                 self.dq = dq
 
                 ddq = np.zeros_like(dq)
                 self.dq_buffer = dq.copy()
+
+                # ===== rollout init =====
+                self.dq_prev = dq.copy()
+                self.ddq_est = np.zeros_like(dq)
+                self.ddq_est_initialized = True
             else:
                 t_elapsed = (t_now - self.t_initial).nanoseconds / 1e9
                 dt = (t_now - self.t_last).nanoseconds / 1e9
-                print(dt)
                 self.t_last = t_now
 
                 # 防止极小 dt
@@ -461,6 +487,23 @@ class CartesianImpedanceController(Node):
 
                 dq = self.dq_filt.copy()
                 self.dq = dq
+
+                # ===== estimate joint acceleration from measured dq =====
+                ddq_raw = (dq - self.dq_prev) / dt
+                self.dq_prev = dq.copy()
+
+                if not self.ddq_est_initialized:
+                    self.ddq_est = ddq_raw.copy()
+                    self.ddq_est_initialized = True
+                else:
+                    self.ddq_est = self._lowpass_vector(
+                        ddq_raw,
+                        self.ddq_est,
+                        dt,
+                        self.ddq_lpf_hz
+                    )
+
+                ddq_est = self.ddq_est.copy()
 
                 ddq = (dq - self.dq_buffer) / dt
                 self.dq_buffer = dq.copy()                    
@@ -618,17 +661,21 @@ class CartesianImpedanceController(Node):
             self.tau_residual_filtered = (
                 0.02 * tau_residual + 0.98 * self.tau_residual_filtered
             )
-
+            self.state_buffer.append({
+                "t": t_elapsed,
+                "q": q.copy(),
+                "dq": dq.copy(),
+                "ddq_est": ddq_est.copy(),
+                "tau_res": self.tau_residual_filtered.copy(),
+            })
             # tau = tau
 
             # === 异步请求未来轨迹（给 GP 用），比如 100Hz 请求一次 ===
             if self.future_traj_client.service_is_ready():
-                self._future_traj_counter += 1
-                if self._future_traj_counter % 1 == 0:
-                    req_ft = GetFutureTrajectory.Request()
-                    req_ft.t_delay = float(self.future_delay)
-                    future_ft = self.future_traj_client.call_async(req_ft)
-                    future_ft.add_done_callback(self._future_traj_response_callback)
+                req_ft = GetFutureTrajectory.Request()
+                req_ft.t_delay = float(self.future_delay)
+                future_ft = self.future_traj_client.call_async(req_ft)
+                future_ft.add_done_callback(self._future_traj_response_callback)
             else:
                 if not self._future_traj_warned:
                     self.get_logger().warn(
@@ -640,77 +687,7 @@ class CartesianImpedanceController(Node):
             if self.gp_active and self.use_gp:
                 self.gp_counter += 1
                 tick = (self.gp_counter % self.gp_stride == 0)
-                # tick = True
-
                 # ---------------------------------------------------------
-                # A) 每帧：先消费 cloud 队列（填补空隙）
-                # ---------------------------------------------------------
-                if len(self.cloud_queue) > 0:
-                    self.y_hat_cloud_hold = self.cloud_queue.popleft()
-                    self.var_cloud_hold   = self.cloud_var_queue.popleft()
-
-                self.y_hat_cloud = self.y_hat_cloud_hold
-                self.var_cloud   = self.var_cloud_hold
-                # ---------------------------------------------------------
-                # B) local：只有 tick 更新，否则 hold
-                # ---------------------------------------------------------
-                # if tick:
-                #     self.tau_memory = self.tau_residual_filtered
-
-                #     x_query = self._build_gp_feature(self.q, dq, self.ddq_des_joint)
-
-                #     # 1) 当前 local GP
-                #     y_hat_local_now, var_local_now = self._gp_predict_and_update(
-                #         self.q, dq, self.ddq_des_joint,
-                #         self.tau_residual_filtered,
-                #         self.gp_models_small,
-                #         update=True
-                #     )
-
-                #     # 2) 历史最近邻记忆项
-                #     y_hat_hist, var_hist, alpha_hist = self._query_local_gp_history(x_query)
-                #     self.y_hat_mem = y_hat_hist
-
-                #     # 3) 融合
-                #     # self.y_hat_local = (1.0 - alpha_hist) * y_hat_local_now + alpha_hist * y_hat_hist
-                #     self.y_hat_local = y_hat_local_now
-                #     self.var_local   = (1.0 - alpha_hist) * var_local_now   + alpha_hist * var_hist
-
-                #     # 4) 当前结果写入历史池
-                #     self._append_local_gp_history(x_query, y_hat_local_now, var_local_now)
-
-                #     # 5) rollout 保持你原来的逻辑
-                #     M = self.gp_stride
-                #     dt_step = 0.02
-                #     q_i  = self.q.copy()
-                #     dq_i = dq.copy()
-                #     ddq_i = self.ddq_des_joint.copy()
-                #     tau_recursive = self.tau_residual_filtered
-
-                #     y_i, v_i = self._gp_predict_and_update(
-                #         q_i, dq_i, ddq_i,
-                #         tau_recursive,
-                #         self.gp_models_big,
-                #         update=True
-                #     )
-                #     # self.y_hat_cloud = y_i
-                #     self._append_local_gp_history(x_query, y_i, v_i)
-                #     for i in range(M - 1):
-                #         q_i  = q_i  + dq_i * dt_step + 0.5 * ddq_i * (dt_step**2)
-                #         dq_i = dq_i + ddq_i * dt_step
-                #         y_i, v_i = self._gp_predict_and_update(
-                #             q_i, dq_i, ddq_i,
-                #             tau_recursive,
-                #             self.gp_models_big,
-                #             update=True
-                #         )
-                        
-                #         tau_recursive = 1.0 * y_i + 0.0 * tau_recursive
-
-                #     self.cloud_queue.append(y_i.copy())
-                #     self.cloud_var_queue.append(v_i.copy())
-                # else:
-                #     self.var_local = np.minimum(self.var_local * 1.02, 1e6)
                 y_hat_local, var_local = self._gp_predict_and_update(
                     self.q, dq, self.ddq_des_joint,
                     self.tau_residual_filtered,
@@ -720,33 +697,75 @@ class CartesianImpedanceController(Node):
                 self.y_hat_local = y_hat_local
                 self.var_local = var_local
 
-                q_i  = self.last_q.copy()
-                dq_i = self.last_dq.copy()
-                ddq_i = self.last_ddq.copy() 
+                # Td = float(self.future_delay)
+                # delay_steps = max(1, int(self.delay_steps))
+                delay_steps = 1
 
-                delay = 0.002
-                q_i  = q_i  + dq_i * delay + 0.5 * ddq_i * (delay**2)
-                dq_i = dq_i + ddq_i * delay
+                base_state = None
+                if len(self.state_buffer) > delay_steps:
+                    base_state = self.state_buffer[-(delay_steps + 1)]
+                elif len(self.state_buffer) > 0:
+                    base_state = self.state_buffer[0]
 
-                y_hat_cloud, var_cloud = self._gp_predict_and_update(
-                    q_i, dq_i, self.ddq_des_joint,
-                    self.tau_residual_filtered,
-                    self.gp_models_big,
-                    update=False
-                )
-                _, _= self._gp_predict_and_update(
-                    self.last_q, self.last_dq, self.last_ddq,
-                    self.last_residual,
+                if base_state is not None:
+                    q_base = base_state["q"].copy()
+                    dq_base = base_state["dq"].copy()
+                    ddq_base = base_state["ddq_est"].copy()
+                    tau_base = base_state["tau_res"].copy()
+                else:
+                    q_base = q.copy()
+                    dq_base = dq.copy()
+                    ddq_base = ddq_est.copy()
+                    tau_base = self.tau_residual_filtered.copy()
+
+                # ===== big GP 用基准帧先更新 =====
+                _, _ = self._gp_predict_and_update(
+                    q_base, dq_base, ddq_base,
+                    tau_base,
                     self.gp_models_big,
                     update=True
                 )
-                
-                self.last_q = self.q
-                self.last_dq = self.dq
-                self.last_ddq = self.ddq_des_joint
-                self.last_residual = self.tau_residual_filtered
-                self.y_hat_cloud = y_hat_cloud
 
+                # ===== 在 Td 附近均匀采样多个 rollout 点 =====
+                Td_center = delay_steps * dt
+                Td_samples = self._sample_rollout_times_uniform(
+                    Td_center,
+                    self.cloud_rollout_n,
+                    self.cloud_rollout_span
+                )
+
+                y_list = []
+                var_list = []
+                Td_list = []
+
+                for Td_i in Td_samples:
+                    q_roll  = q_base + dq_base * Td_i + 0.5 * ddq_base * (Td_i ** 2)
+                    dq_roll = dq_base + ddq_base * Td_i
+                    ddq_roll = ddq_base.copy()
+
+                    y_hat_i, var_i = self._gp_predict_and_update(
+                        q_roll, dq_roll, ddq_roll,
+                        tau_base,
+                        self.gp_models_big,
+                        update=False
+                    )
+
+                    y_list.append(y_hat_i.copy())
+                    var_list.append(var_i.copy())
+                    Td_list.append(Td_i)
+
+                # ===== variance-weighted fusion =====
+                y_arr = np.asarray(y_list, dtype=float)      # (N, 7)
+                var_arr = np.asarray(var_list, dtype=float)  # (N, 7)
+
+                eps = 1e-8
+                prec_arr = 1.0 / np.maximum(var_arr, eps)    # (N, 7)
+                w_arr = prec_arr / np.sum(prec_arr, axis=0, keepdims=True)
+
+                y_hat_cloud = np.sum(y_arr * w_arr, axis=0)
+                var_cloud = 1.0 / np.maximum(np.sum(prec_arr, axis=0), eps)
+
+                self.y_hat_cloud = y_hat_cloud.copy()
                 
                 # ---------------------------------------------------------
                 # C) 每帧融合（不要只在 else 融合）
@@ -790,10 +809,56 @@ class CartesianImpedanceController(Node):
         except Exception as e:
             self.get_logger().error(f'Parameter error: {str(e)}')
 
+    def _sample_rollout_times_uniform(self, Td, n, span):
+        """
+        在 Td 附近按均匀分布采样 n 个时间点。
+        例如 Td=0.02, span=0.01:
+            采样区间 [0.015, 0.025]
+        """
+        if n <= 1:
+            return np.array([Td], dtype=float)
+
+        t_min = max(0.0, Td - 0.5 * span)
+        t_max = max(t_min, Td + 0.5 * span)
+
+        return np.linspace(t_min, t_max, n, dtype=float)
+
     def predict_future_joint_state(q, dq, ddq_des, delay):
         dq_future = dq + ddq_des * delay
         q_future  = q + dq * delay + 0.5 * ddq_des * delay**2
         return q_future, dq_future
+
+    def _predict_future_joint_from_taskspace(
+        self,
+        q0,
+        dq0,
+        x_f,
+        dx_f,
+        ddx_f,
+        mass_matrix,
+        jacobian,
+        djacobian,
+        delay
+    ):
+        """
+        根据 future task-space reference 预测 delay 后的 joint state
+        使用单步 differential IK:
+            dq_f  = J# dx_f
+            ddq_f = J# (ddx_f - dJ dq_f)
+            q_f   = q0 + dq_f * delay
+        """
+        lam = self.dls_lambda
+        J_pinv = self.dls_dyn_pinv(jacobian, mass_matrix, lam)   # 7x5
+
+        dx_f_5 = dx_f[:5]
+        ddx_f_5 = ddx_f[:5]
+
+        dq_f = J_pinv @ dx_f_5
+        ddq_f = J_pinv @ (ddx_f_5 - djacobian @ dq_f)
+
+        q_f = q0 + dq_f * delay
+
+        return q_f, dq_f, ddq_f
 
     def _sample_future_task_space(self, dx_f, ddx_f, n_samples=10, sigma=0.02):
         samples = []
@@ -1062,16 +1127,16 @@ class CartesianImpedanceController(Node):
         
         per_joint_cfg = {
             "default": dict(
-                max_data_per_expert=25,
+                max_data_per_expert=50,
                 nearest_k=2,
-                max_experts=25,
+                max_experts=50,
                 timescale=0.03,
             ),
             # 举例：如果你想让 6 号关节忘得快一点、专家少一点，可以单独改：
             6: dict(
-                max_data_per_expert=25,
+                max_data_per_expert=50,
                 nearest_k=2,
-                max_experts=25,
+                max_experts=50,
                 timescale=0.05,
             ),
         }
@@ -1160,6 +1225,7 @@ class CartesianImpedanceController(Node):
         """
 
         if not self.gp_ready or not self.use_gp:
+            print("[GP] GP not ready or not enabled; skipping prediction")
             return np.zeros(7, dtype=float)
 
         y_hat = np.zeros(7, dtype=float)
