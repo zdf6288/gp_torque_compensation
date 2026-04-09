@@ -651,8 +651,8 @@ class CartesianImpedanceController(Node):
             #     @ (self.dpn_gains * (self.dq_des - dq)))
             N = np.eye(7) - zero_jacobian_pinv @ zero_jacobian   # or using your 5DoF jacobian
             tau_nullspace = N.T @ (- self.dpn_gains * dq)        # dq_des = 0 时就是减振
-            tau = tau + tau_nullspace
-            tau = tau + self.friction_compensation(dq)
+            # tau = tau + tau_nullspace
+            # tau = tau + self.friction_compensation(dq)
 
             # === 计算残差 ===
             tau_residual = tau_measured - tau - gravity_measured
@@ -727,6 +727,8 @@ class CartesianImpedanceController(Node):
                 )
 
                 # ===== 在 Td 附近均匀采样多个 rollout 点 =====
+                self.cloud_rollout_n = 1
+                self.cloud_rollout_span = 0.001
                 Td_center = delay_steps * dt
                 Td_samples = self._sample_rollout_times_uniform(
                     Td_center,
@@ -743,8 +745,22 @@ class CartesianImpedanceController(Node):
                     dq_roll = dq_base + ddq_base * Td_i
                     ddq_roll = ddq_base.copy()
 
+                    # ===== 找历史中最近的点 =====
+                    nearest_state, nearest_dist = self._find_nearest_history_state(
+                        q_roll, dq_roll, ddq_roll, use_ddq=False
+                    )
+
+                    if nearest_state is not None:
+                        q_nn = nearest_state["q"].copy()
+                        dq_nn = nearest_state["dq"].copy()
+                        ddq_nn = nearest_state["ddq_est"].copy()
+                    else:
+                        q_nn = q_roll.copy()
+                        dq_nn = dq_roll.copy()
+                        ddq_nn = ddq_roll.copy()
+
                     y_hat_i, var_i = self._gp_predict_and_update(
-                        q_roll, dq_roll, ddq_roll,
+                        q_nn, dq_nn, ddq_nn,
                         tau_base,
                         self.gp_models_big,
                         update=False
@@ -766,6 +782,7 @@ class CartesianImpedanceController(Node):
                 var_cloud = 1.0 / np.maximum(np.sum(prec_arr, axis=0), eps)
 
                 self.y_hat_cloud = y_hat_cloud.copy()
+                self.var_cloud = var_cloud.copy()
                 
                 # ---------------------------------------------------------
                 # C) 每帧融合（不要只在 else 融合）
@@ -781,7 +798,7 @@ class CartesianImpedanceController(Node):
                 self.y_hat_combined = w_l * self.y_hat_local + (1.0 - w_l) * self.y_hat_cloud
 
             # tau = tau - self.y_hat_local
-            tau = tau
+            tau = tau - self.y_hat_combined
 
             # publish on topic /effort_command
             self.effort_msg.efforts = tau.tolist()
@@ -1217,6 +1234,41 @@ class CartesianImpedanceController(Node):
         alpha = np.clip(alpha, 0.0, 1.0)
 
         return alpha * x_raw + (1.0 - alpha) * x_prev
+
+    def _find_nearest_history_state(self, q_query, dq_query, ddq_query=None, use_ddq=False):
+        """
+        在 state_buffer 中找和查询状态最近的历史点。
+        默认用 [q, dq] 做距离；
+        如果 use_ddq=True，则用 [q, dq, ddq] 做距离。
+        返回:
+            nearest_state: dict
+            nearest_dist: float
+        """
+        if len(self.state_buffer) == 0:
+            return None, np.inf
+
+        best_state = None
+        best_dist = np.inf
+
+        for item in self.state_buffer:
+            q_h = item["q"]
+            dq_h = item["dq"]
+
+            if use_ddq:
+                ddq_h = item["ddq_est"]
+                d = np.linalg.norm(
+                    np.concatenate([q_query - q_h, dq_query - dq_h, ddq_query - ddq_h])
+                )
+            else:
+                d = np.linalg.norm(
+                    np.concatenate([q_query - q_h, dq_query - dq_h])
+                )
+
+            if d < best_dist:
+                best_dist = d
+                best_state = item
+
+        return best_state, best_dist
 
     def _gp_predict_and_update(self, q, dq_des_joint, ddq_des_joint, tau_residual, models, update = True):
         """
