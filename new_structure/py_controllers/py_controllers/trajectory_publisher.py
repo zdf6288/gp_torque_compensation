@@ -24,6 +24,13 @@ class TrajectoryPublisher(Node):
         self.data_recording_publisher = self.create_publisher(
             Bool, '/data_recording_enabled', 10)
         
+        self.future_trajectory_publisher = self.create_publisher(
+            TaskSpaceCommand, '/task_space_command_future', 10
+        )
+
+        self.declare_parameter('future_delay', 0.002)
+        self.future_delay = float(self.get_parameter('future_delay').value)
+        
         self.timer = self.create_timer(0.001, self.timer_callback)  # publish at 1000 Hz
 
         # subscribe to /state_parameter to get robot current state
@@ -257,6 +264,20 @@ class TrajectoryPublisher(Node):
             
             self.trajectory_publisher.publish(trajectory_msg)
             
+            future = self.get_future_task_space(self.future_delay)
+
+            if future is not None:
+                x_f, dx_f, ddx_f = future
+
+                future_msg = TaskSpaceCommand()
+                future_msg.header = Header()
+                future_msg.header.stamp = current_time.to_msg()
+                future_msg.header.frame_id = "base_link"
+                future_msg.x_des = x_f
+                future_msg.dx_des = dx_f
+                future_msg.ddx_des = ddx_f
+
+                self.future_trajectory_publisher.publish(future_msg)
             # publish data recording status
             data_recording_msg = Bool()
             data_recording_msg.data = self.transition_complete or not self.use_transition
@@ -315,7 +336,6 @@ class TrajectoryPublisher(Node):
 
                 rclpy.shutdown()
                 return
-
 
     def get_future_task_space(self, t_delay):
         """
