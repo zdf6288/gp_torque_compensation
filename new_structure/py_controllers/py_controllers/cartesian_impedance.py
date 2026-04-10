@@ -53,8 +53,8 @@ class CartesianImpedanceController(Node):
             Bool, "/shutdown_control", self.shutdown_callback, 10
         )
         
-        self.declare_parameter('k_pd', [24.0, 24.0, 24.0, 24.0, 10.0, 6.0, 2.0])    # k_gains in PD control (joint space)
-        self.declare_parameter('d_pd', [16.0, 16.0, 16.0, 16.0, 10.0, 6.0, 2.0])    # d_gains in PD control (joint space)
+        self.declare_parameter('k_pd', [20.0, 20.0, 20.0, 20.0, 5.0, 3.0, 2.0])    # k_gains in PD control (joint space)
+        self.declare_parameter('d_pd', [16.0, 16.0, 16.0, 16.0, 5.0, 3.0, 2.0])    # d_gains in PD control (joint space)
         self.declare_parameter('i_pid', [1.0, 1.0, 1.0, 1.0, 0.5, 0.5, 0.5])        # i_gains supplement to PD control (joint space)
         self.k_pd = np.array(self.get_parameter('k_pd').value, dtype=float)
         self.d_pd = np.array(self.get_parameter('d_pd').value, dtype=float)
@@ -99,7 +99,39 @@ class CartesianImpedanceController(Node):
         self.q_des = np.array(self.get_parameter('q_des').value, dtype=float)
         self.dq_des = np.array(self.get_parameter('dq_des').value, dtype=float)
         self.joint_position_threshold = self.get_parameter('joint_position_threshold').value
-        
+
+        self.startup_interp_started = False
+        self.startup_interp_start_time = None
+        self.startup_interp_duration = 5.0   # 可调
+        self.startup_x0 = None
+        self.startup_rot0 = None
+
+        self.declare_parameter('startup_linear_speed', 0.01)   # m/s
+        self.startup_linear_speed = float(self.get_parameter('startup_linear_speed').value)
+
+
+        self.declare_parameter('start_x', 0.35)
+        self.declare_parameter('start_y', 0.0)
+        self.declare_parameter('start_z', 0.65)
+
+        self.start_x = float(self.get_parameter('start_x').value)
+        self.start_y = float(self.get_parameter('start_y').value)
+        self.start_z = float(self.get_parameter('start_z').value)
+
+        self.x_start_des = np.array([self.start_x, self.start_y, self.start_z], dtype=float)
+
+        self.declare_parameter('startup_kp_task', [500.0, 500.0, 500.0, 10.0, 10.0, 1.0])
+        self.declare_parameter('startup_kd_task', [50.0, 50.0, 50.0, 1.0, 1.0, 1.0])
+        self.declare_parameter('startup_ki_task', [1.0, 1.0, 1.0, 1.0, 1.0, 0.0])
+
+        self.startup_kp_task = np.array(self.get_parameter('startup_kp_task').value, dtype=float)
+        self.startup_kd_task = np.array(self.get_parameter('startup_kd_task').value, dtype=float)
+        self.startup_ki_task = np.array(self.get_parameter('startup_ki_task').value, dtype=float)
+
+        self.startup_x_int_error = np.zeros(6, dtype=float)
+        self.declare_parameter('startup_pos_threshold', 0.02)   # 1 cm
+        self.startup_pos_threshold = float(self.get_parameter('startup_pos_threshold').value)
+                
         self.q_initial = None               # initial joint position q0
         self.t_initial = None               # initial time
         self.t_last = None                  # last time
@@ -327,12 +359,6 @@ class CartesianImpedanceController(Node):
 
         # 只在轨迹真正开始之后再用 GP（由 /data_recording_enabled 控制）
         self.gp_active = False
-        # 不要 while 死等，只尝试一次
-        if not self.gp_client.wait_for_service(timeout_sec=2.0):
-            self.get_logger().warn('/gp_predict service not available at start, GP disabled')
-            self.use_gp = False
-        else:
-            self.get_logger().info('/gp_predict service is ready')
 
         # 未来轨迹 service client
         self.future_traj_client = self.create_client(
@@ -508,49 +534,45 @@ class CartesianImpedanceController(Node):
                 ddq = (dq - self.dq_buffer) / dt
                 self.dq_buffer = dq.copy()                    
 
-            # joint position control (for joint position adjustment before trajectory_publisher starts to work)
-            if self.joint_position_control_active and not self.joint_position_adjusted:
-                # check if joint positions are close enough to desired positions
-                joint_error = np.linalg.norm(q - self.q_des)
-                if joint_error < self.joint_position_threshold:
-                    self.joint_position_adjusted = True
-                    self.get_logger().info(f'Joint positions adjusted! Error: {joint_error:.6f}')
+            # # joint position control (for joint position adjustment before trajectory_publisher starts to work)
+            # if self.joint_position_control_active and not self.joint_position_adjusted:
+            #     # check if joint positions are close enough to desired positions
+            #     joint_error = np.linalg.norm(q - self.q_des)
+            #     if joint_error < self.joint_position_threshold:
+            #         self.joint_position_adjusted = True
+            #         self.get_logger().info(f'Joint positions adjusted! Error: {joint_error:.6f}')
                     
-                    # start trajectory by calling service
-                    if not self.trajectory_started:
-                        # start transition, clear ros2_control interface buffer
-                        tau = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
-                        self.effort_msg.efforts = tau.tolist()
-                        self.effort_publisher.publish(self.effort_msg)
-                        self.start_trajectory()
-                else:
-                    # PD control for joint positions
-                    e_q  = (self.q_des - q)
-                    e_dq = (self.dq_des - dq)
+            #         # start trajectory by calling service
+            #         if not self.trajectory_started:
+            #             # start transition, clear ros2_control interface buffer
+            #             tau = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+            #             self.effort_msg.efforts = tau.tolist()
+            #             self.effort_publisher.publish(self.effort_msg)
+            #             self.start_trajectory()
+            #     else:
+            #         # PD control for joint positions
+            #         e_q  = (self.q_des - q)
+            #         e_dq = (self.dq_des - dq)
 
-                    tau_unsat = self.k_pd * e_q + self.d_pd * e_dq + self.i_pid * self.i_error
-                    tau_sat   = np.clip(tau_unsat, -50.0, 50.0)
+            #         tau_unsat = self.k_pd * e_q + self.d_pd * e_dq + self.i_pid * self.i_error
+            #         tau_sat   = np.clip(tau_unsat, -50.0, 50.0)
 
-                    # anti-windup gain（每关节都可以不同）
-                    k_aw = 15.0  # 典型 1~20 之间调；越大回退越快
+            #         # anti-windup gain（每关节都可以不同）
+            #         k_aw = 15.0  # 典型 1~20 之间调；越大回退越快
 
-                    # back-calculation: 积分更新（注意是用“力矩差”回退）
-                    self.i_error = self.i_error + (e_q + k_aw * (tau_sat - tau_unsat)) * dt
+            #         # back-calculation: 积分更新（注意是用“力矩差”回退）
+            #         self.i_error = self.i_error + (e_q + k_aw * (tau_sat - tau_unsat)) * dt
 
-                    # final command
-                    tau = self.k_pd * e_q + self.d_pd * e_dq + self.i_pid * self.i_error
-                    tau = np.clip(tau, -50.0, 50.0)
+            #         # final command
+            #         tau = self.k_pd * e_q + self.d_pd * e_dq + self.i_pid * self.i_error
+            #         tau = np.clip(tau, -50.0, 50.0)
                     
-                    # publish effort command
-                    self.effort_msg.efforts = tau.tolist()
-                    self.effort_publisher.publish(self.effort_msg)
+            #         # publish effort command
+            #         self.effort_msg.efforts = tau.tolist()
+            #         self.effort_publisher.publish(self.effort_msg)
 
-                    return
-            
-            # cartesian impedance control (after joint position adjustment)
-            if not self.task_command_received:
-                return
-            
+            #         return 
+
             # get O_T_F, mass, coriolis, flange-framed zero jacobian matrix J(q) and dJ(q)
             o_t_f_array = np.array(msg.o_t_f)                           # vectorized 4x4 pose matrix in flange frame, column-major
             mass_matrix_array = np.array(msg.mass)                      # vectorized 7x7 mass matrix, column-major
@@ -568,7 +590,33 @@ class CartesianImpedanceController(Node):
             lam = self.dls_lambda
             lam_ns = self.dls_lambda_ns
             # 6×7
-            zero_jacobian_pinv = self.dls_dyn_pinv(zero_jacobian, mass_matrix, lam_ns)   # 7×6       
+            zero_jacobian_pinv = self.dls_dyn_pinv(zero_jacobian, mass_matrix, lam_ns)   # 7×6 
+
+            if self.joint_position_control_active and not self.joint_position_adjusted:
+                tau, reached, pos_err_norm = self._startup_taskspace_control(
+                    t_now, q, dq, dt, o_t_f, zero_jacobian, zero_jacobian_pinv
+                )
+
+                if reached:
+                    self.joint_position_adjusted = True
+                    self.get_logger().info(f"End-effector reached start point. Error={pos_err_norm:.6f}")
+
+                    if not self.trajectory_started:
+                        zero_tau = np.zeros(7)
+                        self.effort_msg.efforts = zero_tau.tolist()
+                        self.effort_publisher.publish(self.effort_msg)
+                        self.start_trajectory()
+                else:
+                    self.effort_msg.efforts = tau.tolist()
+                    self.effort_publisher.publish(self.effort_msg)
+
+                return
+
+            if not self.task_command_received:
+                print("not received")
+                return  
+
+            # cartesian impedance control (after joint position adjustment)   
 
             # to control the z axis perpendicular to ground, use 4*7 jacobian matrix
             # to control the z axis perpendicular to ground, use 5x7 Jacobian (3 pos + 2 rot constraints)
@@ -651,8 +699,8 @@ class CartesianImpedanceController(Node):
             #     @ (self.dpn_gains * (self.dq_des - dq)))
             N = np.eye(7) - zero_jacobian_pinv @ zero_jacobian   # or using your 5DoF jacobian
             tau_nullspace = N.T @ (- self.dpn_gains * dq)        # dq_des = 0 时就是减振
-            # tau = tau + tau_nullspace
-            # tau = tau + self.friction_compensation(dq)
+            tau = tau + tau_nullspace
+            tau = tau + self.friction_compensation(dq)
 
             # === 计算残差 ===
             tau_residual = tau_measured - tau - gravity_measured
@@ -669,19 +717,6 @@ class CartesianImpedanceController(Node):
                 "tau_res": self.tau_residual_filtered.copy(),
             })
             # tau = tau
-
-            # === 异步请求未来轨迹（给 GP 用），比如 100Hz 请求一次 ===
-            if self.future_traj_client.service_is_ready():
-                req_ft = GetFutureTrajectory.Request()
-                req_ft.t_delay = float(self.future_delay)
-                future_ft = self.future_traj_client.call_async(req_ft)
-                future_ft.add_done_callback(self._future_traj_response_callback)
-            else:
-                if not self._future_traj_warned:
-                    self.get_logger().warn(
-                        "[Controller] /future_task_space not ready; GP 没有未来轨迹信息"
-                    )
-                    self._future_traj_warned = True
 
             # === 控制循环的最后：按节拍触发一次“GP 更新”（本地 + 云端） ===
             if self.gp_active and self.use_gp:
@@ -718,88 +753,87 @@ class CartesianImpedanceController(Node):
                     ddq_base = ddq_est.copy()
                     tau_base = self.tau_residual_filtered.copy()
 
-                # ===== big GP 用基准帧先更新 =====
-                _, _ = self._gp_predict_and_update(
-                    q_base, dq_base, ddq_base,
-                    tau_base,
-                    self.gp_models_big,
-                    update=True
-                )
+                # # ===== big GP 用基准帧先更新 =====
+                # _, _ = self._gp_predict_and_update(
+                #     q_base, dq_base, ddq_base,
+                #     tau_base,
+                #     self.gp_models_big,
+                #     update=True
+                # )
 
                 # ===== 在 Td 附近均匀采样多个 rollout 点 =====
-                self.cloud_rollout_n = 1
-                self.cloud_rollout_span = 0.001
-                Td_center = delay_steps * dt
-                Td_samples = self._sample_rollout_times_uniform(
-                    Td_center,
-                    self.cloud_rollout_n,
-                    self.cloud_rollout_span
-                )
+                # self.cloud_rollout_n = 1
+                # self.cloud_rollout_span = 0.001
+                # Td_center = delay_steps * dt
+                # Td_samples = self._sample_rollout_times_uniform(
+                #     Td_center,
+                #     self.cloud_rollout_n,
+                #     self.cloud_rollout_span
+                # )
 
-                y_list = []
-                var_list = []
-                Td_list = []
+                # y_list = []
+                # var_list = []
+                # Td_list = []
 
-                for Td_i in Td_samples:
-                    q_roll  = q_base + dq_base * Td_i + 0.5 * ddq_base * (Td_i ** 2)
-                    dq_roll = dq_base + ddq_base * Td_i
-                    ddq_roll = ddq_base.copy()
+                # for Td_i in Td_samples:
+                #     q_roll  = q_base + dq_base * Td_i + 0.5 * ddq_base * (Td_i ** 2)
+                #     dq_roll = dq_base + ddq_base * Td_i
+                #     ddq_roll = ddq_base.copy()
 
-                    # ===== 找历史中最近的点 =====
-                    nearest_state, nearest_dist = self._find_nearest_history_state(
-                        q_roll, dq_roll, ddq_roll, use_ddq=False
-                    )
+                #     # ===== 找历史中最近的点 =====
+                #     nearest_state, nearest_dist = self._find_nearest_history_state(
+                #         q_roll, dq_roll, ddq_roll, use_ddq=False
+                #     )
 
-                    if nearest_state is not None:
-                        q_nn = nearest_state["q"].copy()
-                        dq_nn = nearest_state["dq"].copy()
-                        ddq_nn = nearest_state["ddq_est"].copy()
-                    else:
-                        q_nn = q_roll.copy()
-                        dq_nn = dq_roll.copy()
-                        ddq_nn = ddq_roll.copy()
+                #     if nearest_state is not None:
+                #         q_nn = nearest_state["q"].copy()
+                #         dq_nn = nearest_state["dq"].copy()
+                #         ddq_nn = nearest_state["ddq_est"].copy()
+                #     else:
+                #         q_nn = q_roll.copy()
+                #         dq_nn = dq_roll.copy()
+                #         ddq_nn = ddq_roll.copy()
 
-                    y_hat_i, var_i = self._gp_predict_and_update(
-                        q_nn, dq_nn, ddq_nn,
-                        tau_base,
-                        self.gp_models_big,
-                        update=False
-                    )
+                #     y_hat_i, var_i = self._gp_predict_and_update(
+                #         q_nn, dq_nn, ddq_nn,
+                #         tau_base,
+                #         self.gp_models_big,
+                #         update=False
+                #     )
 
-                    y_list.append(y_hat_i.copy())
-                    var_list.append(var_i.copy())
-                    Td_list.append(Td_i)
+                #     y_list.append(y_hat_i.copy())
+                #     var_list.append(var_i.copy())
+                #     Td_list.append(Td_i)
 
-                # ===== variance-weighted fusion =====
-                y_arr = np.asarray(y_list, dtype=float)      # (N, 7)
-                var_arr = np.asarray(var_list, dtype=float)  # (N, 7)
+                # # ===== variance-weighted fusion =====
+                # y_arr = np.asarray(y_list, dtype=float)      # (N, 7)
+                # var_arr = np.asarray(var_list, dtype=float)  # (N, 7)
 
-                eps = 1e-8
-                prec_arr = 1.0 / np.maximum(var_arr, eps)    # (N, 7)
-                w_arr = prec_arr / np.sum(prec_arr, axis=0, keepdims=True)
+                # eps = 1e-8
+                # prec_arr = 1.0 / np.maximum(var_arr, eps)    # (N, 7)
+                # w_arr = prec_arr / np.sum(prec_arr, axis=0, keepdims=True)
 
-                y_hat_cloud = np.sum(y_arr * w_arr, axis=0)
-                var_cloud = 1.0 / np.maximum(np.sum(prec_arr, axis=0), eps)
+                # y_hat_cloud = np.sum(y_arr * w_arr, axis=0)
+                # var_cloud = 1.0 / np.maximum(np.sum(prec_arr, axis=0), eps)
 
-                self.y_hat_cloud = y_hat_cloud.copy()
-                self.var_cloud = var_cloud.copy()
+                # self.y_hat_cloud = y_hat_cloud.copy()
+                # self.var_cloud = var_cloud.copy()
                 
-                # ---------------------------------------------------------
-                # C) 每帧融合（不要只在 else 融合）
-                # ---------------------------------------------------------
-                eps = 1e-8
-                v_l = np.maximum(self.var_local, eps)
-                v_c = np.maximum(self.var_cloud, eps)
+                # # ---------------------------------------------------------
+                # # C) 每帧融合（不要只在 else 融合）
+                # # ---------------------------------------------------------
+                # eps = 1e-8
+                # v_l = np.maximum(self.var_local, eps)
+                # v_c = np.maximum(self.var_cloud, eps)
 
-                prec_l = 1.0 / v_l
-                prec_c = 1.0 / v_c
-                w_l = prec_l / (prec_l + prec_c)
+                # prec_l = 1.0 / v_l
+                # prec_c = 1.0 / v_c
+                # w_l = prec_l / (prec_l + prec_c)
 
-                self.y_hat_combined = w_l * self.y_hat_local + (1.0 - w_l) * self.y_hat_cloud
+                # self.y_hat_combined = w_l * self.y_hat_local + (1.0 - w_l) * self.y_hat_cloud
 
             # tau = tau - self.y_hat_local
-            tau = tau - self.y_hat_combined
-
+            tau = tau
             # publish on topic /effort_command
             self.effort_msg.efforts = tau.tolist()
             self.effort_publisher.publish(self.effort_msg)
@@ -825,6 +859,100 @@ class CartesianImpedanceController(Node):
 
         except Exception as e:
             self.get_logger().error(f'Parameter error: {str(e)}')
+
+    def _get_startup_task_reference(self, t_now, x_curr):
+        """
+        startup 阶段 task-space 插值参考
+        总时间 T 按初始距离 / 参考速度 自适应确定
+        """
+        if not self.startup_interp_started:
+            self.startup_interp_started = True
+            self.startup_interp_start_time = t_now
+            self.startup_x0 = x_curr.copy()
+
+            dist = np.linalg.norm(self.x_start_des - self.startup_x0)
+            self.startup_interp_total_dist = dist
+
+            # 根据距离自适应设置总时间
+            self.startup_interp_duration_adaptive = max(
+                dist / max(self.startup_linear_speed, 1e-4),
+                0.5   # 最短时间，防止距离太小导致过快
+            )
+
+        t_elapsed = (t_now - self.startup_interp_start_time).nanoseconds / 1e9
+        T = max(self.startup_interp_duration_adaptive, 1e-6)
+
+        if t_elapsed >= T:
+            x_ref = self.x_start_des.copy()
+            dx_ref = np.zeros(3, dtype=float)
+            ddx_ref = np.zeros(3, dtype=float)
+            finished = True
+            return x_ref, dx_ref, ddx_ref, finished
+
+        r = np.clip(t_elapsed / T, 0.0, 1.0)
+
+        s = 10*r**3 - 15*r**4 + 6*r**5
+        ds_dt = (30*r**2 - 60*r**3 + 30*r**4) / T
+        d2s_dt2 = (60*r - 180*r**2 + 120*r**3) / (T**2)
+
+        delta = self.x_start_des - self.startup_x0
+
+        x_ref = self.startup_x0 + s * delta
+        dx_ref = ds_dt * delta
+        ddx_ref = d2s_dt2 * delta
+
+        finished = False
+        return x_ref, dx_ref, ddx_ref, finished
+        
+    def _startup_taskspace_control(
+        self,
+        t_now,
+        q, dq, dt,
+        o_t_f,
+        zero_jacobian,
+        zero_jacobian_pinv
+    ):
+        x = o_t_f[:3, 3]
+        dx = zero_jacobian @ dq
+        rotation_matrix = o_t_f[:3, :3]
+
+        # 生成平滑插值参考
+        x_ref, dx_ref_lin, ddx_ref_lin, finished = self._get_startup_task_reference(t_now, x)
+
+        # 位置误差
+        pos_error = x - x_ref
+
+        # 姿态误差：仍然拉向固定目标姿态
+        r_error = -0.5 * (
+            np.cross(rotation_matrix[:, 2], self.rotation_matrix_des[:, 2]) +
+            np.cross(rotation_matrix[:, 1], self.rotation_matrix_des[:, 1]) +
+            np.cross(rotation_matrix[:, 0], self.rotation_matrix_des[:, 0])
+        )
+
+        x_error = np.concatenate([pos_error, r_error])
+
+        dx_ref = np.concatenate([dx_ref_lin, np.zeros(3, dtype=float)])
+        dx_error = dx - dx_ref
+
+        self.startup_x_int_error += x_error * dt
+        self.startup_x_int_error = np.clip(self.startup_x_int_error, -0.05, 0.05)
+
+        F_task = (
+            - self.startup_kp_task * x_error
+            - self.startup_kd_task * dx_error
+            - self.startup_ki_task * self.startup_x_int_error
+        )
+
+        tau = zero_jacobian.T @ F_task
+
+        N = np.eye(7) - zero_jacobian_pinv @ zero_jacobian
+        tau_nullspace = N.T @ (- self.dpn_gains * dq)
+        tau = tau + tau_nullspace
+        tau = tau + self.friction_compensation(dq)
+        tau = np.clip(tau, -50.0, 50.0)
+
+        reached = np.linalg.norm(pos_error) < self.startup_pos_threshold
+        return tau, (finished and reached), np.linalg.norm(pos_error)
 
     def _sample_rollout_times_uniform(self, Td, n, span):
         """
