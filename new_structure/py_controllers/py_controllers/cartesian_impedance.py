@@ -754,83 +754,83 @@ class CartesianImpedanceController(Node):
                     tau_base = self.tau_residual_filtered.copy()
 
                 # # ===== big GP 用基准帧先更新 =====
-                # _, _ = self._gp_predict_and_update(
-                #     q_base, dq_base, ddq_base,
-                #     tau_base,
-                #     self.gp_models_big,
-                #     update=True
-                # )
+                _, _ = self._gp_predict_and_update(
+                    q_base, dq_base, ddq_base,
+                    tau_base,
+                    self.gp_models_big,
+                    update=True
+                )
 
                 # ===== 在 Td 附近均匀采样多个 rollout 点 =====
-                # self.cloud_rollout_n = 1
-                # self.cloud_rollout_span = 0.001
-                # Td_center = delay_steps * dt
-                # Td_samples = self._sample_rollout_times_uniform(
-                #     Td_center,
-                #     self.cloud_rollout_n,
-                #     self.cloud_rollout_span
-                # )
+                self.cloud_rollout_n = 1
+                self.cloud_rollout_span = 0.001
+                Td_center = delay_steps * dt
+                Td_samples = self._sample_rollout_times_uniform(
+                    Td_center,
+                    self.cloud_rollout_n,
+                    self.cloud_rollout_span
+                )
 
-                # y_list = []
-                # var_list = []
-                # Td_list = []
+                y_list = []
+                var_list = []
+                Td_list = []
 
-                # for Td_i in Td_samples:
-                #     q_roll  = q_base + dq_base * Td_i + 0.5 * ddq_base * (Td_i ** 2)
-                #     dq_roll = dq_base + ddq_base * Td_i
-                #     ddq_roll = ddq_base.copy()
+                for Td_i in Td_samples:
+                    q_roll  = q_base + dq_base * Td_i + 0.5 * ddq_base * (Td_i ** 2)
+                    dq_roll = dq_base + ddq_base * Td_i
+                    ddq_roll = ddq_base.copy()
 
-                #     # ===== 找历史中最近的点 =====
-                #     nearest_state, nearest_dist = self._find_nearest_history_state(
-                #         q_roll, dq_roll, ddq_roll, use_ddq=False
-                #     )
+                    # ===== 找历史中最近的点 =====
+                    nearest_state, nearest_dist = self._find_nearest_history_state(
+                        q_roll, dq_roll, ddq_roll, use_ddq=False
+                    )
 
-                #     if nearest_state is not None:
-                #         q_nn = nearest_state["q"].copy()
-                #         dq_nn = nearest_state["dq"].copy()
-                #         ddq_nn = nearest_state["ddq_est"].copy()
-                #     else:
-                #         q_nn = q_roll.copy()
-                #         dq_nn = dq_roll.copy()
-                #         ddq_nn = ddq_roll.copy()
+                    if nearest_state is not None:
+                        q_nn = nearest_state["q"].copy()
+                        dq_nn = nearest_state["dq"].copy()
+                        ddq_nn = nearest_state["ddq_est"].copy()
+                    else:
+                        q_nn = q_roll.copy()
+                        dq_nn = dq_roll.copy()
+                        ddq_nn = ddq_roll.copy()
 
-                #     y_hat_i, var_i = self._gp_predict_and_update(
-                #         q_nn, dq_nn, ddq_nn,
-                #         tau_base,
-                #         self.gp_models_big,
-                #         update=False
-                #     )
+                    y_hat_i, var_i = self._gp_predict_and_update(
+                        q_nn, dq_nn, ddq_nn,
+                        tau_base,
+                        self.gp_models_big,
+                        update=False
+                    )
 
-                #     y_list.append(y_hat_i.copy())
-                #     var_list.append(var_i.copy())
-                #     Td_list.append(Td_i)
+                    y_list.append(y_hat_i.copy())
+                    var_list.append(var_i.copy())
+                    Td_list.append(Td_i)
 
-                # # ===== variance-weighted fusion =====
-                # y_arr = np.asarray(y_list, dtype=float)      # (N, 7)
-                # var_arr = np.asarray(var_list, dtype=float)  # (N, 7)
+                # ===== variance-weighted fusion =====
+                y_arr = np.asarray(y_list, dtype=float)      # (N, 7)
+                var_arr = np.asarray(var_list, dtype=float)  # (N, 7)
 
-                # eps = 1e-8
-                # prec_arr = 1.0 / np.maximum(var_arr, eps)    # (N, 7)
-                # w_arr = prec_arr / np.sum(prec_arr, axis=0, keepdims=True)
+                eps = 1e-8
+                prec_arr = 1.0 / np.maximum(var_arr, eps)    # (N, 7)
+                w_arr = prec_arr / np.sum(prec_arr, axis=0, keepdims=True)
 
-                # y_hat_cloud = np.sum(y_arr * w_arr, axis=0)
-                # var_cloud = 1.0 / np.maximum(np.sum(prec_arr, axis=0), eps)
+                y_hat_cloud = np.sum(y_arr * w_arr, axis=0)
+                var_cloud = 1.0 / np.maximum(np.sum(prec_arr, axis=0), eps)
 
-                # self.y_hat_cloud = y_hat_cloud.copy()
-                # self.var_cloud = var_cloud.copy()
+                self.y_hat_cloud = y_hat_cloud.copy()
+                self.var_cloud = var_cloud.copy()
                 
-                # # ---------------------------------------------------------
-                # # C) 每帧融合（不要只在 else 融合）
-                # # ---------------------------------------------------------
-                # eps = 1e-8
-                # v_l = np.maximum(self.var_local, eps)
-                # v_c = np.maximum(self.var_cloud, eps)
+                # ---------------------------------------------------------
+                # C) 每帧融合（不要只在 else 融合）
+                # ---------------------------------------------------------
+                eps = 1e-8
+                v_l = np.maximum(self.var_local, eps)
+                v_c = np.maximum(self.var_cloud, eps)
 
-                # prec_l = 1.0 / v_l
-                # prec_c = 1.0 / v_c
-                # w_l = prec_l / (prec_l + prec_c)
+                prec_l = 1.0 / v_l
+                prec_c = 1.0 / v_c
+                w_l = prec_l / (prec_l + prec_c)
 
-                # self.y_hat_combined = w_l * self.y_hat_local + (1.0 - w_l) * self.y_hat_cloud
+                self.y_hat_combined = w_l * self.y_hat_local + (1.0 - w_l) * self.y_hat_cloud
 
             # tau = tau - self.y_hat_local
             tau = tau
@@ -859,6 +859,45 @@ class CartesianImpedanceController(Node):
 
         except Exception as e:
             self.get_logger().error(f'Parameter error: {str(e)}')
+
+    def _rollout_with_frozen_tau(
+        self,
+        q0,
+        dq0,
+        Td,
+        tau_cmd,
+        mass_matrix,
+        coriolis_matrix,
+        gravity_vec,
+        tau_res_hat=None,
+        n_steps=5,
+    ):
+        q_pred = q0.copy()
+        dq_pred = dq0.copy()
+        ddq_pred = np.zeros(7, dtype=float)
+
+        if tau_res_hat is None:
+            tau_res_hat = np.zeros(7, dtype=float)
+        else:
+            tau_res_hat = np.asarray(tau_res_hat, dtype=float)
+
+        n_steps = max(1, int(n_steps))
+        dt_r = max(Td / n_steps, 1e-4)
+
+        for _ in range(n_steps):
+            tau_fric = self.friction_compensation(dq_pred)
+
+            rhs = tau_cmd - (coriolis_matrix @ dq_pred) - gravity_vec - tau_fric - tau_res_hat
+
+            try:
+                ddq_pred = np.linalg.solve(mass_matrix, rhs)
+            except np.linalg.LinAlgError:
+                ddq_pred = np.linalg.pinv(mass_matrix) @ rhs
+
+            dq_pred = dq_pred + ddq_pred * dt_r
+            q_pred = q_pred + dq_pred * dt_r
+
+        return q_pred, dq_pred, ddq_pred
 
     def _get_startup_task_reference(self, t_now, x_curr):
         """
