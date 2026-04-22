@@ -332,6 +332,20 @@ class CartesianImpedanceController(Node):
         self.cloud_delay_steps = 100
         self.y_hat_cloud_buffer = deque(maxlen=self.cloud_delay_steps)
         
+        #future prediction state comparison
+        self.prev_q_pred = None
+        self.prev_dq_pred = None
+        self.prev_pred_time = None
+
+        self.pred_time_history = []
+        self.q_pred_history = []
+        self.dq_pred_history = []
+        self.q_future_actual_history = []
+        self.dq_future_actual_history = []
+        self.q_pred_err_history = []
+        self.dq_pred_err_history = []
+
+        
         # cloud queue
         self.cloud_queue = deque(maxlen=500)        # 存 cloud rollout 点 (7,)
         self.cloud_var_queue = deque(maxlen=500)    # 存对应方差 (7,)
@@ -533,46 +547,7 @@ class CartesianImpedanceController(Node):
 
                 ddq = (dq - self.dq_buffer) / dt
                 self.dq_buffer = dq.copy()                    
-
-            # # joint position control (for joint position adjustment before trajectory_publisher starts to work)
-            # if self.joint_position_control_active and not self.joint_position_adjusted:
-            #     # check if joint positions are close enough to desired positions
-            #     joint_error = np.linalg.norm(q - self.q_des)
-            #     if joint_error < self.joint_position_threshold:
-            #         self.joint_position_adjusted = True
-            #         self.get_logger().info(f'Joint positions adjusted! Error: {joint_error:.6f}')
-                    
-            #         # start trajectory by calling service
-            #         if not self.trajectory_started:
-            #             # start transition, clear ros2_control interface buffer
-            #             tau = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
-            #             self.effort_msg.efforts = tau.tolist()
-            #             self.effort_publisher.publish(self.effort_msg)
-            #             self.start_trajectory()
-            #     else:
-            #         # PD control for joint positions
-            #         e_q  = (self.q_des - q)
-            #         e_dq = (self.dq_des - dq)
-
-            #         tau_unsat = self.k_pd * e_q + self.d_pd * e_dq + self.i_pid * self.i_error
-            #         tau_sat   = np.clip(tau_unsat, -50.0, 50.0)
-
-            #         # anti-windup gain（每关节都可以不同）
-            #         k_aw = 15.0  # 典型 1~20 之间调；越大回退越快
-
-            #         # back-calculation: 积分更新（注意是用“力矩差”回退）
-            #         self.i_error = self.i_error + (e_q + k_aw * (tau_sat - tau_unsat)) * dt
-
-            #         # final command
-            #         tau = self.k_pd * e_q + self.d_pd * e_dq + self.i_pid * self.i_error
-            #         tau = np.clip(tau, -50.0, 50.0)
-                    
-            #         # publish effort command
-            #         self.effort_msg.efforts = tau.tolist()
-            #         self.effort_publisher.publish(self.effort_msg)
-
-            #         return 
-
+                
             # get O_T_F, mass, coriolis, flange-framed zero jacobian matrix J(q) and dJ(q)
             o_t_f_array = np.array(msg.o_t_f)                           # vectorized 4x4 pose matrix in flange frame, column-major
             mass_matrix_array = np.array(msg.mass)                      # vectorized 7x7 mass matrix, column-major
@@ -584,6 +559,7 @@ class CartesianImpedanceController(Node):
             o_t_f = o_t_f_array.reshape(4, 4, order='F')                    # 4x4 pose matrix in flange frame, column-major
             mass_matrix = mass_matrix_array.reshape(7, 7, order='F')        # 7x7
             coriolis_matrix = np.diag(coriolis_matrix_array)                # 7x7
+            coriolis_vec = np.array(msg.coriolis, dtype=float)
             zero_jacobian = zero_jacobian_array.reshape(6, 7, order='F')    # 6x7
             zero_jacobian_t = zero_jacobian.T                               # 7x6, transpose of zero_jacobian
             # zero_jacobian_pinv = np.linalg.pinv(zero_jacobian)              # 7x6, pseudoinverse obtained by SVD
@@ -615,6 +591,23 @@ class CartesianImpedanceController(Node):
             if not self.task_command_received:
                 print("not received")
                 return  
+
+            # ===== compare previous-step prediction with current actual =====
+            if self.data_recording_enabled and self.prev_q_pred is not None and self.prev_dq_pred is not None:
+                q_err = self.prev_q_pred - q
+                dq_err = self.prev_dq_pred - dq
+
+                self.pred_time_history.append(self.prev_pred_time)
+                self.q_pred_history.append(self.prev_q_pred.tolist())
+                self.dq_pred_history.append(self.prev_dq_pred.tolist())
+                self.q_future_actual_history.append(q.tolist())
+                self.dq_future_actual_history.append(dq.tolist())
+                self.q_pred_err_history.append(q_err.tolist())
+                self.dq_pred_err_history.append(dq_err.tolist())
+
+                self.prev_q_pred = None
+                self.prev_dq_pred = None
+                self.prev_pred_time = None
 
             # cartesian impedance control (after joint position adjustment)   
 
@@ -702,6 +695,39 @@ class CartesianImpedanceController(Node):
             tau = tau + tau_nullspace
             tau = tau + self.friction_compensation(dq)
 
+            # if self.data_recording_enabled:
+            #     q_pred_next, dq_pred_next, ddq_pred_next = self._make_future_prediction(
+            #         q=q.copy(),
+            #         dq=dq.copy(),
+            #         tau_cmd=tau.copy(),
+            #         mass_matrix=mass_matrix,
+            #         coriolis_vec = coriolis_vec,
+            #         gravity_vec=gravity_measured,
+            #         tau_res_hat=np.zeros(7),
+            #         Td=dt,
+            #         n_steps=1,
+            #     )
+
+            #     self.prev_q_pred = q_pred_next.copy()
+            #     self.prev_dq_pred = dq_pred_next.copy()
+            #     self.prev_pred_time = t_elapsed
+            if self.data_recording_enabled:
+                Td = dt
+
+                # 用测得/估计的当前关节加速度做常加速度外推
+                ddq_used = ddq_est.copy()
+
+                dq_pred_next = dq.copy() + ddq_used * Td
+                q_pred_next = q.copy() + dq.copy() * Td + 0.5 * ddq_used * (Td ** 2)
+
+                self.prev_q_pred = q_pred_next.copy()
+                self.prev_dq_pred = dq_pred_next.copy()
+                self.prev_pred_time = t_elapsed
+            else:
+                self.prev_q_pred = None
+                self.prev_dq_pred = None
+                self.prev_pred_time = None
+
             # === 计算残差 ===
             tau_residual = tau_measured - tau - gravity_measured
             if self.data_recording_enabled:
@@ -722,15 +748,15 @@ class CartesianImpedanceController(Node):
             if self.gp_active and self.use_gp:
                 self.gp_counter += 1
                 tick = (self.gp_counter % self.gp_stride == 0)
-                # ---------------------------------------------------------
-                y_hat_local, var_local = self._gp_predict_and_update(
-                    self.q, dq, self.ddq_des_joint,
-                    self.tau_residual_filtered,
-                    self.gp_models_small,
-                    update=True
-                )
-                self.y_hat_local = y_hat_local
-                self.var_local = var_local
+                # # ---------------------------------------------------------
+                # y_hat_local, var_local = self._gp_predict_and_update(
+                #     self.q, dq, self.ddq_des_joint,
+                #     self.tau_residual_filtered,
+                #     self.gp_models_small,
+                #     update=True
+                # )
+                # self.y_hat_local = y_hat_local
+                # self.var_local = var_local
 
                 # Td = float(self.future_delay)
                 # delay_steps = max(1, int(self.delay_steps))
@@ -775,35 +801,35 @@ class CartesianImpedanceController(Node):
                 var_list = []
                 Td_list = []
 
-                for Td_i in Td_samples:
-                    q_roll  = q_base + dq_base * Td_i + 0.5 * ddq_base * (Td_i ** 2)
-                    dq_roll = dq_base + ddq_base * Td_i
-                    ddq_roll = ddq_base.copy()
+                # for Td_i in Td_samples:
+                #     q_roll  = q_base + dq_base * Td_i + 0.5 * ddq_base * (Td_i ** 2)
+                #     dq_roll = dq_base + ddq_base * Td_i
+                #     ddq_roll = ddq_base.copy()
 
-                    # ===== 找历史中最近的点 =====
-                    nearest_state, nearest_dist = self._find_nearest_history_state(
-                        q_roll, dq_roll, ddq_roll, use_ddq=False
-                    )
+                #     # ===== 找历史中最近的点 =====
+                #     nearest_state, nearest_dist = self._find_nearest_history_state(
+                #         q_roll, dq_roll, ddq_roll, use_ddq=False
+                #     )
 
-                    if nearest_state is not None:
-                        q_nn = nearest_state["q"].copy()
-                        dq_nn = nearest_state["dq"].copy()
-                        ddq_nn = nearest_state["ddq_est"].copy()
-                    else:
-                        q_nn = q_roll.copy()
-                        dq_nn = dq_roll.copy()
-                        ddq_nn = ddq_roll.copy()
+                #     if nearest_state is not None:
+                #         q_nn = nearest_state["q"].copy()
+                #         dq_nn = nearest_state["dq"].copy()
+                #         ddq_nn = nearest_state["ddq_est"].copy()
+                #     else:
+                #         q_nn = q_roll.copy()
+                #         dq_nn = dq_roll.copy()
+                #         ddq_nn = ddq_roll.copy()
 
-                    y_hat_i, var_i = self._gp_predict_and_update(
-                        q_nn, dq_nn, ddq_nn,
-                        tau_base,
-                        self.gp_models_big,
-                        update=False
-                    )
+                y_hat_i, var_i = self._gp_predict_and_update(
+                    q_pred_next, dq_pred_next, ddq,
+                    tau_base,
+                    self.gp_models_big,
+                    update=False
+                )
 
-                    y_list.append(y_hat_i.copy())
-                    var_list.append(var_i.copy())
-                    Td_list.append(Td_i)
+                    # y_list.append(y_hat_i.copy())
+                    # var_list.append(var_i.copy())
+                    # Td_list.append(Td_i)
 
                 # ===== variance-weighted fusion =====
                 y_arr = np.asarray(y_list, dtype=float)      # (N, 7)
@@ -816,8 +842,8 @@ class CartesianImpedanceController(Node):
                 y_hat_cloud = np.sum(y_arr * w_arr, axis=0)
                 var_cloud = 1.0 / np.maximum(np.sum(prec_arr, axis=0), eps)
 
-                self.y_hat_cloud = y_hat_cloud.copy()
-                self.var_cloud = var_cloud.copy()
+                # self.y_hat_cloud = y_hat_cloud.copy()
+                # self.var_cloud = var_cloud.copy()
                 
                 # ---------------------------------------------------------
                 # C) 每帧融合（不要只在 else 融合）
@@ -849,7 +875,7 @@ class CartesianImpedanceController(Node):
                 self.tau_measured_history.append(np.array(msg.effort_measured).tolist())
                 self.gravity_history.append(np.array(msg.gravity).tolist())
                 self.q_history.append(q.tolist())
-                self.dq_history.append(dq.tolist())
+                self.dq_history.append(dq_raw.tolist())
 
                 self.y_hat_history.append(self.y_hat_combined.tolist())      # combined
                 self.y_hat_local_history.append(self.y_hat_local.tolist())    # 上一帧或刚更新的 local
@@ -861,16 +887,7 @@ class CartesianImpedanceController(Node):
             self.get_logger().error(f'Parameter error: {str(e)}')
 
     def _rollout_with_frozen_tau(
-        self,
-        q0,
-        dq0,
-        Td,
-        tau_cmd,
-        mass_matrix,
-        coriolis_matrix,
-        gravity_vec,
-        tau_res_hat=None,
-        n_steps=5,
+        self, q0, dq0, Td, tau_cmd, mass_matrix, coriolis_vec, gravity_vec, tau_res_hat=None, n_steps=5
     ):
         q_pred = q0.copy()
         dq_pred = dq0.copy()
@@ -878,25 +895,41 @@ class CartesianImpedanceController(Node):
 
         if tau_res_hat is None:
             tau_res_hat = np.zeros(7, dtype=float)
-        else:
-            tau_res_hat = np.asarray(tau_res_hat, dtype=float)
 
-        n_steps = max(1, int(n_steps))
-        dt_r = max(Td / n_steps, 1e-4)
+        dt_r = max(Td / max(1, n_steps), 1e-4)
 
-        for _ in range(n_steps):
+        for _ in range(max(1, n_steps)):
             tau_fric = self.friction_compensation(dq_pred)
-
-            rhs = tau_cmd - (coriolis_matrix @ dq_pred) - gravity_vec - tau_fric - tau_res_hat
-
-            try:
-                ddq_pred = np.linalg.solve(mass_matrix, rhs)
-            except np.linalg.LinAlgError:
-                ddq_pred = np.linalg.pinv(mass_matrix) @ rhs
-
+            rhs = tau_cmd - coriolis_vec - gravity_vec - tau_fric - tau_res_hat
+            ddq_pred = np.linalg.solve(mass_matrix, rhs)
             dq_pred = dq_pred + ddq_pred * dt_r
             q_pred = q_pred + dq_pred * dt_r
 
+        return q_pred, dq_pred, ddq_pred
+
+    def _make_future_prediction(
+        self,
+        q,
+        dq,
+        tau_cmd,
+        mass_matrix,
+        coriolis_vec,
+        gravity_vec,
+        tau_res_hat,
+        Td,
+        n_steps=5,
+    ):
+        q_pred, dq_pred, ddq_pred = self._rollout_with_frozen_tau(
+            q0=q,
+            dq0=dq,
+            Td=Td,
+            tau_cmd=tau_cmd,
+            mass_matrix=mass_matrix,
+            coriolis_vec=coriolis_vec,
+            gravity_vec=gravity_vec,
+            tau_res_hat=tau_res_hat,
+            n_steps=n_steps,
+        )
         return q_pred, dq_pred, ddq_pred
 
     def _get_startup_task_reference(self, t_now, x_curr):
@@ -1012,51 +1045,6 @@ class CartesianImpedanceController(Node):
         q_future  = q + dq * delay + 0.5 * ddq_des * delay**2
         return q_future, dq_future
 
-    def _predict_future_joint_from_taskspace(
-        self,
-        q0,
-        dq0,
-        x_f,
-        dx_f,
-        ddx_f,
-        mass_matrix,
-        jacobian,
-        djacobian,
-        delay
-    ):
-        """
-        根据 future task-space reference 预测 delay 后的 joint state
-        使用单步 differential IK:
-            dq_f  = J# dx_f
-            ddq_f = J# (ddx_f - dJ dq_f)
-            q_f   = q0 + dq_f * delay
-        """
-        lam = self.dls_lambda
-        J_pinv = self.dls_dyn_pinv(jacobian, mass_matrix, lam)   # 7x5
-
-        dx_f_5 = dx_f[:5]
-        ddx_f_5 = ddx_f[:5]
-
-        dq_f = J_pinv @ dx_f_5
-        ddq_f = J_pinv @ (ddx_f_5 - djacobian @ dq_f)
-
-        q_f = q0 + dq_f * delay
-
-        return q_f, dq_f, ddq_f
-
-    def _sample_future_task_space(self, dx_f, ddx_f, n_samples=10, sigma=0.02):
-        samples = []
-        for _ in range(n_samples):
-            dx_f_i  = dx_f.copy()
-            ddx_f_i = ddx_f.copy()
-
-            # --- 只扰动任务空间前5维（你的控制任务是5维）
-            dx_f_i[:5]  += np.random.normal(0, sigma, size=5)
-            ddx_f_i[:5] += np.random.normal(0, sigma, size=5)
-
-            samples.append((dx_f_i, ddx_f_i))
-        return samples
-
     def _build_gp_feature(self, q, dq_des_joint, ddq_des_joint=None):
         """
         和 local GP 使用同一套输入特征。
@@ -1066,102 +1054,6 @@ class CartesianImpedanceController(Node):
         x_full = np.concatenate([q, dq_des_joint]).astype(np.float32)
         return x_full
     
-    def _query_local_gp_history(self, x_query):
-        """
-        在固定长度历史池中找最近邻，用历史记录的预测值做加权平均。
-        返回:
-            y_hist: (7,)
-            var_hist: (7,)
-            alpha_hist: float  历史项建议融合权重
-        """
-        if len(self.local_gp_history) < self.gp_hist_min_points:
-            return np.zeros(7, dtype=float), np.ones(7, dtype=float) * 1e6, 0.0
-
-        # 取一个统一的标准化尺度，这里用 joint1 的 stats
-        ref_pack = self.gp_models_small.get(1, None)
-        if ref_pack is None:
-            return np.zeros(7, dtype=float), np.ones(7, dtype=float) * 1e6, 0.0
-
-        Xm, Xs, Ym, Ys = ref_pack["stats"]
-        x_dim = ref_pack["x_dim"]
-
-        Xm = np.asarray(Xm[:x_dim], dtype=np.float32)
-        Xs = np.asarray(Xs[:x_dim], dtype=np.float32)
-        Xs = np.where(np.abs(Xs) < 1e-8, 1.0, Xs)
-
-        xq = ((x_query[:x_dim] - Xm) / Xs).astype(np.float32)
-
-        dists = []
-        ys = []
-        vars_ = []
-
-        for item in self.local_gp_history:
-            xh = item["x"][:x_dim]
-            yh = item["y"]
-            vh = item["var"]
-
-            dist = np.linalg.norm(xq - xh)
-            dists.append(dist)
-            ys.append(yh)
-            vars_.append(vh)
-
-        dists = np.asarray(dists, dtype=float)
-        ys = np.asarray(ys, dtype=float)         # (N, 7)
-        vars_ = np.asarray(vars_, dtype=float)   # (N, 7)
-
-        k = min(self.gp_hist_topk, len(dists))
-        idx = np.argpartition(dists, k - 1)[:k]
-
-        d_k = dists[idx]
-        y_k = ys[idx]
-        v_k = vars_[idx]
-
-        # ===== 用方差 PoE / precision weighting 替代距离加权 =====
-        eps = 1e-8
-
-        # precision: (k, 7)
-        prec_k = 1.0 / np.maximum(v_k, eps)
-
-        # 归一化后的每关节权重: (k, 7)
-        w = prec_k / (np.sum(prec_k, axis=0, keepdims=True) + eps)
-
-        # 历史融合预测：每个关节单独按 precision 加权
-        y_hist = np.sum(y_k * w, axis=0)   # (7,)
-
-        # PoE 合成后的历史方差：1 / sum(precision)
-        var_hist = 1.0 / np.maximum(np.sum(prec_k, axis=0), eps)   # (7,)
-
-        # 用历史融合后的整体置信度决定 alpha
-        # 方差越小，alpha 越大
-        conf_hist = 1.0 / (np.mean(var_hist) + eps)
-        alpha_hist = self.gp_hist_alpha_max * (conf_hist / (conf_hist + 1.0))
-        alpha_hist = float(np.clip(alpha_hist, 0.0, self.gp_hist_alpha_max))
-
-        return y_hist, var_hist, alpha_hist
-    
-    def _append_local_gp_history(self, x_raw, y_hat, y_var):
-        """
-        把当前 local GP 查询点和预测结果塞进固定长度历史池
-        """
-        ref_pack = self.gp_models_small.get(1, None)
-        if ref_pack is None:
-            return
-
-        Xm, Xs, Ym, Ys = ref_pack["stats"]
-        x_dim = ref_pack["x_dim"]
-
-        Xm = np.asarray(Xm[:x_dim], dtype=np.float32)
-        Xs = np.asarray(Xs[:x_dim], dtype=np.float32)
-        Xs = np.where(np.abs(Xs) < 1e-8, 1.0, Xs)
-
-        x_std = ((x_raw[:x_dim] - Xm) / Xs).astype(np.float32)
-
-        self.local_gp_history.append({
-            "x": x_std.copy(),
-            "y": np.asarray(y_hat, dtype=float).copy(),
-            "var": np.asarray(y_var, dtype=float).copy(),
-        })
-
     #friction compensation
     def friction_compensation(self, dq):
         dq = np.asarray(dq, dtype=float)
@@ -1560,17 +1452,23 @@ class CartesianImpedanceController(Node):
                 self.dq_history,
                 self.dq_des_joint_history,
                 self.ddq_des_joint_history,
-                self.y_hat_history,            # <--- 新增
-                self.tau_residual_history,     # <--- 新增
+                self.y_hat_history,
+                self.tau_residual_history,
                 self.tau_residual_raw_history,
+                self.pred_time_history,
+                self.q_pred_history,
+                self.dq_pred_history,
+                self.q_future_actual_history,
+                self.dq_future_actual_history,
+                self.q_pred_err_history,
+                self.dq_pred_err_history,
             ]
-
-            min_len = min(len(s) for s in series_list)
+            min_len = len(self.time_history)
 
             with open(filename, 'w', newline='') as csvfile:
                 writer = csv.writer(csvfile)
 
-                header = ['Time(s)']
+                header = ['Time(s)', 'PredTime(s)']
                 n_j = len(self.tau_history[0])  # 通常是7
                 header.extend([f'tau_{i+1}' for i in range(n_j)])
                 header.extend(['x_actual', 'y_actual', 'z_actual'])
@@ -1589,61 +1487,102 @@ class CartesianImpedanceController(Node):
                 header.extend([f'y_hat_mem_{i+1}' for i in range(7)])    # cloud
                 header.extend([f'tau_residual_{i+1}' for i in range(7)])
                 header.extend([f'tau_residual_raw_{i+1}' for i in range(7)])
+                header.extend([f'q_pred_{i+1}' for i in range(7)])
+                header.extend([f'dq_pred_{i+1}' for i in range(7)])
+                header.extend([f'q_future_actual_{i+1}' for i in range(7)])
+                header.extend([f'dq_future_actual_{i+1}' for i in range(7)])
+                header.extend([f'q_pred_err_{i+1}' for i in range(7)])
+                header.extend([f'dq_pred_err_{i+1}' for i in range(7)])
                 writer.writerow(header)
 
                 for i in range(min_len):
                     row = [self.time_history[i]]
+
+                    if i < len(self.pred_time_history):
+                        row.append(self.pred_time_history[i])
+                    else:
+                        row.append(0.0)
+
                     row.extend(self.tau_history[i])
                     row.extend(self.x_history[i][:3])
                     row.extend(self.x_des_history[i][:3])
-                    row.extend(self.dx_history[i])           # 已是3维
-                    row.extend(self.dx_des_history[i])       # 已是3维
+                    row.extend(self.dx_history[i])
+                    row.extend(self.dx_des_history[i])
                     row.extend(self.tau_measured_history[i])
                     row.extend(self.gravity_history[i])
                     row.extend(self.q_history[i])
                     row.extend(self.dq_history[i])
 
-                    # 防御性处理：如果某次未记录到 dq_des/ddq_des，填零
                     if i < len(self.dq_des_joint_history):
                         row.extend(self.dq_des_joint_history[i])
                     else:
-                        row.extend([0.0]*7)
+                        row.extend([0.0] * 7)
 
                     if i < len(self.ddq_des_joint_history):
                         row.extend(self.ddq_des_joint_history[i])
                     else:
-                        row.extend([0.0]*7)
-                    
-                    # y_hat & tau_residual 新增（也做缺省保护）
+                        row.extend([0.0] * 7)
+
                     if i < len(self.y_hat_history):
                         row.extend(self.y_hat_history[i])
                     else:
-                        row.extend([0.0]*7)
+                        row.extend([0.0] * 7)
 
                     if i < len(self.y_hat_local_history):
                         row.extend(self.y_hat_local_history[i])
                     else:
-                        row.extend([0.0]*7)
+                        row.extend([0.0] * 7)
 
                     if i < len(self.y_hat_cloud_history):
                         row.extend(self.y_hat_cloud_history[i])
                     else:
-                        row.extend([0.0]*7)
+                        row.extend([0.0] * 7)
 
                     if i < len(self.y_hat_mem_history):
                         row.extend(self.y_hat_mem_history[i])
                     else:
-                        row.extend([0.0]*7)
-                    
+                        row.extend([0.0] * 7)
+
                     if i < len(self.tau_residual_history):
                         row.extend(self.tau_residual_history[i])
                     else:
-                        row.extend([0.0]*7)
-                    
+                        row.extend([0.0] * 7)
+
                     if i < len(self.tau_residual_raw_history):
                         row.extend(self.tau_residual_raw_history[i])
                     else:
-                        row.extend([0.0]*7)
+                        row.extend([0.0] * 7)
+
+                    if i < len(self.q_pred_history):
+                        row.extend(self.q_pred_history[i])
+                    else:
+                        row.extend([0.0] * 7)
+
+                    if i < len(self.dq_pred_history):
+                        row.extend(self.dq_pred_history[i])
+                    else:
+                        row.extend([0.0] * 7)
+
+                    if i < len(self.q_future_actual_history):
+                        row.extend(self.q_future_actual_history[i])
+                    else:
+                        row.extend([0.0] * 7)
+
+                    if i < len(self.dq_future_actual_history):
+                        row.extend(self.dq_future_actual_history[i])
+                    else:
+                        row.extend([0.0] * 7)
+
+                    if i < len(self.q_pred_err_history):
+                        row.extend(self.q_pred_err_history[i])
+                    else:
+                        row.extend([0.0] * 7)
+
+                    if i < len(self.dq_pred_err_history):
+                        row.extend(self.dq_pred_err_history[i])
+                    else:
+                        row.extend([0.0] * 7)
+
                     writer.writerow(row)
 
             self.get_logger().info(f'Successfully saved {min_len} data points to {filename}')
