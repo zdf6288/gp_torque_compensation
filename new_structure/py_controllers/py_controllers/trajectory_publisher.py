@@ -144,7 +144,7 @@ class TrajectoryPublisher(Node):
         response.dx_des = dx_des
         response.ddx_des = ddx_des
         return response
-
+    
     def stateCallback(self, msg):
         """callback function of /state_parameter subscriber"""
         if not self.trajectory_enabled:

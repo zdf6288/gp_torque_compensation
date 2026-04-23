@@ -436,6 +436,19 @@ class CartesianImpedanceController(Node):
         # 调试时可以看看
         self.get_logger().debug(f"Got future traj: x={x_f[:3]}")
     
+    def request_future_trajectory(self, t_delay):
+        if not self.future_traj_client.service_is_ready():
+            if not self._future_traj_warned:
+                self.get_logger().warn("/future_task_space service not ready")
+                self._future_traj_warned = True
+            return
+
+        req = GetFutureTrajectory.Request()
+        req.t_delay = float(t_delay)
+
+        future = self.future_traj_client.call_async(req)
+        future.add_done_callback(self._future_traj_response_callback)
+
     def gp_mode_callback(self, msg):
         self.gp_mode = msg.data
         self.get_logger().info(f"[Controller] GP mode switched to: {self.gp_mode}")
@@ -525,7 +538,7 @@ class CartesianImpedanceController(Node):
                         dq_raw, self.dq_filt, dt, self.dq_lpf_hz
                     )
 
-                dq = self.dq_filt.copy()
+                dq = dq_raw
                 self.dq = dq
 
                 # ===== estimate joint acceleration from measured dq =====
@@ -591,23 +604,6 @@ class CartesianImpedanceController(Node):
             if not self.task_command_received:
                 print("not received")
                 return  
-
-            # ===== compare previous-step prediction with current actual =====
-            if self.data_recording_enabled and self.prev_q_pred is not None and self.prev_dq_pred is not None:
-                q_err = self.prev_q_pred - q
-                dq_err = self.prev_dq_pred - dq
-
-                self.pred_time_history.append(self.prev_pred_time)
-                self.q_pred_history.append(self.prev_q_pred.tolist())
-                self.dq_pred_history.append(self.prev_dq_pred.tolist())
-                self.q_future_actual_history.append(q.tolist())
-                self.dq_future_actual_history.append(dq.tolist())
-                self.q_pred_err_history.append(q_err.tolist())
-                self.dq_pred_err_history.append(dq_err.tolist())
-
-                self.prev_q_pred = None
-                self.prev_dq_pred = None
-                self.prev_pred_time = None
 
             # cartesian impedance control (after joint position adjustment)   
 
@@ -688,6 +684,23 @@ class CartesianImpedanceController(Node):
                 - jacobian_t @ pd_term[:5]
             )
 
+            if self.data_recording_enabled and self.prev_q_pred is not None and self.prev_dq_pred is not None:
+                q_err = self.prev_q_pred - q
+                dq_err = self.prev_dq_pred - dq
+
+                self.pred_time_history.append(self.prev_pred_time)
+                self.q_pred_history.append(self.prev_q_pred.tolist())
+                self.dq_pred_history.append(self.prev_dq_pred.tolist())
+                self.q_future_actual_history.append(q.tolist())
+                self.dq_future_actual_history.append(dq_des_joint.tolist())
+                self.q_pred_err_history.append(q_err.tolist())
+                self.dq_pred_err_history.append(dq_err.tolist())
+
+                self.prev_q_pred = None
+                self.prev_dq_pred = None
+                self.prev_pred_time = None
+            
+
             # tau_nullspace = ((np.eye(7) - zero_jacobian_pinv @ zero_jacobian) 
             #     @ (self.dpn_gains * (self.dq_des - dq)))
             N = np.eye(7) - zero_jacobian_pinv @ zero_jacobian   # or using your 5DoF jacobian
@@ -696,37 +709,76 @@ class CartesianImpedanceController(Node):
             tau = tau + self.friction_compensation(dq)
 
             # if self.data_recording_enabled:
-            #     q_pred_next, dq_pred_next, ddq_pred_next = self._make_future_prediction(
-            #         q=q.copy(),
-            #         dq=dq.copy(),
-            #         tau_cmd=tau.copy(),
-            #         mass_matrix=mass_matrix,
-            #         coriolis_vec = coriolis_vec,
-            #         gravity_vec=gravity_measured,
-            #         tau_res_hat=np.zeros(7),
-            #         Td=dt,
-            #         n_steps=1,
-            #     )
+            #     Td = dt   # 或 dt
+
+            #     ddq_used = ddq_est.copy()
+            #     dq_pred_nominal = dq.copy() + ddq_used * Td
+
+            #     # ===== 当期望关节加速度接近 0 时，减少预测速度增量，防止过冲 =====
+            #     ddq_des_abs = np.abs(self.ddq_des_joint)
+
+            #     # 阈值：小于这个值就认为“接近 0”
+            #     ddq_zero_th = 0.5   # 可调，单位 rad/s^2
+
+            #     # 最小保留比例，避免压得太狠
+            #     alpha_min = 0.05     # 可调，0~1
+
+            #     # alpha in [alpha_min, 1]
+            #     alpha = np.ones(7, dtype=float)
+            #     mask = ddq_des_abs < ddq_zero_th
+            #     alpha[mask] = alpha_min + (1.0 - alpha_min) * (ddq_des_abs[mask] / ddq_zero_th)
+
+            #     # 只压缩“预测增量”
+            #     dq_pred_next = dq.copy() + alpha * (dq_pred_nominal - dq.copy())
+
+            #     q_pred_next = q.copy() + dq_pred_next * Td
 
             #     self.prev_q_pred = q_pred_next.copy()
             #     self.prev_dq_pred = dq_pred_next.copy()
             #     self.prev_pred_time = t_elapsed
+            # if self.data_recording_enabled:
+            #     Td = dt
+
+            #     # 用测得/估计的当前关节加速度做常加速度外推
+            #     ddq_used = ddq_est.copy()
+
+            #     dq_pred_next = dq.copy() + ddq_used * Td
+            #     q_pred_next = q.copy() + dq.copy() * Td + 0.5 * ddq_used * (Td ** 2)
+
+            #     self.prev_q_pred = q_pred_next.copy()
+            #     self.prev_dq_pred = dq_pred_next.copy()
+            #     self.prev_pred_time = t_elapsed
+            # else:
+            #     self.prev_q_pred = None
+            #     self.prev_dq_pred = None
+            #     self.prev_pred_time = None
+            # q_pred_next = q.copy()
+            # dq_pred_next = dq.copy()
+
             if self.data_recording_enabled:
-                Td = dt
+                Td = dt   # 或者固定 0.001
+                self.request_future_trajectory(Td)
 
-                # 用测得/估计的当前关节加速度做常加速度外推
-                ddq_used = ddq_est.copy()
+                if self._latest_future_traj is not None:
+                    x_f = np.array(self._latest_future_traj["x_des"], dtype=float)
+                    dx_f = np.array(self._latest_future_traj["dx_des"], dtype=float)
+                    ddx_f = np.array(self._latest_future_traj["ddx_des"], dtype=float)
+                    dq_future_ref = jacobian_pinv @ dx_f[0:5]
+                    ddq_future_ref = jacobian_pinv @ (ddx_f[0:5] - djacobian @ dq)
 
-                dq_pred_next = dq.copy() + ddq_used * Td
-                q_pred_next = q.copy() + dq.copy() * Td + 0.5 * ddq_used * (Td ** 2)
-
-                self.prev_q_pred = q_pred_next.copy()
-                self.prev_dq_pred = dq_pred_next.copy()
-                self.prev_pred_time = t_elapsed
-            else:
-                self.prev_q_pred = None
-                self.prev_dq_pred = None
-                self.prev_pred_time = None
+                    dq_pred_next = dq_future_ref.copy()
+                    q_pred_next = q.copy()
+                    print(dq_pred_next * dt)
+                    # dq_pred_next = dq_des_joint
+                    # q_pred_next = q.copy()
+                    self.prev_q_pred = q_pred_next.copy()
+                    self.prev_dq_pred = dq_pred_next.copy()
+                    self.prev_pred_time = t_elapsed
+            
+            # else:
+                # self.prev_q_pred = None
+                # self.prev_dq_pred = None
+                # self.prev_pred_time = None
 
             # === 计算残差 ===
             tau_residual = tau_measured - tau - gravity_measured
@@ -738,7 +790,7 @@ class CartesianImpedanceController(Node):
             self.state_buffer.append({
                 "t": t_elapsed,
                 "q": q.copy(),
-                "dq": dq.copy(),
+                "dq": dq_des_joint.copy(),
                 "ddq_est": ddq_est.copy(),
                 "tau_res": self.tau_residual_filtered.copy(),
             })
@@ -749,18 +801,18 @@ class CartesianImpedanceController(Node):
                 self.gp_counter += 1
                 tick = (self.gp_counter % self.gp_stride == 0)
                 # # ---------------------------------------------------------
-                # y_hat_local, var_local = self._gp_predict_and_update(
-                #     self.q, dq, self.ddq_des_joint,
-                #     self.tau_residual_filtered,
-                #     self.gp_models_small,
-                #     update=True
-                # )
-                # self.y_hat_local = y_hat_local
-                # self.var_local = var_local
+                y_hat_local, var_local = self._gp_predict_and_update(
+                    self.q, dq, self.ddq_des_joint,
+                    self.tau_residual_filtered,
+                    self.gp_models_small,
+                    update=True
+                )
+                self.y_hat_local = y_hat_local
+                self.var_local = var_local
 
                 # Td = float(self.future_delay)
                 # delay_steps = max(1, int(self.delay_steps))
-                delay_steps = 1
+                delay_steps = 2
 
                 base_state = None
                 if len(self.state_buffer) > delay_steps:
@@ -781,7 +833,7 @@ class CartesianImpedanceController(Node):
 
                 # # ===== big GP 用基准帧先更新 =====
                 _, _ = self._gp_predict_and_update(
-                    q_base, dq_base, ddq_base,
+                    q_base, dq_base, ddq_des_joint,
                     tau_base,
                     self.gp_models_big,
                     update=True
@@ -821,12 +873,12 @@ class CartesianImpedanceController(Node):
                 #         ddq_nn = ddq_roll.copy()
 
                 y_hat_i, var_i = self._gp_predict_and_update(
-                    q_pred_next, dq_pred_next, ddq,
+                    q, dq_pred_next, ddq,
                     tau_base,
                     self.gp_models_big,
                     update=False
                 )
-
+                self.y_hat_cloud = y_hat_i.copy()
                     # y_list.append(y_hat_i.copy())
                     # var_list.append(var_i.copy())
                     # Td_list.append(Td_i)
@@ -875,7 +927,7 @@ class CartesianImpedanceController(Node):
                 self.tau_measured_history.append(np.array(msg.effort_measured).tolist())
                 self.gravity_history.append(np.array(msg.gravity).tolist())
                 self.q_history.append(q.tolist())
-                self.dq_history.append(dq_raw.tolist())
+                self.dq_history.append(dq.tolist())
 
                 self.y_hat_history.append(self.y_hat_combined.tolist())      # combined
                 self.y_hat_local_history.append(self.y_hat_local.tolist())    # 上一帧或刚更新的 local
@@ -1128,14 +1180,14 @@ class CartesianImpedanceController(Node):
         # key = 关节号（1..6），"default" 为所有关节的默认配置
         per_joint_cfg = {
             "default": dict(
-                max_data_per_expert=50,
+                max_data_per_expert=25,
                 nearest_k=1,
                 max_experts=1,
                 timescale=0.03,
             ),
             # 举例：如果你想让 6 号关节忘得快一点、专家少一点，可以单独改：
             6: dict(
-                max_data_per_expert=50,
+                max_data_per_expert=25,
                 nearest_k=1,
                 max_experts=1,
                 timescale=0.05,
@@ -1205,14 +1257,14 @@ class CartesianImpedanceController(Node):
             "default": dict(
                 max_data_per_expert=50,
                 nearest_k=2,
-                max_experts=50,
+                max_experts=10,
                 timescale=0.03,
             ),
             # 举例：如果你想让 6 号关节忘得快一点、专家少一点，可以单独改：
             6: dict(
                 max_data_per_expert=50,
                 nearest_k=2,
-                max_experts=50,
+                max_experts=10,
                 timescale=0.05,
             ),
         }
