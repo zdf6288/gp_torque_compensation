@@ -228,6 +228,49 @@ class CartesianImpedanceController(Node):
         self.tau_residual = np.zeros(7)
         self.tau_memory = np.zeros(7)
 
+        # Stage 1: frozen GP / compensation 实验开关。默认保持原 online update 和原 model 路径。
+        # compensation 默认关闭，避免 GP prediction 在未显式开启时影响最终 tau。
+        self.declare_parameter("gp_online_update_enabled", True)
+        self.declare_parameter("gp_model_dir", "./new_structure/gp/gp_models")
+        self.declare_parameter("gp_compensation_enabled", False)
+        self.declare_parameter("gp_compensation_source", "local")
+        self.declare_parameter("gp_compensation_scale", 0.1)
+        self.declare_parameter("gp_compensation_clip_nm", 0.5)
+
+        self.gp_online_update_enabled = self._get_bool_parameter("gp_online_update_enabled")
+        self.gp_model_dir = str(self.get_parameter("gp_model_dir").value)
+        self.gp_compensation_enabled = self._get_bool_parameter("gp_compensation_enabled")
+        self.gp_compensation_source = str(self.get_parameter("gp_compensation_source").value).strip().lower()
+        self.gp_compensation_scale = float(self.get_parameter("gp_compensation_scale").value)
+        self.gp_compensation_clip_nm = float(self.get_parameter("gp_compensation_clip_nm").value)
+        self._gp_compensation_logged = False
+
+        # clip 只接受非负幅值；负数配置按绝对值处理，避免反向区间。
+        if self.gp_compensation_clip_nm < 0.0:
+            self.get_logger().warn(
+                f"[GP] gp_compensation_clip_nm={self.gp_compensation_clip_nm} is negative; using abs value"
+            )
+            self.gp_compensation_clip_nm = abs(self.gp_compensation_clip_nm)
+
+        # compensation source 只允许 local/cloud/combined，非法值保守 fallback 到 local。
+        valid_gp_compensation_sources = ("local", "cloud", "combined")
+        if self.gp_compensation_source not in valid_gp_compensation_sources:
+            self.get_logger().warn(
+                f"[GP] Invalid gp_compensation_source='{self.gp_compensation_source}', "
+                "falling back to 'local'"
+            )
+            self.gp_compensation_source = "local"
+
+        self.get_logger().info(
+            "[GP] Experiment controls: "
+            f"gp_online_update_enabled={self.gp_online_update_enabled}, "
+            f"gp_model_dir='{self.gp_model_dir}', "
+            f"gp_compensation_enabled={self.gp_compensation_enabled}, "
+            f"gp_compensation_source='{self.gp_compensation_source}', "
+            f"gp_compensation_scale={self.gp_compensation_scale}, "
+            f"gp_compensation_clip_nm={self.gp_compensation_clip_nm}"
+        )
+
         self.gp_stride = 1      # 每 10 个 state callback 做一次 GP（你可以调）
         self.gp_counter = 0
         self.cloud_counter = 0
@@ -274,7 +317,7 @@ class CartesianImpedanceController(Node):
 
 
         # 本地加载离线训练模型
-        self._load_gp_models("./new_structure/gp/gp_models")
+        self._load_gp_models(self.gp_model_dir)
 
         if self.gp_ready:
             self.get_logger().info(f"[Controller] Local GP models loaded, will run local GP in control loop")
@@ -384,6 +427,20 @@ class CartesianImpedanceController(Node):
         self._latest_future_traj = None   # dict: {"x_des": np.array(6,), "dx_des": ..., "ddx_des": ...}
         self._future_traj_counter = 0
         self._future_traj_warned = False
+
+    def _get_bool_parameter(self, name):
+        value = self.get_parameter(name).value
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in ("true", "1", "yes", "on"):
+                return True
+            if normalized in ("false", "0", "no", "off"):
+                return False
+
+        self.get_logger().warn(f"[GP] Parameter '{name}' is not bool-like ({value}); using bool(value)")
+        return bool(value)
 
     def dls_dyn_pinv(self, J, M, lam):
         """
@@ -805,7 +862,8 @@ class CartesianImpedanceController(Node):
                     self.q, dq, self.ddq_des_joint,
                     self.tau_residual_filtered,
                     self.gp_models_small,
-                    update=True
+                    # True 保持原 online update；False 用于 frozen GP evaluation，不允许 add_point。
+                    update=self.gp_online_update_enabled
                 )
                 self.y_hat_local = y_hat_local
                 self.var_local = var_local
@@ -836,7 +894,8 @@ class CartesianImpedanceController(Node):
                     q_base, dq_base, ddq_des_joint,
                     tau_base,
                     self.gp_models_big,
-                    update=True
+                    # big GP 的主路径更新同样受 frozen GP 开关保护。
+                    update=self.gp_online_update_enabled
                 )
 
                 # ===== 在 Td 附近均匀采样多个 rollout 点 =====
@@ -911,7 +970,8 @@ class CartesianImpedanceController(Node):
                 self.y_hat_combined = w_l * self.y_hat_local + (1.0 - w_l) * self.y_hat_cloud
 
             # tau = tau - self.y_hat_local
-            tau = tau
+            # 默认 compensation 关闭时返回原始 tau；开启后才按原注释方向补偿。
+            tau = self._apply_gp_compensation(tau)
             # publish on topic /effort_command
             self.effort_msg.efforts = tau.tolist()
             self.effort_publisher.publish(self.effort_msg)
@@ -1381,6 +1441,39 @@ class CartesianImpedanceController(Node):
 
         return best_state, best_dist
 
+    def _apply_gp_compensation(self, tau):
+        # 默认不改变最终 tau，只有显式开启 gp_compensation_enabled 才进入 torque command。
+        if not self.gp_compensation_enabled:
+            return tau
+
+        # source 支持 local/cloud/combined；combined 使用两个 prediction 的保守平均。
+        if self.gp_compensation_source == "cloud":
+            compensation = self.y_hat_cloud
+        elif self.gp_compensation_source == "combined":
+            compensation = 0.5 * (self.y_hat_local + self.y_hat_cloud)
+        else:
+            compensation = self.y_hat_local
+
+        # 先 scale 再 per-joint clip，避免 GP prediction 直接大幅影响 torque command。
+        scaled_compensation = self.gp_compensation_scale * np.asarray(compensation, dtype=float)
+        clipped_compensation = np.clip(
+            scaled_compensation,
+            -self.gp_compensation_clip_nm,
+            self.gp_compensation_clip_nm
+        )
+
+        if not self._gp_compensation_logged:
+            self.get_logger().warn(
+                "[GP] Compensation ENABLED: "
+                f"source='{self.gp_compensation_source}', "
+                f"scale={self.gp_compensation_scale}, "
+                f"clip_nm={self.gp_compensation_clip_nm}"
+            )
+            self._gp_compensation_logged = True
+
+        # 符号方向沿用原注释：tau = tau - compensation。
+        return tau - clipped_compensation
+
     def _gp_predict_and_update(self, q, dq_des_joint, ddq_des_joint, tau_residual, models, update = True):
         """
         本地 GP：高维输入版本（14维 or 21维）
@@ -1389,7 +1482,7 @@ class CartesianImpedanceController(Node):
 
         if not self.gp_ready or not self.use_gp:
             print("[GP] GP not ready or not enabled; skipping prediction")
-            return np.zeros(7, dtype=float)
+            return np.zeros(7, dtype=float), np.ones(7, dtype=float) * 1e6
 
         y_hat = np.zeros(7, dtype=float)
         y_var = np.ones(7, dtype=float) * 1e6  # 默认给大方差，表示“不可信”
@@ -1439,7 +1532,8 @@ class CartesianImpedanceController(Node):
 
             if np.isfinite(y_std):
                 try:
-                    if update:
+                    # update=False 时用于 frozen GP evaluation，内部也阻止 add_point。
+                    if update and self.gp_online_update_enabled:
                         model.add_point(
                             x_std.astype(np.float32),
                             np.array([y_std], dtype=np.float32)

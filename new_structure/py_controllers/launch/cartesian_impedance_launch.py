@@ -14,12 +14,25 @@ def generate_launch_description():
     use_fake_hardware_parameter_name = 'use_fake_hardware'
     fake_sensor_commands_parameter_name = 'fake_sensor_commands'
     use_rviz_parameter_name = 'use_rviz'
+    # Stage 1: frozen GP / compensation experiment 参数，默认值保持安全。
+    gp_online_update_enabled_parameter_name = 'gp_online_update_enabled'
+    gp_model_dir_parameter_name = 'gp_model_dir'
+    gp_compensation_enabled_parameter_name = 'gp_compensation_enabled'
+    gp_compensation_source_parameter_name = 'gp_compensation_source'
+    gp_compensation_scale_parameter_name = 'gp_compensation_scale'
+    gp_compensation_clip_nm_parameter_name = 'gp_compensation_clip_nm'
 
     robot_ip = LaunchConfiguration(robot_ip_parameter_name)
     load_gripper = LaunchConfiguration(load_gripper_parameter_name)
     use_fake_hardware = LaunchConfiguration(use_fake_hardware_parameter_name)
     fake_sensor_commands = LaunchConfiguration(fake_sensor_commands_parameter_name)
     use_rviz = LaunchConfiguration(use_rviz_parameter_name)
+    gp_online_update_enabled = LaunchConfiguration(gp_online_update_enabled_parameter_name)
+    gp_model_dir = LaunchConfiguration(gp_model_dir_parameter_name)
+    gp_compensation_enabled = LaunchConfiguration(gp_compensation_enabled_parameter_name)
+    gp_compensation_source = LaunchConfiguration(gp_compensation_source_parameter_name)
+    gp_compensation_scale = LaunchConfiguration(gp_compensation_scale_parameter_name)
+    gp_compensation_clip_nm = LaunchConfiguration(gp_compensation_clip_nm_parameter_name)
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -43,6 +56,30 @@ def generate_launch_description():
             default_value='true',
             description='Use Franka Gripper as an end-effector, otherwise, the robot is loaded '
                         'without an end-effector.'),
+        DeclareLaunchArgument(
+            gp_online_update_enabled_parameter_name,
+            default_value='true',
+            description='Enable online GP model updates in the controller.'),
+        DeclareLaunchArgument(
+            gp_model_dir_parameter_name,
+            default_value='./new_structure/gp/gp_models',
+            description='Directory containing offline GP model pickle files.'),
+        DeclareLaunchArgument(
+            gp_compensation_enabled_parameter_name,
+            default_value='false',
+            description='Enable GP torque compensation.'),
+        DeclareLaunchArgument(
+            gp_compensation_source_parameter_name,
+            default_value='local',
+            description='GP compensation source: local, cloud, or combined.'),
+        DeclareLaunchArgument(
+            gp_compensation_scale_parameter_name,
+            default_value='0.1',
+            description='Scale applied to GP torque compensation before clipping.'),
+        DeclareLaunchArgument(
+            gp_compensation_clip_nm_parameter_name,
+            default_value='0.5',
+            description='Per-joint GP compensation clip in Nm.'),
 
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource([PathJoinSubstitution(
@@ -73,10 +110,14 @@ def generate_launch_description():
             executable='cartesian_impedance',
             name='cartesian_impedance',
             output='screen',
-            # parameters=[{
-            #     'k_gains': [20, 20, 20, 10, 10, 10],
-            #     'eta': 0.707,
-            # }]
+            parameters=[{
+                gp_online_update_enabled_parameter_name: gp_online_update_enabled,
+                gp_model_dir_parameter_name: gp_model_dir,
+                gp_compensation_enabled_parameter_name: gp_compensation_enabled,
+                gp_compensation_source_parameter_name: gp_compensation_source,
+                gp_compensation_scale_parameter_name: gp_compensation_scale,
+                gp_compensation_clip_nm_parameter_name: gp_compensation_clip_nm,
+            }]
         ),
         Node(
             package='py_controllers',
