@@ -15,6 +15,7 @@ def generate_launch_description():
     fake_sensor_commands_parameter_name = 'fake_sensor_commands'
     use_rviz_parameter_name = 'use_rviz'
     # Stage 1: frozen GP / compensation experiment 参数，默认值保持安全。
+    gp_prediction_enabled_parameter_name = 'gp_prediction_enabled'
     gp_online_update_enabled_parameter_name = 'gp_online_update_enabled'
     gp_model_dir_parameter_name = 'gp_model_dir'
     gp_compensation_enabled_parameter_name = 'gp_compensation_enabled'
@@ -31,6 +32,7 @@ def generate_launch_description():
     use_fake_hardware = LaunchConfiguration(use_fake_hardware_parameter_name)
     fake_sensor_commands = LaunchConfiguration(fake_sensor_commands_parameter_name)
     use_rviz = LaunchConfiguration(use_rviz_parameter_name)
+    gp_prediction_enabled = LaunchConfiguration(gp_prediction_enabled_parameter_name)
     gp_online_update_enabled = LaunchConfiguration(gp_online_update_enabled_parameter_name)
     gp_model_dir = LaunchConfiguration(gp_model_dir_parameter_name)
     gp_compensation_enabled = LaunchConfiguration(gp_compensation_enabled_parameter_name)
@@ -64,6 +66,10 @@ def generate_launch_description():
             default_value='true',
             description='Use Franka Gripper as an end-effector, otherwise, the robot is loaded '
                         'without an end-effector.'),
+        DeclareLaunchArgument(
+            gp_prediction_enabled_parameter_name,
+            default_value='true',
+            description='Enable GP prediction in the controller.'),
         DeclareLaunchArgument(
             gp_online_update_enabled_parameter_name,
             default_value='true',
@@ -135,6 +141,7 @@ def generate_launch_description():
             name='cartesian_impedance',
             output='screen',
             parameters=[{
+                gp_prediction_enabled_parameter_name: gp_prediction_enabled,
                 gp_online_update_enabled_parameter_name: gp_online_update_enabled,
                 gp_model_dir_parameter_name: gp_model_dir,
                 gp_compensation_enabled_parameter_name: gp_compensation_enabled,
