@@ -187,7 +187,6 @@ class TrajectoryPublisher(Node):
             [0.0] * 6,
             [0.0] * 6,
         )
-        self._publish_data_recording_enabled(False)
 
     def _finish_shutdown_hold_if_ready(self, current_time):
         if self.shutdown_hold_start_time is None:
@@ -253,6 +252,7 @@ class TrajectoryPublisher(Node):
 
             if self.shutdown_hold_active:
                 self._publish_shutdown_hold_command(current_time)
+                self._publish_data_recording_enabled(False)
                 self._finish_shutdown_hold_if_ready(current_time)
                 return
 
@@ -319,58 +319,21 @@ class TrajectoryPublisher(Node):
                     ddy = -self.radius * omega**2 * np.sin(omega * elapsed_time)
                     ddz = 0.0
 
-            # ---------------------------
-            #   Round Detection + GP Mode Switch
-            # ---------------------------
-            if self.transition_complete:   # 只有真正跑圆轨迹才切换模式
-                current_round = int(elapsed_time / self.period)
-
-                if current_round != self.last_round:
-                    self.last_round = current_round
-
-                    # === 是否该切换 mode ===
-                    if current_round > 0 and (current_round % self.rounds_per_mode) == 0:
-                        self.current_mode_index = (self.current_mode_index + 1) % len(self.modes)
-
-                        mode_msg = String()
-                        mode_msg.data = self.modes[self.current_mode_index]
-                        self.gp_mode_pub.publish(mode_msg)
-
-                        self.get_logger().info(
-                            f"[TrajectoryPublisher] Switching GP Mode → {mode_msg.data}"
-                        )
-
-                # ========== Auto stop here ==========
-                total_rounds = self.rounds_per_mode * len(self.modes)
-
-                if current_round >= total_rounds:
-                    self.shutdown_hold_active = True
-                    self.shutdown_hold_start_time = current_time
-                    self.shutdown_hold_position = [x, y, z, 0.0, 0.0, 0.0]
-
-                    self.get_logger().info(
-                        f"Reached total {total_rounds} rounds; entering "
-                        f"{self.shutdown_hold_duration:.3f}s shutdown hold before shutdown."
-                    )
-                    self.get_logger().info(
-                        "Shutdown hold publishes fixed position with zero velocity/acceleration "
-                        "and disables data recording."
-                    )
-
-                    self._publish_shutdown_hold_command(current_time)
-                    self._finish_shutdown_hold_if_ready(current_time)
-                    return
-            
             # publish on /task_space_command
-            self._publish_task_space_command(
-                current_time,
-                [x, y, z, 0.0, 0.0, 0.0],         # position (x, y, z, roll, pitch, yaw)
-                [dx, dy, dz, 0.0, 0.0, 0.0],      # velocity
-                [ddx, ddy, ddz, 0.0, 0.0, 0.0],   # acceleration
-            )
+            trajectory_msg = TaskSpaceCommand()
+            trajectory_msg.header = Header()
+            trajectory_msg.header.stamp = current_time.to_msg()
+            trajectory_msg.header.frame_id = "base_link"
+            trajectory_msg.x_des = [x, y, z, 0.0, 0.0, 0.0]         # position (x, y, z, roll, pitch, yaw)
+            trajectory_msg.dx_des = [dx, dy, dz, 0.0, 0.0, 0.0]     # velocity
+            trajectory_msg.ddx_des = [ddx, ddy, ddz, 0.0, 0.0, 0.0] # acceleration
+
+            self.trajectory_publisher.publish(trajectory_msg)
             
             # publish data recording status
-            self._publish_data_recording_enabled(self.transition_complete or not self.use_transition)
+            data_recording_msg = Bool()
+            data_recording_msg.data = self.transition_complete or not self.use_transition
+            self.data_recording_publisher.publish(data_recording_msg)
             
             if int(elapsed_time * 1000) % 1000 == 0:
                 if self.use_transition and not self.transition_complete:
@@ -382,6 +345,53 @@ class TrajectoryPublisher(Node):
         except Exception as e:
             self.get_logger().error(f'Error in trajectory publisher: {str(e)}')
             self.get_logger().error(f'Current state: transition_complete={self.transition_complete}, elapsed_time={elapsed_time}')
+
+        # ---------------------------
+        #   Round Detection + GP Mode Switch
+        # ---------------------------
+        if self.transition_complete:   # 只有真正跑圆轨迹才切换模式
+            current_round = int(elapsed_time / self.period)
+
+            if current_round != self.last_round:
+                self.last_round = current_round
+
+                # === 是否该切换 mode ===
+                if current_round > 0 and (current_round % self.rounds_per_mode) == 0:
+                    self.current_mode_index = (self.current_mode_index + 1) % len(self.modes)
+
+                    mode_msg = String()
+                    mode_msg.data = self.modes[self.current_mode_index]
+                    self.gp_mode_pub.publish(mode_msg)
+
+                    self.get_logger().info(
+                        f"[TrajectoryPublisher] Switching GP Mode → {mode_msg.data}"
+                    )
+
+
+            # ========== Auto stop here ==========
+            total_rounds = self.rounds_per_mode * len(self.modes)
+
+            if current_round >= total_rounds:
+                if self.shutdown_hold_active or self.shutdown_requested:
+                    return
+
+                # Stop recording before entering hold.
+                stop_msg = Bool()
+                stop_msg.data = False
+                self.data_recording_publisher.publish(stop_msg)
+
+                self.shutdown_hold_active = True
+                self.shutdown_hold_start_time = current_time
+                self.shutdown_hold_position = [x, y, z, 0.0, 0.0, 0.0]
+
+                self.get_logger().info(
+                    f"Reached total {total_rounds} rounds; entering "
+                    f"{self.shutdown_hold_duration:.3f}s shutdown hold before shutdown."
+                )
+
+                self._publish_shutdown_hold_command(current_time)
+                self._finish_shutdown_hold_if_ready(current_time)
+                return
 
 
     def get_future_task_space(self, t_delay):
