@@ -812,6 +812,8 @@ class CartesianImpedanceController(Node):
             # q_pred_next = q.copy()
             # dq_pred_next = dq.copy()
 
+            future_prediction_available = False
+
             if self.data_recording_enabled:
                 Td = dt   # 或者固定 0.001
                 self.request_future_trajectory(Td)
@@ -832,6 +834,7 @@ class CartesianImpedanceController(Node):
                     self.prev_q_pred = q_pred_next.copy()
                     self.prev_dq_pred = dq_pred_next.copy()
                     self.prev_pred_time = t_elapsed
+                    future_prediction_available = True
             
             # else:
                 # self.prev_q_pred = None
@@ -932,13 +935,14 @@ class CartesianImpedanceController(Node):
                 #         dq_nn = dq_roll.copy()
                 #         ddq_nn = ddq_roll.copy()
 
-                y_hat_i, var_i = self._gp_predict_and_update(
-                    q, dq_pred_next, ddq,
-                    tau_base,
-                    self.gp_models_big,
-                    update=False
-                )
-                self.y_hat_cloud = y_hat_i.copy()
+                if future_prediction_available:
+                    y_hat_i, var_i = self._gp_predict_and_update(
+                        q, dq_pred_next, ddq,
+                        tau_base,
+                        self.gp_models_big,
+                        update=False
+                    )
+                    self.y_hat_cloud = y_hat_i.copy()
                     # y_list.append(y_hat_i.copy())
                     # var_list.append(var_i.copy())
                     # Td_list.append(Td_i)
