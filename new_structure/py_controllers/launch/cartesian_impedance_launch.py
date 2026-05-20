@@ -21,6 +21,9 @@ def generate_launch_description():
     gp_compensation_source_parameter_name = 'gp_compensation_source'
     gp_compensation_scale_parameter_name = 'gp_compensation_scale'
     gp_compensation_clip_nm_parameter_name = 'gp_compensation_clip_nm'
+    save_csv_on_shutdown_parameter_name = 'save_csv_on_shutdown'
+    enable_runtime_plotting_parameter_name = 'enable_runtime_plotting'
+    run_ablation_on_shutdown_parameter_name = 'run_ablation_on_shutdown'
 
     robot_ip = LaunchConfiguration(robot_ip_parameter_name)
     load_gripper = LaunchConfiguration(load_gripper_parameter_name)
@@ -33,6 +36,9 @@ def generate_launch_description():
     gp_compensation_source = LaunchConfiguration(gp_compensation_source_parameter_name)
     gp_compensation_scale = LaunchConfiguration(gp_compensation_scale_parameter_name)
     gp_compensation_clip_nm = LaunchConfiguration(gp_compensation_clip_nm_parameter_name)
+    save_csv_on_shutdown = LaunchConfiguration(save_csv_on_shutdown_parameter_name)
+    enable_runtime_plotting = LaunchConfiguration(enable_runtime_plotting_parameter_name)
+    run_ablation_on_shutdown = LaunchConfiguration(run_ablation_on_shutdown_parameter_name)
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -80,6 +86,18 @@ def generate_launch_description():
             gp_compensation_clip_nm_parameter_name,
             default_value='0.5',
             description='Per-joint GP compensation clip in Nm.'),
+        DeclareLaunchArgument(
+            save_csv_on_shutdown_parameter_name,
+            default_value='true',
+            description='Save controller CSV data on shutdown.'),
+        DeclareLaunchArgument(
+            enable_runtime_plotting_parameter_name,
+            default_value='false',
+            description='Enable plotting or other heavy shutdown-time analysis in the controller.'),
+        DeclareLaunchArgument(
+            run_ablation_on_shutdown_parameter_name,
+            default_value='false',
+            description='Run ablation.py from the controller shutdown path.'),
 
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource([PathJoinSubstitution(
@@ -117,6 +135,9 @@ def generate_launch_description():
                 gp_compensation_source_parameter_name: gp_compensation_source,
                 gp_compensation_scale_parameter_name: gp_compensation_scale,
                 gp_compensation_clip_nm_parameter_name: gp_compensation_clip_nm,
+                save_csv_on_shutdown_parameter_name: save_csv_on_shutdown,
+                enable_runtime_plotting_parameter_name: enable_runtime_plotting,
+                run_ablation_on_shutdown_parameter_name: run_ablation_on_shutdown,
             }]
         ),
         Node(

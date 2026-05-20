@@ -110,6 +110,31 @@ Goals:
 - confirm logs show Stage 1 parameters
 - observe whether there is vibration, abnormal sound, or reflex stop
 
+## 8.1 Stage 1 Shutdown / Plotting Safety Update
+
+Default shutdown behavior is intentionally lightweight for real-robot runs:
+
+- controller shutdown saves `cartesian_impedance_controller_data.csv` by default
+- controller shutdown does not run runtime plotting by default
+- controller shutdown does not run `ablation.py` by default
+- plotting should be run offline after the robot is stopped and the ROS2 launch has exited
+
+New launch/controller parameters:
+
+- `save_csv_on_shutdown` default: `true`
+- `enable_runtime_plotting` default: `false`
+- `run_ablation_on_shutdown` default: `false`
+
+Recommended baseline values:
+
+- `save_csv_on_shutdown:=true`
+- `enable_runtime_plotting:=false`
+- `run_ablation_on_shutdown:=false`
+
+If `communication_constraints_violation` appears at shutdown, do not repeatedly rerun the robot. First check shutdown/plotting load, network/realtime stability, residual ROS2 processes, and Franka Desk state.
+
+This shutdown fix does not mean GP compensation is ready to enable.
+
 ## 9. Second Low-Risk Test: Frozen GP Without Compensation
 
 Only after the baseline is stable, test:

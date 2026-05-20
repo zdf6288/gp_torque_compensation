@@ -90,6 +90,7 @@ class TrajectoryPublisher(Node):
         self.max_rounds = self.get_parameter("max_rounds").value
 
         self.shutdown_pub = self.create_publisher(Bool, "/shutdown_control", 10)
+        self.shutdown_requested = False
 
 
         self.get_logger().info('Trajectory publisher node started')
@@ -299,6 +300,10 @@ class TrajectoryPublisher(Node):
             total_rounds = self.rounds_per_mode * len(self.modes)
 
             if current_round >= total_rounds:
+                if self.shutdown_requested:
+                    return
+                self.shutdown_requested = True
+
                 self.get_logger().info(
                     f"Reached total {total_rounds} rounds, stopping trajectory publisher..."
                 )
@@ -313,7 +318,8 @@ class TrajectoryPublisher(Node):
                 shutdown_msg.data = True
                 self.shutdown_pub.publish(shutdown_msg)
 
-                rclpy.shutdown()
+                if rclpy.ok():
+                    rclpy.shutdown()
                 return
 
 
@@ -425,7 +431,8 @@ def main(args=None):
         pass
     finally:
         trajectory_publisher_node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

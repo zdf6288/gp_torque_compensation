@@ -236,6 +236,9 @@ class CartesianImpedanceController(Node):
         self.declare_parameter("gp_compensation_source", "local")
         self.declare_parameter("gp_compensation_scale", 0.1)
         self.declare_parameter("gp_compensation_clip_nm", 0.5)
+        self.declare_parameter("save_csv_on_shutdown", True)
+        self.declare_parameter("enable_runtime_plotting", False)
+        self.declare_parameter("run_ablation_on_shutdown", False)
 
         self.gp_online_update_enabled = self._get_bool_parameter("gp_online_update_enabled")
         self.gp_model_dir = str(self.get_parameter("gp_model_dir").value)
@@ -243,7 +246,12 @@ class CartesianImpedanceController(Node):
         self.gp_compensation_source = str(self.get_parameter("gp_compensation_source").value).strip().lower()
         self.gp_compensation_scale = float(self.get_parameter("gp_compensation_scale").value)
         self.gp_compensation_clip_nm = float(self.get_parameter("gp_compensation_clip_nm").value)
+        self.save_csv_on_shutdown = self._get_bool_parameter("save_csv_on_shutdown")
+        self.enable_runtime_plotting = self._get_bool_parameter("enable_runtime_plotting")
+        self.run_ablation_on_shutdown = self._get_bool_parameter("run_ablation_on_shutdown")
         self._gp_compensation_logged = False
+        self._data_save_attempted = False
+        self.data_saved = False
 
         # clip 只接受非负幅值；负数配置按绝对值处理，避免反向区间。
         if self.gp_compensation_clip_nm < 0.0:
@@ -269,6 +277,12 @@ class CartesianImpedanceController(Node):
             f"gp_compensation_source='{self.gp_compensation_source}', "
             f"gp_compensation_scale={self.gp_compensation_scale}, "
             f"gp_compensation_clip_nm={self.gp_compensation_clip_nm}"
+        )
+        self.get_logger().info(
+            "[Controller] Shutdown controls: "
+            f"save_csv_on_shutdown={self.save_csv_on_shutdown}, "
+            f"enable_runtime_plotting={self.enable_runtime_plotting}, "
+            f"run_ablation_on_shutdown={self.run_ablation_on_shutdown}"
         )
 
         self.gp_stride = 1      # 每 10 个 state callback 做一次 GP（你可以调）
@@ -534,19 +548,17 @@ class CartesianImpedanceController(Node):
                 self.get_logger().error(f"Error saving data: {e}")
 
             # ------------------------------------------
-            # 3) 自动画图
+            # 3) 可选离线分析/画图，真机默认关闭
             # ------------------------------------------
             try:
-                os.system("python3 ablation.py cartesian_impedance_controller_data.csv")
-                self.get_logger().info("[Controller] Plotting completed.")
+                self._run_shutdown_ablation()
             except Exception as e:
                 self.get_logger().error(f"Plotting error: {e}")
 
             # ------------------------------------------
             # 4) 安全退出
             # ------------------------------------------
-            rclpy.shutdown()
-            os._exit(0)
+            self._shutdown_ros_context()
     
 
     def stateParameterCallback(self, msg):
@@ -1211,19 +1223,36 @@ class CartesianImpedanceController(Node):
             return
         self._signal_handled = True
 
-        self.get_logger().info(f"Received signal {signum}, saving data...")
+        if rclpy.ok():
+            self.get_logger().info(f"Received signal {signum}, saving data...")
 
-        # 2. 保存数据
+        # Signal path stays lightweight: CSV only, no plotting or ablation.
         try:
             self.save_data_to_file()
         except:
             pass
 
-        # 3. 停止节点
-        rclpy.shutdown()
+        self._shutdown_ros_context()
 
-        # 4. 直接退出程序
-        os._exit(0)
+    def _shutdown_ros_context(self):
+        if rclpy.ok():
+            rclpy.shutdown()
+
+    def _run_shutdown_ablation(self):
+        if not self.run_ablation_on_shutdown:
+            self.get_logger().info("[Controller] Shutdown ablation disabled; skipping ablation.py.")
+            return
+        if not self.enable_runtime_plotting:
+            self.get_logger().warn(
+                "[Controller] run_ablation_on_shutdown requested but enable_runtime_plotting is false; skipping."
+            )
+            return
+
+        exit_code = os.system("python3 ablation.py cartesian_impedance_controller_data.csv")
+        if exit_code == 0:
+            self.get_logger().info("[Controller] Shutdown ablation completed.")
+        else:
+            self.get_logger().error(f"[Controller] Shutdown ablation failed with exit code {exit_code}.")
 
     def _load_gp_models(self, dir_path="./new_structure/gp/gp_models"):
         """加载离线训练好的每关节GP，支持高维输入（14或21）""" 
@@ -1577,8 +1606,20 @@ class CartesianImpedanceController(Node):
     
     def save_data_to_file(self):
         """save data to CSV file"""
+        if self._data_save_attempted:
+            if rclpy.ok():
+                self.get_logger().info('Data save already handled, skipping duplicate save')
+            return
+
+        if not self.save_csv_on_shutdown:
+            self._data_save_attempted = True
+            if rclpy.ok():
+                self.get_logger().info('save_csv_on_shutdown is false, skipping CSV save')
+            return
+
         if not self.tau_history:
-            self.get_logger().warning('No data to save - tau_history is empty')
+            if rclpy.ok():
+                self.get_logger().warning('No data to save - tau_history is empty')
             return
 
         try:
@@ -1731,11 +1772,16 @@ class CartesianImpedanceController(Node):
 
                     writer.writerow(row)
 
-            self.get_logger().info(f'Successfully saved {min_len} data points to {filename}')
+            self._data_save_attempted = True
+            self.data_saved = True
+            if rclpy.ok():
+                self.get_logger().info(f'Successfully saved {min_len} data points to {filename}')
 
         except Exception as e:
-            self.get_logger().error(f'Error when saving data: {str(e)}')
-            self.get_logger().error(f'Traceback: {traceback.format_exc()}')
+            self._data_save_attempted = True
+            if rclpy.ok():
+                self.get_logger().error(f'Error when saving data: {str(e)}')
+                self.get_logger().error(f'Traceback: {traceback.format_exc()}')
 
 
 def main(args=None):
@@ -1745,22 +1791,28 @@ def main(args=None):
     try:
         rclpy.spin(cartesian_impedance_node)
     except KeyboardInterrupt:   
-        cartesian_impedance_node.get_logger().info('Received keyboard interrupt, saving data...')
+        if rclpy.ok():
+            cartesian_impedance_node.get_logger().info('Received keyboard interrupt, saving data...')
     except Exception as e:
-        cartesian_impedance_node.get_logger().error(f'Error when running program: {str(e)}')
+        if rclpy.ok():
+            cartesian_impedance_node.get_logger().error(f'Error when running program: {str(e)}')
     finally:
         try:
             # save data to file only if signal handler has not been executed
-            if not cartesian_impedance_node._signal_handled:
-                cartesian_impedance_node.get_logger().info('Signal handler not executed, saving data to file...')
+            if not cartesian_impedance_node._signal_handled and not cartesian_impedance_node._data_save_attempted:
+                if rclpy.ok():
+                    cartesian_impedance_node.get_logger().info('Signal handler not executed, saving data to file...')
                 cartesian_impedance_node.save_data_to_file()
             else:
-                cartesian_impedance_node.get_logger().info('Signal handler executed, data already saved, skipping...')
+                if rclpy.ok():
+                    cartesian_impedance_node.get_logger().info('Data already handled, skipping final save...')
                 
         except Exception as e:
-            cartesian_impedance_node.get_logger().error(f'Error when saving data: {str(e)}')
+            if rclpy.ok():
+                cartesian_impedance_node.get_logger().error(f'Error when saving data: {str(e)}')
         cartesian_impedance_node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

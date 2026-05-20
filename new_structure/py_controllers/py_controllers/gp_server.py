@@ -1,3 +1,34 @@
+#!/usr/bin/env python3
+
+import rclpy
+from rclpy.node import Node
+
+
+class DisabledGPServer(Node):
+    def __init__(self):
+        super().__init__('gp_server')
+        self.get_logger().warn(
+            "[GPServer] gp_server entry point is disabled; controller uses local GP models in Stage 1."
+        )
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = DisabledGPServer()
+
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
+
 # #!/usr/bin/env python3
 # import rclpy
 # from rclpy.node import Node
