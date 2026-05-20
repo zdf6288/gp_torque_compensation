@@ -24,6 +24,7 @@ def generate_launch_description():
     save_csv_on_shutdown_parameter_name = 'save_csv_on_shutdown'
     enable_runtime_plotting_parameter_name = 'enable_runtime_plotting'
     run_ablation_on_shutdown_parameter_name = 'run_ablation_on_shutdown'
+    shutdown_hold_duration_parameter_name = 'shutdown_hold_duration'
 
     robot_ip = LaunchConfiguration(robot_ip_parameter_name)
     load_gripper = LaunchConfiguration(load_gripper_parameter_name)
@@ -39,6 +40,7 @@ def generate_launch_description():
     save_csv_on_shutdown = LaunchConfiguration(save_csv_on_shutdown_parameter_name)
     enable_runtime_plotting = LaunchConfiguration(enable_runtime_plotting_parameter_name)
     run_ablation_on_shutdown = LaunchConfiguration(run_ablation_on_shutdown_parameter_name)
+    shutdown_hold_duration = LaunchConfiguration(shutdown_hold_duration_parameter_name)
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -98,6 +100,10 @@ def generate_launch_description():
             run_ablation_on_shutdown_parameter_name,
             default_value='false',
             description='Run ablation.py from the controller shutdown path.'),
+        DeclareLaunchArgument(
+            shutdown_hold_duration_parameter_name,
+            default_value='1.0',
+            description='Duration in seconds to hold the final trajectory pose before shutdown.'),
 
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource([PathJoinSubstitution(
@@ -145,6 +151,9 @@ def generate_launch_description():
             executable='trajectory_publisher',
             name='trajectory_publisher',
             output='screen',
+            parameters=[{
+                shutdown_hold_duration_parameter_name: shutdown_hold_duration,
+            }],
             # parameters=[{
             #     'circle_radius': 0.2,
             #     'circle_frequency': 0.5,

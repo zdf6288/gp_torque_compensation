@@ -488,11 +488,15 @@ class CartesianImpedanceController(Node):
         # 当 TrajectoryPublisher 认为“transition 完成”时，会发 True
         if msg.data and not self.gp_active:
             self.gp_active = True
-            self.get_logger().info("[Controller] Data recording enabled -> GP compensation ACTIVATED")
+            self.get_logger().info("[Controller] Data recording enabled")
+            if self.gp_compensation_enabled:
+                self.get_logger().info("[Controller] GP compensation enabled by gp_compensation_enabled=True")
+            else:
+                self.get_logger().info("[Controller] GP compensation remains disabled by gp_compensation_enabled=False")
         elif not msg.data and self.gp_active:
             # 如果你希望停轨迹时也关掉 GP，可以顺便关掉
             self.gp_active = False
-            self.get_logger().info("[Controller] Data recording disabled -> GP compensation DEACTIVATED")
+            self.get_logger().info("[Controller] Data recording disabled")
 
     def _future_traj_response_callback(self, future):
         try:
