@@ -219,6 +219,8 @@ class CartesianImpedanceController(Node):
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
         self._signal_handled = False                # flag to avoid repeated data saving
+        self._shutdown_requested = False
+        self._shutdown_complete = False
 
 
         # === GP ===
@@ -239,6 +241,7 @@ class CartesianImpedanceController(Node):
         self.declare_parameter("save_csv_on_shutdown", True)
         self.declare_parameter("enable_runtime_plotting", False)
         self.declare_parameter("run_ablation_on_shutdown", False)
+        self.declare_parameter("debug_active_path_prints", False)
 
         self.gp_online_update_enabled = self._get_bool_parameter("gp_online_update_enabled")
         self.gp_model_dir = str(self.get_parameter("gp_model_dir").value)
@@ -249,9 +252,11 @@ class CartesianImpedanceController(Node):
         self.save_csv_on_shutdown = self._get_bool_parameter("save_csv_on_shutdown")
         self.enable_runtime_plotting = self._get_bool_parameter("enable_runtime_plotting")
         self.run_ablation_on_shutdown = self._get_bool_parameter("run_ablation_on_shutdown")
+        self.debug_active_path_prints = self._get_bool_parameter("debug_active_path_prints")
         self._gp_compensation_logged = False
         self._data_save_attempted = False
         self.data_saved = False
+        self._task_command_wait_logged = False
 
         # clip 只接受非负幅值；负数配置按绝对值处理，避免反向区间。
         if self.gp_compensation_clip_nm < 0.0:
@@ -282,7 +287,8 @@ class CartesianImpedanceController(Node):
             "[Controller] Shutdown controls: "
             f"save_csv_on_shutdown={self.save_csv_on_shutdown}, "
             f"enable_runtime_plotting={self.enable_runtime_plotting}, "
-            f"run_ablation_on_shutdown={self.run_ablation_on_shutdown}"
+            f"run_ablation_on_shutdown={self.run_ablation_on_shutdown}, "
+            f"debug_active_path_prints={self.debug_active_path_prints}"
         )
 
         self.gp_stride = 1      # 每 10 个 state callback 做一次 GP（你可以调）
@@ -525,44 +531,21 @@ class CartesianImpedanceController(Node):
         self.get_logger().info(f"[Controller] GP mode switched to: {self.gp_mode}")
 
     def shutdown_callback(self, msg):
-        if msg.data:
-            self.get_logger().info("[Controller] Received shutdown signal — stopping robot, saving data & exiting.")
+        if not msg.data:
+            return
 
-            # ------------------------------------------
-            # 1) 立即停止力矩输出（关键！！！）
-            # ------------------------------------------
-            try:
-                zero_tau = EffortCommand()
-                zero_tau.efforts = [0.0] * 7
-                self.effort_publisher.publish(zero_tau)
-                self.get_logger().info("[Controller] Published zero torque to stop robot.")
-            except Exception as e:
-                self.get_logger().error(f"Error publishing zero torque: {e}")
-
-            # ------------------------------------------
-            # 2) 停止后再保存数据
-            # ------------------------------------------
-            try:
-                self.save_data_to_file()
-            except Exception as e:
-                self.get_logger().error(f"Error saving data: {e}")
-
-            # ------------------------------------------
-            # 3) 可选离线分析/画图，真机默认关闭
-            # ------------------------------------------
-            try:
-                self._run_shutdown_ablation()
-            except Exception as e:
-                self.get_logger().error(f"Plotting error: {e}")
-
-            # ------------------------------------------
-            # 4) 安全退出
-            # ------------------------------------------
-            self._shutdown_ros_context()
+        self._perform_shutdown_cleanup(
+            "[Controller] Received shutdown signal — stopping robot, saving data & exiting.",
+            run_ablation=True,
+        )
+        self._exit_after_shutdown()
     
 
     def stateParameterCallback(self, msg):
         """callback function for /state_parameter subscriber"""
+        if self._shutdown_requested:
+            return
+
         try:
             # initialize t_initial, get t_elapsed, t_last and dt
             # initialize q_initial, get q, dq and ddq
@@ -655,6 +638,9 @@ class CartesianImpedanceController(Node):
                     t_now, q, dq, dt, o_t_f, zero_jacobian, zero_jacobian_pinv
                 )
 
+                if self._shutdown_requested:
+                    return
+
                 if reached:
                     self.joint_position_adjusted = True
                     self.get_logger().info(f"End-effector reached start point. Error={pos_err_norm:.6f}")
@@ -671,7 +657,9 @@ class CartesianImpedanceController(Node):
                 return
 
             if not self.task_command_received:
-                print("not received")
+                if self.debug_active_path_prints and not self._task_command_wait_logged:
+                    self.get_logger().debug("[Controller] Task command not received; skipping active control")
+                    self._task_command_wait_logged = True
                 return  
 
             # cartesian impedance control (after joint position adjustment)   
@@ -837,7 +825,8 @@ class CartesianImpedanceController(Node):
 
                     dq_pred_next = dq_future_ref.copy()
                     q_pred_next = q.copy()
-                    print(dq_pred_next * dt)
+                    if self.debug_active_path_prints:
+                        self.get_logger().debug(f"[Controller] dq_pred_next_dt={(dq_pred_next * dt).tolist()}")
                     # dq_pred_next = dq_des_joint
                     # q_pred_next = q.copy()
                     self.prev_q_pred = q_pred_next.copy()
@@ -985,6 +974,8 @@ class CartesianImpedanceController(Node):
             # 默认 compensation 关闭时返回原始 tau；开启后才按原注释方向补偿。
             tau = self._apply_gp_compensation(tau)
             # publish on topic /effort_command
+            if self._shutdown_requested:
+                return
             self.effort_msg.efforts = tau.tolist()
             self.effort_publisher.publish(self.effort_msg)
 
@@ -1219,20 +1210,55 @@ class CartesianImpedanceController(Node):
             self.trajectory_started = False             # reset flag to retry
 
     def signal_handler(self, signum, frame):
-        if self._signal_handled:
+        if self._shutdown_requested and not self._shutdown_complete:
             return
+
+        self._perform_shutdown_cleanup(
+            f"[Controller] Received signal {signum}, stopping robot, saving data & exiting.",
+            run_ablation=False,
+        )
+        self._exit_after_shutdown()
+
+    def _perform_shutdown_cleanup(self, message, run_ablation):
+        if self._shutdown_requested:
+            return
+
+        self._shutdown_requested = True
         self._signal_handled = True
+        self.gp_active = False
+        self.data_recording_enabled = False
 
         if rclpy.ok():
-            self.get_logger().info(f"Received signal {signum}, saving data...")
+            self.get_logger().info(message)
 
-        # Signal path stays lightweight: CSV only, no plotting or ablation.
+        try:
+            zero_tau = EffortCommand()
+            zero_tau.efforts = [0.0] * 7
+            self.effort_publisher.publish(zero_tau)
+            if rclpy.ok():
+                self.get_logger().info("[Controller] Published zero torque to stop robot.")
+        except Exception as e:
+            if rclpy.ok():
+                self.get_logger().error(f"Error publishing zero torque: {e}")
+
         try:
             self.save_data_to_file()
-        except:
-            pass
+        except Exception as e:
+            if rclpy.ok():
+                self.get_logger().error(f"Error saving data: {e}")
 
+        if run_ablation:
+            try:
+                self._run_shutdown_ablation()
+            except Exception as e:
+                if rclpy.ok():
+                    self.get_logger().error(f"Plotting error: {e}")
+
+        self._shutdown_complete = True
+
+    def _exit_after_shutdown(self):
         self._shutdown_ros_context()
+        raise SystemExit(0)
 
     def _shutdown_ros_context(self):
         if rclpy.ok():
@@ -1510,7 +1536,9 @@ class CartesianImpedanceController(Node):
         """
 
         if not self.gp_ready or not self.use_gp:
-            print("[GP] GP not ready or not enabled; skipping prediction")
+            if self.debug_active_path_prints and not self._gp_warned:
+                self.get_logger().debug("[GP] GP not ready or not enabled; skipping prediction")
+                self._gp_warned = True
             return np.zeros(7, dtype=float), np.ones(7, dtype=float) * 1e6
 
         y_hat = np.zeros(7, dtype=float)
