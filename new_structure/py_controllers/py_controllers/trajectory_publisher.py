@@ -47,11 +47,29 @@ class TrajectoryPublisher(Node):
         self.declare_parameter('circle_center_x', 0.3)  # circle center x coordinate
         self.declare_parameter('circle_center_y', 0.0)  # circle center y coordinate
         self.declare_parameter('circle_center_z', 0.65) # circle center z coordinate       
+        # Stage 3A default-off：planar_circle 保持 Stage 1 / Stage 2A 的平面圆轨迹行为。
+        # z_modulated_circle 只在显式设置 trajectory_mode 时启用。
+        self.declare_parameter('trajectory_mode', 'planar_circle')
+        # 默认 0.0，避免未显式选择 Stage 3A 时改变已有平面轨迹。
+        self.declare_parameter('z_amplitude', 0.0)
+        self.declare_parameter('z_frequency_multiplier', 0.5)
         self.radius = self.get_parameter('circle_radius').value
         self.frequency = self.get_parameter('circle_frequency').value
         self.center_x = self.get_parameter('circle_center_x').value
         self.center_y = self.get_parameter('circle_center_y').value
         self.center_z = self.get_parameter('circle_center_z').value
+        self.trajectory_mode = self.get_parameter('trajectory_mode').value
+        self.z_amplitude = self.get_parameter('z_amplitude').value
+        self.z_frequency_multiplier = self.get_parameter('z_frequency_multiplier').value
+        self.supported_trajectory_modes = ('planar_circle', 'z_modulated_circle')
+
+        if self.trajectory_mode not in self.supported_trajectory_modes:
+            # 真实机器人上不静默 fallback，避免参数拼写错误导致运行了非预期轨迹。
+            self.get_logger().error(
+                f"Unsupported trajectory_mode '{self.trajectory_mode}'. "
+                f"Supported modes: {self.supported_trajectory_modes}"
+            )
+            raise ValueError(f"Unsupported trajectory_mode: {self.trajectory_mode}")
 
         # transition parameters to reach the start point of trajectory smoothly
         # 'initial' means after the robot joint position is adjusted
@@ -71,9 +89,10 @@ class TrajectoryPublisher(Node):
         self.transition_complete = False        # flag indicating the completion of moving to the start point of trajectory
         
         # get start point of trajectory
-        self.trajectory_start_x = self.center_x + self.radius
-        self.trajectory_start_y = self.center_y
-        self.trajectory_start_z = self.center_z
+        trajectory_start, _, _ = self._compute_task_space_trajectory(0.0)
+        self.trajectory_start_x = trajectory_start[0]
+        self.trajectory_start_y = trajectory_start[1]
+        self.trajectory_start_z = trajectory_start[2]
 
         # Ablation parameters
         self.gp_mode_pub = self.create_publisher(String, "/gp_mode", 10)
@@ -93,9 +112,14 @@ class TrajectoryPublisher(Node):
 
 
         self.get_logger().info('Trajectory publisher node started')
-        self.get_logger().info(f'Publishing circular trajectory at 1000 Hz')
+        self.get_logger().info(f'Publishing trajectory at 1000 Hz')
+        self.get_logger().info(f'Trajectory mode: {self.trajectory_mode}')
         self.get_logger().info(f'Circle radius: {self.radius} m, frequency: {self.frequency} Hz')
         self.get_logger().info(f'Circle center: ({self.center_x}, {self.center_y}, {self.center_z})')
+        self.get_logger().info(
+            f'Z modulation amplitude: {self.z_amplitude} m, '
+            f'frequency multiplier: {self.z_frequency_multiplier}'
+        )
         self.get_logger().info(f'Trajectory start point: ({self.trajectory_start_x:.3f}, {self.trajectory_start_y:.3f}, {self.trajectory_start_z:.3f})')
         if self.use_transition:
             self.get_logger().info(f'Transition duration: {self.transition_duration} s')
@@ -169,6 +193,35 @@ class TrajectoryPublisher(Node):
                 
             except Exception as e:
                 self.get_logger().error(f'Error extracting robot initial position: {str(e)}')
+
+    def _compute_task_space_trajectory(self, t):
+        """计算 post-transition 轨迹；live 发布和 /future_task_space 共用，避免预测不一致。"""
+        omega = 2.0 * np.pi * self.frequency
+
+        x = self.center_x + self.radius * np.cos(omega * t)
+        y = self.center_y + self.radius * np.sin(omega * t)
+
+        dx = -self.radius * omega * np.sin(omega * t)
+        dy = self.radius * omega * np.cos(omega * t)
+
+        ddx = -self.radius * omega**2 * np.cos(omega * t)
+        ddy = -self.radius * omega**2 * np.sin(omega * t)
+
+        if self.trajectory_mode == 'z_modulated_circle':
+            z_omega = self.z_frequency_multiplier * omega
+            z = self.center_z + self.z_amplitude * np.sin(z_omega * t)
+            dz = self.z_amplitude * z_omega * np.cos(z_omega * t)
+            ddz = -self.z_amplitude * z_omega**2 * np.sin(z_omega * t)
+        else:
+            z = self.center_z
+            dz = 0.0
+            ddz = 0.0
+
+        x_des = [x, y, z, 0.0, 0.0, 0.0]
+        dx_des = [dx, dy, dz, 0.0, 0.0, 0.0]
+        ddx_des = [ddx, ddy, ddz, 0.0, 0.0, 0.0]
+
+        return x_des, dx_des, ddx_des
     
     def timer_callback(self):
         """timer callback function, period: 1ms"""
@@ -229,22 +282,10 @@ class TrajectoryPublisher(Node):
             # trajectory for uniform circular trajectory
             if self.transition_complete or not self.use_transition:
                 if elapsed_time > 0.0:
-                    omega = 2.0 * np.pi * self.frequency  # angular velocity
-                    
-                    # position: (x, y, z) for x_des[:3]
-                    x = self.center_x + self.radius * np.cos(omega * elapsed_time)
-                    y = self.center_y + self.radius * np.sin(omega * elapsed_time)
-                    z = self.center_z
-                    
-                    # velocity: (dx, dy, dz) for dx_des[:3]
-                    dx = -self.radius * omega * np.sin(omega * elapsed_time)
-                    dy = self.radius * omega * np.cos(omega * elapsed_time)
-                    dz = 0.0
-                    
-                    # acceleration: (ddx, ddy, ddz) for ddx_des[:3]
-                    ddx = -self.radius * omega**2 * np.cos(omega * elapsed_time)
-                    ddy = -self.radius * omega**2 * np.sin(omega * elapsed_time)
-                    ddz = 0.0
+                    x_des, dx_des, ddx_des = self._compute_task_space_trajectory(elapsed_time)
+                    x, y, z = x_des[:3]
+                    dx, dy, dz = dx_des[:3]
+                    ddx, ddy, ddz = ddx_des[:3]
             
             # publish on /task_space_command
             trajectory_msg = TaskSpaceCommand()
@@ -375,19 +416,7 @@ class TrajectoryPublisher(Node):
                 if t_circle < 0.0:
                     t_circle = 0.0
 
-                omega = 2.0 * np.pi * self.frequency
-
-                x = self.center_x + self.radius * np.cos(omega * t_circle)
-                y = self.center_y + self.radius * np.sin(omega * t_circle)
-                z = self.center_z
-
-                dx = -self.radius * omega * np.sin(omega * t_circle)
-                dy =  self.radius * omega * np.cos(omega * t_circle)
-                dz = 0.0
-
-                ddx = -self.radius * omega**2 * np.cos(omega * t_circle)
-                ddy = -self.radius * omega**2 * np.sin(omega * t_circle)
-                ddz = 0.0
+                return self._compute_task_space_trajectory(t_circle)
 
         else:
             # —— 没有过渡，直接圆轨迹，从 start_time 开始 —— #
@@ -395,19 +424,7 @@ class TrajectoryPublisher(Node):
             if elapsed_time < 0.0:
                 elapsed_time = 0.0
 
-            omega = 2.0 * np.pi * self.frequency
-
-            x = self.center_x + self.radius * np.cos(omega * elapsed_time)
-            y = self.center_y + self.radius * np.sin(omega * elapsed_time)
-            z = self.center_z
-
-            dx = -self.radius * omega * np.sin(omega * elapsed_time)
-            dy =  self.radius * omega * np.cos(omega * elapsed_time)
-            dz = 0.0
-
-            ddx = -self.radius * omega**2 * np.cos(omega * elapsed_time)
-            ddy = -self.radius * omega**2 * np.sin(omega * elapsed_time)
-            ddz = 0.0
+            return self._compute_task_space_trajectory(elapsed_time)
 
         x_des  = [x,  y,  z,  0.0, 0.0, 0.0]
         dx_des = [dx, dy, dz, 0.0, 0.0, 0.0]

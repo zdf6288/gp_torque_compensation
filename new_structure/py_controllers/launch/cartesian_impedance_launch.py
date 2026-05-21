@@ -5,6 +5,7 @@ from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
 
@@ -21,6 +22,12 @@ def generate_launch_description():
     gp_compensation_source_parameter_name = 'gp_compensation_source'
     gp_compensation_scale_parameter_name = 'gp_compensation_scale'
     gp_compensation_clip_nm_parameter_name = 'gp_compensation_clip_nm'
+    # Stage 3A trajectory 参数默认保持 planar_circle，只有显式传参才启用 z modulation。
+    trajectory_mode_parameter_name = 'trajectory_mode'
+    z_amplitude_parameter_name = 'z_amplitude'
+    z_frequency_multiplier_parameter_name = 'z_frequency_multiplier'
+    circle_frequency_parameter_name = 'circle_frequency'
+    transition_duration_parameter_name = 'transition_duration'
 
     robot_ip = LaunchConfiguration(robot_ip_parameter_name)
     load_gripper = LaunchConfiguration(load_gripper_parameter_name)
@@ -33,6 +40,11 @@ def generate_launch_description():
     gp_compensation_source = LaunchConfiguration(gp_compensation_source_parameter_name)
     gp_compensation_scale = LaunchConfiguration(gp_compensation_scale_parameter_name)
     gp_compensation_clip_nm = LaunchConfiguration(gp_compensation_clip_nm_parameter_name)
+    trajectory_mode = LaunchConfiguration(trajectory_mode_parameter_name)
+    z_amplitude = LaunchConfiguration(z_amplitude_parameter_name)
+    z_frequency_multiplier = LaunchConfiguration(z_frequency_multiplier_parameter_name)
+    circle_frequency = LaunchConfiguration(circle_frequency_parameter_name)
+    transition_duration = LaunchConfiguration(transition_duration_parameter_name)
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -80,6 +92,27 @@ def generate_launch_description():
             gp_compensation_clip_nm_parameter_name,
             default_value='0.5',
             description='Per-joint GP compensation clip in Nm.'),
+        # Stage 3A launch defaults 保持 Stage 1 / Stage 2A 的平面圆轨迹行为。
+        DeclareLaunchArgument(
+            trajectory_mode_parameter_name,
+            default_value='planar_circle',
+            description='Trajectory mode: planar_circle or z_modulated_circle.'),
+        DeclareLaunchArgument(
+            z_amplitude_parameter_name,
+            default_value='0.0',
+            description='Z modulation amplitude in meters for z_modulated_circle.'),
+        DeclareLaunchArgument(
+            z_frequency_multiplier_parameter_name,
+            default_value='0.5',
+            description='Z modulation frequency multiplier relative to circle omega.'),
+        DeclareLaunchArgument(
+            circle_frequency_parameter_name,
+            default_value='0.1',
+            description='Circle trajectory frequency in Hz.'),
+        DeclareLaunchArgument(
+            transition_duration_parameter_name,
+            default_value='3.0',
+            description='Smooth transition duration before trajectory recording starts.'),
 
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource([PathJoinSubstitution(
@@ -124,13 +157,15 @@ def generate_launch_description():
             executable='trajectory_publisher',
             name='trajectory_publisher',
             output='screen',
-            # parameters=[{
-            #     'circle_radius': 0.2,
-            #     'circle_frequency': 0.5,
-            #     'circle_center_x': 0.5,
-            #     'circle_center_y': 0.0,
-            #     'circle_center_z': 0.3,
-            # }]
+            parameters=[{
+                trajectory_mode_parameter_name: ParameterValue(trajectory_mode, value_type=str),
+                z_amplitude_parameter_name: ParameterValue(z_amplitude, value_type=float),
+                z_frequency_multiplier_parameter_name: ParameterValue(
+                    z_frequency_multiplier, value_type=float),
+                circle_frequency_parameter_name: ParameterValue(circle_frequency, value_type=float),
+                transition_duration_parameter_name: ParameterValue(
+                    transition_duration, value_type=float),
+            }]
         ),
         # Node(
         #     package='py_controllers',
