@@ -230,6 +230,7 @@ class CartesianImpedanceController(Node):
 
         # Stage 1: frozen GP / compensation 实验开关。默认保持原 online update 和原 model 路径。
         # compensation 默认关闭，避免 GP prediction 在未显式开启时影响最终 tau。
+        self.declare_parameter("gp_prediction_enabled", True)
         self.declare_parameter("gp_online_update_enabled", True)
         self.declare_parameter("gp_model_dir", "./new_structure/gp/gp_models")
         self.declare_parameter("gp_compensation_enabled", False)
@@ -237,6 +238,7 @@ class CartesianImpedanceController(Node):
         self.declare_parameter("gp_compensation_scale", 0.1)
         self.declare_parameter("gp_compensation_clip_nm", 0.5)
 
+        self.gp_prediction_enabled = self._get_bool_parameter("gp_prediction_enabled")
         self.gp_online_update_enabled = self._get_bool_parameter("gp_online_update_enabled")
         self.gp_model_dir = str(self.get_parameter("gp_model_dir").value)
         self.gp_compensation_enabled = self._get_bool_parameter("gp_compensation_enabled")
@@ -261,8 +263,22 @@ class CartesianImpedanceController(Node):
             )
             self.gp_compensation_source = "local"
 
+        if not self.gp_prediction_enabled and self.gp_compensation_enabled:
+            self.get_logger().warn(
+                "[GP] gp_prediction_enabled=false forces GP compensation OFF "
+                "even though gp_compensation_enabled=true was requested."
+            )
+            self.gp_compensation_enabled = False
+
+        if not self.gp_prediction_enabled and self.gp_online_update_enabled:
+            self.get_logger().warn(
+                "[GP] gp_prediction_enabled=false skips GP prediction and online updates; "
+                "gp_online_update_enabled has no effect in this run."
+            )
+
         self.get_logger().info(
             "[GP] Experiment controls: "
+            f"gp_prediction_enabled={self.gp_prediction_enabled}, "
             f"gp_online_update_enabled={self.gp_online_update_enabled}, "
             f"gp_model_dir='{self.gp_model_dir}', "
             f"gp_compensation_enabled={self.gp_compensation_enabled}, "
@@ -468,7 +484,11 @@ class CartesianImpedanceController(Node):
         # 当 TrajectoryPublisher 认为“transition 完成”时，会发 True
         if msg.data and not self.gp_active:
             self.gp_active = True
-            self.get_logger().info("[Controller] Data recording enabled -> GP compensation ACTIVATED")
+            self.get_logger().info(
+                "[Controller] Data recording enabled -> "
+                f"gp_prediction_enabled={self.gp_prediction_enabled}, "
+                f"gp_compensation_enabled={self.gp_compensation_enabled}"
+            )
         elif not msg.data and self.gp_active:
             # 如果你希望停轨迹时也关掉 GP，可以顺便关掉
             self.gp_active = False
@@ -494,6 +514,9 @@ class CartesianImpedanceController(Node):
         self.get_logger().debug(f"Got future traj: x={x_f[:3]}")
     
     def request_future_trajectory(self, t_delay):
+        if not self.gp_prediction_enabled:
+            return
+
         if not self.future_traj_client.service_is_ready():
             if not self._future_traj_warned:
                 self.get_logger().warn("/future_task_space service not ready")
@@ -812,7 +835,7 @@ class CartesianImpedanceController(Node):
             # q_pred_next = q.copy()
             # dq_pred_next = dq.copy()
 
-            if self.data_recording_enabled:
+            if self.data_recording_enabled and self.gp_prediction_enabled:
                 Td = dt   # 或者固定 0.001
                 self.request_future_trajectory(Td)
 
@@ -854,7 +877,7 @@ class CartesianImpedanceController(Node):
             # tau = tau
 
             # === 控制循环的最后：按节拍触发一次“GP 更新”（本地 + 云端） ===
-            if self.gp_active and self.use_gp:
+            if self.gp_active and self.use_gp and self.gp_prediction_enabled:
                 self.gp_counter += 1
                 tick = (self.gp_counter % self.gp_stride == 0)
                 # # ---------------------------------------------------------
@@ -1443,7 +1466,7 @@ class CartesianImpedanceController(Node):
 
     def _apply_gp_compensation(self, tau):
         # 默认不改变最终 tau，只有显式开启 gp_compensation_enabled 才进入 torque command。
-        if not self.gp_compensation_enabled:
+        if not self.gp_prediction_enabled or not self.gp_compensation_enabled:
             return tau
 
         # source 支持 local/cloud/combined；combined 使用两个 prediction 的保守平均。
@@ -1479,6 +1502,9 @@ class CartesianImpedanceController(Node):
         本地 GP：高维输入版本（14维 or 21维）
         每个关节都使用相同的 x_full = concat([q, dq, ddq])
         """
+
+        if not self.gp_prediction_enabled:
+            return np.zeros(7, dtype=float), np.ones(7, dtype=float) * 1e6
 
         if not self.gp_ready or not self.use_gp:
             print("[GP] GP not ready or not enabled; skipping prediction")
