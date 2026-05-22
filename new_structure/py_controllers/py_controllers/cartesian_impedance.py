@@ -1524,7 +1524,7 @@ class CartesianImpedanceController(Node):
         # ==================================================
         # 2) 每个关节都用同一 x_full 预测
         # ==================================================
-        for j in range(1, 7):
+        for j in range(1, 8):
 
             pack = models.get(j)
             if pack is None:
