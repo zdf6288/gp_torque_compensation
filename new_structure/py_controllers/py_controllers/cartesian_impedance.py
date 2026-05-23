@@ -835,6 +835,7 @@ class CartesianImpedanceController(Node):
             # q_pred_next = q.copy()
             # dq_pred_next = dq.copy()
 
+            dq_pred_next = dq_des_joint.copy()
             if self.data_recording_enabled and self.gp_prediction_enabled:
                 Td = dt   # 或者固定 0.001
                 self.request_future_trajectory(Td)
