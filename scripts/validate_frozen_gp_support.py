@@ -32,6 +32,8 @@ NEAR_ZERO_XS_EPS = 1e-5
 OUTSIDE_MARGIN = 5.0
 SEVERE_STD_ABS = 100.0
 PREDICTION_DIFF_EPS = 1e-9
+PREDICTION_SPAN_EPS = 1e-9
+PREDICTION_STD_EPS = 1e-9
 DEFAULT_OUT_DIR = Path("outputs/stage4_gp_model_validation")
 
 
@@ -47,12 +49,45 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sample-a", type=int, default=0, help="Formal sample index A. Negative indexing allowed.")
     parser.add_argument("--sample-b", type=int, default=-1, help="Formal sample index B. Negative indexing allowed.")
     parser.add_argument(
+        "--max-prediction-rows",
+        type=int,
+        default=0,
+        help="Max formal rows for full-run prediction span check. 0 means all rows.",
+    )
+    parser.add_argument(
+        "--gp-online-update-enabled",
+        type=parse_optional_bool,
+        default=None,
+        help="Optional runtime parameter value used for frozen formal safety preflight.",
+    )
+    parser.add_argument(
+        "--gp-compensation-scale",
+        type=float,
+        default=None,
+        help="Optional runtime parameter value used for frozen formal safety preflight.",
+    )
+    parser.add_argument(
+        "--gp-compensation-clip-nm",
+        type=float,
+        default=None,
+        help="Optional runtime parameter value used for frozen formal safety preflight.",
+    )
+    parser.add_argument(
         "--feature-source",
         choices=("joint_vel", "dq_des_joint"),
         default="joint_vel",
         help="Velocity feature source for X = joint_pos_1..7 + velocity_1..7. Default: joint_vel.",
     )
     return parser.parse_args()
+
+
+def parse_optional_bool(value: str) -> bool:
+    normalized = value.strip().lower()
+    if normalized in ("1", "true", "yes", "y", "on"):
+        return True
+    if normalized in ("0", "false", "no", "n", "off"):
+        return False
+    raise argparse.ArgumentTypeError(f"expected boolean value, got {value!r}")
 
 
 def ensure_skygp_import() -> None:
@@ -335,6 +370,130 @@ def predict_once(model: Any, x_std: np.ndarray, Ym: float, Ys: float) -> dict[st
         }
     except Exception as exc:
         return {"ok": False, "error": f"predict failed: {exc}"}
+
+
+def prediction_row_indices(total_rows: int, max_rows: int) -> np.ndarray:
+    if total_rows <= 0:
+        return np.asarray([], dtype=int)
+    if max_rows <= 0 or max_rows >= total_rows:
+        return np.arange(total_rows, dtype=int)
+    return np.unique(np.rint(np.linspace(0, total_rows - 1, max_rows)).astype(int))
+
+
+def format_prediction_indices(indices: np.ndarray, total_rows: int) -> str:
+    if indices.size == 0:
+        return ""
+    if indices.size == total_rows and int(indices[0]) == 0 and int(indices[-1]) == total_rows - 1:
+        return "all"
+    if indices.size > 20:
+        return f"{int(indices[0])};...;{int(indices[-1])} ({indices.size} evenly sampled rows)"
+    return format_array(indices)
+
+
+def formal_prediction_span_row(
+    mode_name: str,
+    joint: int,
+    model: Any,
+    Xm: np.ndarray,
+    Xs: np.ndarray,
+    Ym_array: np.ndarray,
+    Ys_array: np.ndarray,
+    x_formal: np.ndarray,
+    selected_indices: np.ndarray,
+    max_prediction_rows: int,
+) -> dict[str, Any]:
+    x_dim = int(Xm.size)
+    Ym = first_scalar(Ym_array, default=0.0)
+    Ys = first_scalar(Ys_array, default=1.0)
+    if Ys == 0.0:
+        Ys = 1.0
+
+    try:
+        model_copy = copy.deepcopy(model)
+    except Exception as exc:
+        error = f"deepcopy failed: {exc}"
+        return {
+            "mode_name": mode_name,
+            "joint": joint,
+            "formal_rows_total": int(x_formal.shape[0]),
+            "formal_rows_selected": int(selected_indices.size),
+            "formal_rows_predicted": 0,
+            "max_prediction_rows": max_prediction_rows,
+            "selected_row_indices": format_prediction_indices(selected_indices, int(x_formal.shape[0])),
+            "raw_prediction_min": "nan",
+            "raw_prediction_max": "nan",
+            "raw_prediction_span": "nan",
+            "raw_prediction_std": "nan",
+            "destd_prediction_min": "nan",
+            "destd_prediction_max": "nan",
+            "destd_prediction_span": "nan",
+            "destd_prediction_std": "nan",
+            "formal_prediction_constant_fullrun": "false",
+            "formal_prediction_complete": "false",
+            "prediction_error": "true",
+            "prediction_error_message": error,
+            "prediction_errors": error,
+        }
+
+    raw_values = []
+    errors = []
+    formal_std = standardize_features(x_formal, Xm, Xs, x_dim)
+    reset_prediction_state(model_copy)
+    for row_index in selected_indices:
+        try:
+            mu_std, _ = model_copy.predict(np.asarray(formal_std[row_index], dtype=np.float32))
+            raw_values.append(first_scalar(mu_std))
+        except Exception as exc:
+            errors.append(f"row {int(row_index)}: {exc}")
+
+    raw_array = np.asarray(raw_values, dtype=float)
+    destd_array = raw_array * Ys + Ym
+    if raw_array.size:
+        raw_min = float(np.nanmin(raw_array))
+        raw_max = float(np.nanmax(raw_array))
+        raw_span = raw_max - raw_min
+        raw_std = float(np.nanstd(raw_array))
+        destd_min = float(np.nanmin(destd_array))
+        destd_max = float(np.nanmax(destd_array))
+        destd_span = destd_max - destd_min
+        destd_std = float(np.nanstd(destd_array))
+        is_constant = (
+            math.isfinite(raw_span)
+            and math.isfinite(raw_std)
+            and raw_span <= PREDICTION_SPAN_EPS
+            and raw_std <= PREDICTION_STD_EPS
+        )
+    else:
+        raw_min = raw_max = raw_span = raw_std = math.nan
+        destd_min = destd_max = destd_span = destd_std = math.nan
+        is_constant = False
+
+    prediction_complete = raw_array.size == selected_indices.size and not errors
+    prediction_error = bool(errors)
+    prediction_error_message = " | ".join(errors)
+
+    return {
+        "mode_name": mode_name,
+        "joint": joint,
+        "formal_rows_total": int(x_formal.shape[0]),
+        "formal_rows_selected": int(selected_indices.size),
+        "formal_rows_predicted": int(raw_array.size),
+        "max_prediction_rows": max_prediction_rows,
+        "selected_row_indices": format_prediction_indices(selected_indices, int(x_formal.shape[0])),
+        "raw_prediction_min": format_float(raw_min),
+        "raw_prediction_max": format_float(raw_max),
+        "raw_prediction_span": format_float(raw_span),
+        "raw_prediction_std": format_float(raw_std),
+        "destd_prediction_min": format_float(destd_min),
+        "destd_prediction_max": format_float(destd_max),
+        "destd_prediction_span": format_float(destd_span),
+        "destd_prediction_std": format_float(destd_std),
+        "formal_prediction_constant_fullrun": format_bool(is_constant),
+        "formal_prediction_complete": format_bool(prediction_complete),
+        "prediction_error": format_bool(prediction_error),
+        "prediction_error_message": prediction_error_message,
+        "prediction_errors": prediction_error_message,
+    }
 
 
 def model_state_row(
@@ -650,6 +809,7 @@ def classify_statuses(
     support_rows: list[dict[str, Any]],
     distribution_check_rows: list[dict[str, Any]],
     prediction_rows: list[dict[str, Any]],
+    formal_span_rows: list[dict[str, Any]],
 ) -> list[str]:
     statuses = []
     if any(bool_from_row(row, "appears_empty") for row in model_rows):
@@ -658,6 +818,8 @@ def classify_statuses(
         statuses.append("fail_formal_out_of_support")
     if prediction_rows and all(not bool_from_row(row, "formal_prediction_input_dependent") for row in prediction_rows):
         statuses.append("fail_constant_formal_prediction")
+    if formal_span_rows and all(bool_from_row(row, "formal_prediction_constant_fullrun") for row in formal_span_rows):
+        statuses.append("fail_constant_formal_prediction_fullrun")
     if any(int(row.get("near_zero_Xs_count", 0)) > 0 for row in model_rows):
         statuses.append("warning_near_zero_scaler")
     if any(
@@ -677,6 +839,184 @@ def classify_statuses(
     return statuses
 
 
+def row_float(row: dict[str, Any], key: str, default: float = math.nan) -> float:
+    try:
+        return float(row.get(key, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def row_int(row: dict[str, Any], key: str, default: int = 0) -> int:
+    try:
+        return int(float(row.get(key, default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def optional_bool_text(value: bool | None) -> str:
+    if value is None:
+        return ""
+    return format_bool(value)
+
+
+def safety_parameter_check(args: argparse.Namespace) -> dict[str, str]:
+    warnings = []
+    blocking = []
+
+    if args.gp_online_update_enabled is None:
+        warnings.append("gp_online_update_enabled not provided")
+    elif args.gp_online_update_enabled:
+        blocking.append("gp_online_update_enabled should be false for frozen formal tests")
+
+    if args.gp_compensation_scale is None:
+        warnings.append("gp_compensation_scale not provided")
+    elif not math.isfinite(args.gp_compensation_scale):
+        blocking.append("gp_compensation_scale must be finite")
+    elif args.gp_compensation_scale >= 1.0:
+        blocking.append("gp_compensation_scale >= 1.0 is not conservative")
+    elif args.gp_compensation_scale < 0.0:
+        warnings.append("gp_compensation_scale is negative")
+
+    if args.gp_compensation_clip_nm is None:
+        warnings.append("gp_compensation_clip_nm not provided")
+    elif not math.isfinite(args.gp_compensation_clip_nm):
+        blocking.append("gp_compensation_clip_nm must be finite")
+    elif args.gp_compensation_clip_nm < 0.0:
+        blocking.append("gp_compensation_clip_nm must not be negative")
+    elif args.gp_compensation_clip_nm == 0.0:
+        warnings.append("gp_compensation_clip_nm=0 may clip compensation to zero; it is not treated as no-clip")
+    elif args.gp_compensation_clip_nm >= 1.0e6:
+        blocking.append("gp_compensation_clip_nm is effectively no clip")
+
+    status = "pass" if not warnings and not blocking else "warning"
+    if blocking:
+        status = "fail"
+    return {
+        "safety_parameter_status": status,
+        "safety_warnings": " | ".join(warnings),
+        "safety_blocking_reasons": " | ".join(blocking),
+    }
+
+
+def preflight_gate_summary_row(
+    args: argparse.Namespace,
+    model_rows: list[dict[str, Any]],
+    support_rows: list[dict[str, Any]],
+    distribution_check_rows: list[dict[str, Any]],
+    prediction_rows: list[dict[str, Any]],
+    formal_span_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    num_joints = len(model_rows)
+    num_empty = sum(bool_from_row(row, "appears_empty") for row in model_rows)
+    num_trained = sum(bool_from_row(row, "appears_trained") for row in model_rows)
+    num_near_zero = sum(row_int(row, "near_zero_Xs_count") > 0 for row in model_rows)
+    num_out_of_support = sum(bool_from_row(row, "formal_likely_out_of_support") for row in support_rows)
+    num_constant_full = sum(bool_from_row(row, "formal_prediction_constant_fullrun") for row in formal_span_rows)
+    num_support_dependent = sum(bool_from_row(row, "support_prediction_input_dependent") for row in prediction_rows)
+    num_prediction_error = sum(bool_from_row(row, "prediction_error") for row in formal_span_rows)
+    num_incomplete_prediction = sum(not bool_from_row(row, "formal_prediction_complete") for row in formal_span_rows)
+    num_distribution_shift = sum(
+        bool_from_row(row, "near_zero_train_std") or bool_from_row(row, "formal_outside_train_minmax")
+        for row in distribution_check_rows
+    )
+
+    worst_support_row = max(
+        support_rows,
+        key=lambda row: row_float(row, "max_abs_standardized_formal_value", default=-1.0),
+        default={},
+    )
+    worst_dimension = str(worst_support_row.get("worst_dimension_name", ""))
+    worst_formal_abs_std = row_float(worst_support_row, "max_abs_standardized_formal_value")
+
+    if num_empty:
+        overall_status = "fail_model_empty"
+    elif num_out_of_support:
+        overall_status = "fail_formal_out_of_support"
+    elif num_constant_full:
+        overall_status = "fail_constant_formal_prediction"
+    elif num_prediction_error:
+        overall_status = "fail_prediction_error"
+    elif num_incomplete_prediction:
+        overall_status = "fail_incomplete_formal_prediction"
+    elif num_near_zero:
+        overall_status = "fail_near_zero_scaler"
+    elif num_trained == num_joints and num_joints > 0:
+        overall_status = "pass_ready_for_conservative_robot_validation"
+    else:
+        overall_status = "unknown"
+
+    safety = safety_parameter_check(args)
+    safety_passed = safety["safety_parameter_status"] == "pass"
+    blocking_reasons = []
+    risk_reasons = []
+    if num_empty:
+        blocking_reasons.append("model_empty")
+    if num_out_of_support:
+        blocking_reasons.append("formal_out_of_support")
+    if num_constant_full:
+        blocking_reasons.append("constant_formal_prediction_fullrun")
+    if num_prediction_error:
+        blocking_reasons.append("prediction_error")
+    if num_incomplete_prediction:
+        blocking_reasons.append("incomplete_formal_prediction")
+    if not safety_passed:
+        blocking_reasons.append("safety_parameter_failure")
+    if num_near_zero:
+        risk_reasons.append("near_zero_scaler")
+    if num_distribution_shift:
+        risk_reasons.append("train_formal_distribution_shift")
+
+    gate_pass = (
+        num_empty == 0
+        and num_out_of_support == 0
+        and num_constant_full == 0
+        and num_prediction_error == 0
+        and num_incomplete_prediction == 0
+        and safety_passed
+        and overall_status == "pass_ready_for_conservative_robot_validation"
+    )
+
+    if gate_pass:
+        recommended_action = (
+            "ready only for conservative read-only-reviewed frozen robot validation; keep online update off, "
+            "keep compensation clipped, and do not bypass safety gating"
+        )
+    else:
+        recommended_action = (
+            "do not run real-robot scale sweep yet; regenerate or retrain matched frozen models; rerun validator; "
+            "treat current GP-on runs as fixed-bias compensation observations"
+        )
+
+    return {
+        "mode_name": args.mode_name,
+        "overall_status": overall_status,
+        "gate_pass": format_bool(gate_pass),
+        "num_joints": num_joints,
+        "num_empty_models": int(num_empty),
+        "num_trained_models": int(num_trained),
+        "num_near_zero_scaler_joints": int(num_near_zero),
+        "num_out_of_support_joints": int(num_out_of_support),
+        "num_constant_formal_prediction_joints": int(num_constant_full),
+        "num_prediction_error_joints": int(num_prediction_error),
+        "num_incomplete_formal_prediction_joints": int(num_incomplete_prediction),
+        "num_training_support_input_dependent_joints": int(num_support_dependent),
+        "num_train_formal_distribution_shift_dimensions": int(num_distribution_shift),
+        "worst_dimension": worst_dimension,
+        "worst_formal_abs_std": format_float(worst_formal_abs_std),
+        "gp_online_update_enabled": optional_bool_text(args.gp_online_update_enabled),
+        "gp_compensation_scale": "" if args.gp_compensation_scale is None else format_float(args.gp_compensation_scale),
+        "gp_compensation_clip_nm": ""
+        if args.gp_compensation_clip_nm is None
+        else format_float(args.gp_compensation_clip_nm),
+        "safety_parameter_status": safety["safety_parameter_status"],
+        "safety_warnings": safety["safety_warnings"],
+        "safety_blocking_reasons": safety["safety_blocking_reasons"],
+        "blocking_reasons": format_list(blocking_reasons),
+        "risk_reasons": format_list(risk_reasons),
+        "recommended_action": recommended_action,
+    }
+
+
 def write_summary(
     path: Path,
     args: argparse.Namespace,
@@ -687,11 +1027,16 @@ def write_summary(
     support_rows: list[dict[str, Any]],
     distribution_check_rows: list[dict[str, Any]],
     prediction_rows: list[dict[str, Any]],
+    formal_span_rows: list[dict[str, Any]],
+    preflight_row: dict[str, Any],
     statuses: list[str],
 ) -> None:
     out_of_support = any(bool_from_row(row, "formal_likely_out_of_support") for row in support_rows)
     constant_formal = prediction_rows and all(
         not bool_from_row(row, "formal_prediction_input_dependent") for row in prediction_rows
+    )
+    constant_formal_fullrun = formal_span_rows and all(
+        bool_from_row(row, "formal_prediction_constant_fullrun") for row in formal_span_rows
     )
     support_varies = prediction_rows and any(
         bool_from_row(row, "support_prediction_input_dependent") for row in prediction_rows
@@ -752,6 +1097,31 @@ def write_summary(
         ]
         for row in prediction_rows
     ]
+    full_prediction_table_rows = [
+        [
+            row["joint"],
+            row["formal_rows_selected"],
+            row["formal_rows_predicted"],
+            row["raw_prediction_span"],
+            row["raw_prediction_std"],
+            row["destd_prediction_span"],
+            row["destd_prediction_std"],
+            row["formal_prediction_constant_fullrun"],
+            row["formal_prediction_complete"],
+            row["prediction_error"],
+        ]
+        for row in formal_span_rows
+    ]
+
+    gate_pass = bool_from_row(preflight_row, "gate_pass")
+    blocking_reasons = str(preflight_row.get("blocking_reasons", ""))
+    risk_reasons = str(preflight_row.get("risk_reasons", ""))
+    if not blocking_reasons and not gate_pass:
+        blocking_reasons = str(preflight_row.get("overall_status", "unknown"))
+    near_zero_warning_text = "present" if near_zero_scaler else "not observed"
+    safety_text = preflight_row.get("safety_parameter_status", "unknown")
+    if preflight_row.get("safety_warnings"):
+        safety_text += f" ({preflight_row['safety_warnings']})"
 
     if out_of_support and constant_formal:
         recommendation = (
@@ -775,6 +1145,10 @@ def write_summary(
         f"- feature_source: `{args.feature_source}`",
         f"- feature_definition: `[{', '.join(feature_name_list)}]`",
         f"- formal_samples: `{sample_a}` and `{sample_b}`",
+        f"- max_prediction_rows: `{args.max_prediction_rows}`",
+        f"- gp_online_update_enabled: `{optional_bool_text(args.gp_online_update_enabled) or 'not provided'}`",
+        f"- gp_compensation_scale: `{preflight_row['gp_compensation_scale'] or 'not provided'}`",
+        f"- gp_compensation_clip_nm: `{preflight_row['gp_compensation_clip_nm'] or 'not provided'}`",
         "",
         "## Status",
         "",
@@ -784,6 +1158,24 @@ def write_summary(
         f"- formal_vs_training_csv_distribution_shift: `{format_bool(distribution_shift)}`",
         f"- formal_prediction_constant: `{format_bool(bool(constant_formal))}`",
         f"- training_support_prediction_varies: `{format_bool(bool(support_varies))}`",
+        "",
+        "## Offline Preflight Gate",
+        "",
+        f"- result: `{'PASS' if gate_pass else 'FAIL'}`",
+        f"- overall_status: `{preflight_row['overall_status']}`",
+        f"- gate_pass: `{preflight_row['gate_pass']}`",
+        f"- blocking_reasons: `{blocking_reasons or 'none'}`",
+        f"- risk_reasons: `{risk_reasons or 'none'}`",
+        f"- near_zero_scaler_warnings: `{near_zero_warning_text}`",
+        f"- formal_out_of_support: `{format_bool(out_of_support)}`",
+        f"- full_formal_prediction_constant: `{format_bool(bool(constant_formal_fullrun))}`",
+        f"- prediction_error_joints: `{preflight_row['num_prediction_error_joints']}`",
+        f"- incomplete_formal_prediction_joints: `{preflight_row['num_incomplete_formal_prediction_joints']}`",
+        f"- train_formal_distribution_shift_dimensions: `{preflight_row['num_train_formal_distribution_shift_dimensions']}`",
+        f"- worst_dimension: `{preflight_row['worst_dimension']}`",
+        f"- training_support_predictions_vary: `{format_bool(bool(support_varies))}`",
+        f"- safety_parameter_check: `{safety_text}`",
+        f"- recommended_next_step: {preflight_row['recommended_action']}",
         "",
         "## Model Inventory",
         "",
@@ -839,6 +1231,24 @@ def write_summary(
             prediction_table_rows,
         ),
         "",
+        "## Full Formal Prediction Span",
+        "",
+        markdown_table(
+            [
+                "joint",
+                "selected",
+                "predicted",
+                "raw_span",
+                "raw_std",
+                "destd_span",
+                "destd_std",
+                "constant_fullrun",
+                "complete",
+                "prediction_error",
+            ],
+            full_prediction_table_rows,
+        ),
+        "",
         "## Interpretation",
         "",
         f"- Recommended next step: {recommendation}",
@@ -875,10 +1285,12 @@ def main() -> int:
     x_train_csv = build_feature_matrix(train_dataset, args.feature_source, str(args.train_csv))
     sample_a = resolve_sample_index(args.sample_a, x_formal.shape[0], "formal CSV")
     sample_b = resolve_sample_index(args.sample_b, x_formal.shape[0], "formal CSV")
+    selected_prediction_indices = prediction_row_indices(x_formal.shape[0], args.max_prediction_rows)
 
     model_rows: list[dict[str, Any]] = []
     support_rows: list[dict[str, Any]] = []
     prediction_rows: list[dict[str, Any]] = []
+    formal_span_rows: list[dict[str, Any]] = []
 
     for joint in JOINTS:
         path = args.model_dir / f"joint{joint}_local.pkl"
@@ -915,6 +1327,20 @@ def main() -> int:
                 sample_b,
             )
         )
+        formal_span_rows.append(
+            formal_prediction_span_row(
+                args.mode_name,
+                joint,
+                pack_info["model"],
+                Xm,
+                Xs,
+                Ym,
+                Ys,
+                x_formal,
+                selected_prediction_indices,
+                args.max_prediction_rows,
+            )
+        )
 
     distribution_check_rows = distribution_rows(
         args.mode_name,
@@ -924,7 +1350,15 @@ def main() -> int:
         x_formal,
         feature_name_list,
     )
-    statuses = classify_statuses(model_rows, support_rows, distribution_check_rows, prediction_rows)
+    statuses = classify_statuses(model_rows, support_rows, distribution_check_rows, prediction_rows, formal_span_rows)
+    preflight_row = preflight_gate_summary_row(
+        args,
+        model_rows,
+        support_rows,
+        distribution_check_rows,
+        prediction_rows,
+        formal_span_rows,
+    )
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     write_csv(args.out_dir / "model_state_summary.csv", model_rows, list(model_rows[0].keys()))
@@ -935,6 +1369,12 @@ def main() -> int:
         list(distribution_check_rows[0].keys()),
     )
     write_csv(args.out_dir / "prediction_sanity_per_joint.csv", prediction_rows, list(prediction_rows[0].keys()))
+    write_csv(
+        args.out_dir / "formal_prediction_span_per_joint.csv",
+        formal_span_rows,
+        list(formal_span_rows[0].keys()),
+    )
+    write_csv(args.out_dir / "preflight_gate_summary.csv", [preflight_row], list(preflight_row.keys()))
     write_summary(
         args.out_dir / "summary.md",
         args,
@@ -945,11 +1385,15 @@ def main() -> int:
         support_rows,
         distribution_check_rows,
         prediction_rows,
+        formal_span_rows,
+        preflight_row,
         statuses,
     )
 
     print(f"mode_name: {args.mode_name}")
     print(f"classifications: {', '.join(statuses)}")
+    print(f"preflight_gate_pass: {preflight_row['gate_pass']}")
+    print(f"overall_status: {preflight_row['overall_status']}")
     print(f"wrote: {args.out_dir}")
     return 0
 
