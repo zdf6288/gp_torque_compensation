@@ -212,11 +212,15 @@ def detect_time_column(columns: Iterable[str]) -> str | None:
     return candidates[0]
 
 
-def required_columns() -> list[str]:
-    columns = list(TRACKING_ACTUAL) + list(TRACKING_DESIRED)
+def fatal_required_columns() -> list[str]:
+    columns = []
     columns.extend(f"tau_residual_{joint}" for joint in JOINTS)
     columns.extend(f"y_hat_local_{joint}" for joint in JOINTS)
     return columns
+
+
+def optional_tracking_columns() -> list[str]:
+    return list(TRACKING_ACTUAL) + list(TRACKING_DESIRED)
 
 
 def load_csv(path: Path, mode_name: str, run_kind: str = "fullrun") -> dict[str, object]:
@@ -235,7 +239,7 @@ def load_csv(path: Path, mode_name: str, run_kind: str = "fullrun") -> dict[str,
 
     arrays = {column: np.asarray(values, dtype=float) for column, values in data.items()}
     rows = len(next(iter(arrays.values()))) if arrays else 0
-    missing = [column for column in required_columns() if column not in columns]
+    missing = [column for column in fatal_required_columns() if column not in columns]
     if missing:
         raise ValueError(f"{path}: missing required columns: {', '.join(missing)}")
     print(f"Loaded {path}: mode={mode_name}, kind={run_kind}, rows={rows}, columns={len(columns)}")
@@ -258,14 +262,70 @@ def resolve_partial_runs(pattern: str, mode_name: str) -> tuple[list[dict[str, o
 
 
 def tracking_arrays(dataset: dict[str, object], length: int | None = None) -> tuple["np.ndarray", "np.ndarray"]:
+    actual_cols, desired_cols, missing = detect_tracking_columns(dataset)
+    rows = int(dataset["rows"])
+    output_length = min(length, rows) if length is not None else rows
+    if missing:
+        matrix = np.full((output_length, 3), math.nan, dtype=float)
+        norms = np.full(output_length, math.nan, dtype=float)
+        return matrix, norms
+
     data = dataset["data"]
     errors = []
-    for actual_col, desired_col in zip(TRACKING_ACTUAL, TRACKING_DESIRED):
+    for actual_col, desired_col in zip(actual_cols, desired_cols):
         values = data[actual_col] - data[desired_col]
         errors.append(values[:length] if length is not None else values)
     matrix = np.vstack(errors).T
     norms = np.linalg.norm(matrix, axis=1)
     return matrix, norms
+
+
+def detect_tracking_columns(dataset: dict[str, object]) -> tuple[tuple[str, str, str] | None, tuple[str, str, str] | None, list[str]]:
+    columns = set(dataset["columns"])
+    missing = [column for column in optional_tracking_columns() if column not in columns]
+    if missing:
+        return None, None, missing
+    return TRACKING_ACTUAL, TRACKING_DESIRED, []
+
+
+def make_tracking_paper_metric_rows(datasets: list[dict[str, object]]) -> list[dict[str, object]]:
+    rows = []
+    for dataset in datasets:
+        actual_cols, desired_cols, missing = detect_tracking_columns(dataset)
+        row = {
+            "mode_name": dataset["mode_name"],
+            "csv_file": dataset["path"].name,
+            "rows": dataset["rows"],
+            "status": "unavailable_missing_tracking_columns" if missing else "ok",
+            "tracking_columns_available": not missing,
+            "missing_columns": ",".join(missing),
+            "actual_columns": ",".join(actual_cols or ()),
+            "desired_columns": ",".join(desired_cols or ()),
+            "RMSE_x_mm": math.nan,
+            "e_x_max_mm": math.nan,
+            "e_x_p95_mm": math.nan,
+            "x_RMSE_mm": math.nan,
+            "y_RMSE_mm": math.nan,
+            "z_RMSE_mm": math.nan,
+            "x_max_abs_mm": math.nan,
+            "y_max_abs_mm": math.nan,
+            "z_max_abs_mm": math.nan,
+        }
+        if not missing:
+            errors, norms = tracking_arrays(dataset)
+            row.update({
+                "RMSE_x_mm": rms(norms) * 1000.0,
+                "e_x_max_mm": max_abs(norms) * 1000.0,
+                "e_x_p95_mm": p95_abs(norms) * 1000.0,
+                "x_RMSE_mm": rms(errors[:, 0]) * 1000.0,
+                "y_RMSE_mm": rms(errors[:, 1]) * 1000.0,
+                "z_RMSE_mm": rms(errors[:, 2]) * 1000.0,
+                "x_max_abs_mm": max_abs(errors[:, 0]) * 1000.0,
+                "y_max_abs_mm": max_abs(errors[:, 1]) * 1000.0,
+                "z_max_abs_mm": max_abs(errors[:, 2]) * 1000.0,
+            })
+        rows.append(row)
+    return rows
 
 
 def joint_values(dataset: dict[str, object], prefix: str, joint: int, length: int | None = None) -> "np.ndarray":
@@ -570,6 +630,77 @@ def make_tau_residual_comparison_rows(datasets: list[dict[str, object]]) -> list
                     else math.nan
                 ),
             })
+    return rows
+
+
+def compensation_scale_for_dataset(dataset: dict[str, object]) -> tuple[float, str]:
+    mode = str(dataset["mode_name"])
+    if "scale03" in mode:
+        return 0.3, "inferred_from_mode_name_scale03"
+    return math.nan, "unavailable"
+
+
+def residual_prediction_metric_row(
+    dataset: dict[str, object],
+    joint: int | str,
+    tau: "np.ndarray",
+    yhat: "np.ndarray",
+    scale: float,
+    scale_source: str,
+) -> dict[str, object]:
+    tau_finite, yhat_finite = finite_pair(tau, yhat)
+    scaled_yhat = scale * yhat_finite if np.isfinite(scale) else np.full_like(yhat_finite, math.nan)
+    rmse_yhat = rms(tau_finite - yhat_finite)
+    rmse_negative_yhat = rms(tau_finite + yhat_finite)
+    rmse_scaled = rms(tau_finite - scaled_yhat)
+    rmse_negative_scaled = rms(tau_finite + scaled_yhat)
+    candidates = {
+        "y_hat": rmse_yhat,
+        "negative_y_hat": rmse_negative_yhat,
+        "scaled_y_hat": rmse_scaled,
+        "negative_scaled_y_hat": rmse_negative_scaled,
+    }
+    finite_candidates = {name: value for name, value in candidates.items() if np.isfinite(value)}
+    best_direction = min(finite_candidates, key=finite_candidates.get) if finite_candidates else "unavailable"
+    return {
+        "mode_name": dataset["mode_name"],
+        "csv_file": dataset["path"].name,
+        "joint": joint,
+        "rows": len(tau_finite),
+        "scale_used": scale,
+        "scale_source": scale_source,
+        "tau_residual_RMS": rms(tau_finite),
+        "y_hat_local_RMS": rms(yhat_finite),
+        "scaled_y_hat_RMS": rms(scaled_yhat),
+        "RMSE_tau_residual_vs_y_hat": rmse_yhat,
+        "RMSE_tau_residual_vs_negative_y_hat": rmse_negative_yhat,
+        "RMSE_tau_residual_vs_scaled_y_hat": rmse_scaled,
+        "RMSE_tau_residual_vs_negative_scaled_y_hat": rmse_negative_scaled,
+        "sign_convention_best_direction": best_direction,
+        "sign_convention_caveat": (
+            "diagnostic_only_until_residual_target_and_gp_output_sign_convention_are_confirmed"
+        ),
+    }
+
+
+def make_residual_prediction_paper_metric_rows(datasets: list[dict[str, object]]) -> list[dict[str, object]]:
+    rows = []
+    for dataset in datasets:
+        if dataset["mode_name"] not in GP_MODES:
+            continue
+        scale, scale_source = compensation_scale_for_dataset(dataset)
+        all_tau = []
+        all_yhat = []
+        for joint in JOINTS:
+            tau = joint_values(dataset, "tau_residual", joint)
+            yhat = joint_values(dataset, "y_hat_local", joint)
+            tau_finite, yhat_finite = finite_pair(tau, yhat)
+            all_tau.append(tau_finite)
+            all_yhat.append(yhat_finite)
+            rows.append(residual_prediction_metric_row(dataset, joint, tau, yhat, scale, scale_source))
+        tau_all = np.concatenate(all_tau) if all_tau else np.asarray([], dtype=float)
+        yhat_all = np.concatenate(all_yhat) if all_yhat else np.asarray([], dtype=float)
+        rows.append(residual_prediction_metric_row(dataset, "all", tau_all, yhat_all, scale, scale_source))
     return rows
 
 
@@ -1063,6 +1194,8 @@ def write_markdown_summary(
     alignment_summary: list[dict[str, object]],
     yhat_rows: list[dict[str, object]],
     tau_rows: list[dict[str, object]],
+    tracking_paper_rows: list[dict[str, object]],
+    residual_paper_rows: list[dict[str, object]],
     tracking_rows: list[dict[str, object]],
     scale_summary: list[dict[str, object]],
     partial_rows: list[dict[str, object]],
@@ -1072,6 +1205,9 @@ def write_markdown_summary(
     scale03_summary = [row for row in scale_summary if abs(float(row["scale"]) - 0.3) < EPS]
     scale10_summary = [row for row in scale_summary if abs(float(row["scale"]) - 1.0) < EPS]
     suspicious_rows = sorted(alignment_rows, key=lambda row: float(row["suspicious_score"]), reverse=True)[:8]
+    tracking_available = [row for row in tracking_paper_rows if row["tracking_columns_available"]]
+    tracking_unavailable = [row for row in tracking_paper_rows if not row["tracking_columns_available"]]
+    residual_all_rows = [row for row in residual_paper_rows if row["joint"] == "all"]
 
     lines = [
         "# Stage 4 GP Diagnostic Summary",
@@ -1138,6 +1274,82 @@ def write_markdown_summary(
                 for row in suspicious_rows
             ],
         ),
+        "",
+        "## Paper-Aligned Metrics",
+        "",
+        "`RMSE_x_mm` corresponds to the paper-style trajectory tracking `RMSE_x = sqrt(1/N sum ||x(t_k) - x_d(t_k)||^2)`. `e_x_max_mm` corresponds to `e_x,max = max_k ||x(t_k) - x_d(t_k)||`. `e_x_p95_mm` is an extra diagnostic percentile, not a required paper metric.",
+        "",
+        "Tracking paper metrics:",
+        "",
+        md_table(
+            ["mode", "rows", "RMSE_x mm", "e_x,max mm", "e_x p95 mm"],
+            [
+                [
+                    row["mode_name"],
+                    row["rows"],
+                    fmt(row["RMSE_x_mm"], 3),
+                    fmt(row["e_x_max_mm"], 3),
+                    fmt(row["e_x_p95_mm"], 3),
+                ]
+                for row in tracking_available
+            ],
+        ) if tracking_available else "Tracking paper metrics unavailable: required Cartesian actual/desired columns were not found.",
+        "",
+    ]
+
+    if tracking_unavailable:
+        lines.extend([
+            "Unavailable tracking metrics:",
+            "",
+            "Tracking metrics unavailable because required Cartesian tracking columns are missing.",
+            "",
+            md_table(
+                ["mode", "status", "missing columns"],
+                [[row["mode_name"], row["status"], row["missing_columns"]] for row in tracking_unavailable],
+            ),
+            "",
+        ])
+
+    lines.extend([
+        "Residual prediction RMSE-style metrics for local/frozen GP modes:",
+        "",
+        md_table(
+            [
+                "mode",
+                "joint",
+                "tau RMS",
+                "y_hat RMS",
+                "scale",
+                "RMSE residual-y_hat",
+                "RMSE residual+y_hat",
+                "RMSE residual-scale*y_hat",
+                "RMSE residual+scale*y_hat",
+                "best direction hint",
+            ],
+            [
+                [
+                    row["mode_name"],
+                    row["joint"],
+                    fmt(row["tau_residual_RMS"], 6),
+                    fmt(row["y_hat_local_RMS"], 6),
+                    fmt(row["scale_used"], 3),
+                    fmt(row["RMSE_tau_residual_vs_y_hat"], 6),
+                    fmt(row["RMSE_tau_residual_vs_negative_y_hat"], 6),
+                    fmt(row["RMSE_tau_residual_vs_scaled_y_hat"], 6),
+                    fmt(row["RMSE_tau_residual_vs_negative_scaled_y_hat"], 6),
+                    row["sign_convention_best_direction"],
+                ]
+                for row in residual_all_rows
+            ],
+        ),
+        "",
+        "Residual prediction RMSE-style metrics are diagnostic only unless residual target and GP output sign convention are confirmed. The `sign_convention_best_direction` column is only an offline diagnostic hint, not a controller claim.",
+        "",
+        "Current logs have constant `y_hat_local_j` per joint, so per-joint Pearson / Spearman can be undefined and residual prediction interpretation remains limited.",
+        "",
+        "Current Stage 4 covers a baseline vs GP-compensated tracking comparison and a preliminary trajectory-dependent training-data comparison (`GP_planar` vs `GP_spatial`) using single formal fullruns.",
+        "",
+        "Current Stage 4 does not yet cover delayed cloud-side GP vs delay-free local GP, and does not yet cover cloud-edge fusion of local/cloud/historical predictions.",
         "",
         "## GP_planar vs GP_spatial Comparison",
         "",
@@ -1213,7 +1425,7 @@ def write_markdown_summary(
         "",
         "## Partial Run Diagnostic",
         "",
-    ]
+    ])
 
     if partial_rows:
         lines.extend([
@@ -1270,6 +1482,8 @@ def write_markdown_summary(
         "",
         "- `residual_alignment_per_joint.csv`",
         "- `residual_alignment_summary.csv`",
+        "- `tracking_paper_metrics.csv`",
+        "- `residual_prediction_paper_metrics.csv`",
         "- `y_hat_magnitude_per_joint.csv`",
         "- `tau_residual_comparison_per_joint.csv`",
         "- `tracking_window_metrics.csv`",
@@ -1296,6 +1510,8 @@ def write_all_outputs(
     alignment_rows, alignment_summary = make_residual_alignment_rows(datasets)
     yhat_rows = make_y_hat_magnitude_rows(datasets)
     tau_rows = make_tau_residual_comparison_rows(datasets)
+    tracking_paper_rows = make_tracking_paper_metric_rows(datasets)
+    residual_paper_rows = make_residual_prediction_paper_metric_rows(datasets)
     tracking_rows = make_tracking_window_rows(datasets)
     scale_per_joint, scale_summary = make_scale_sweep_rows(datasets, args.scales, args.clip_nm)
     partial_rows = make_partial_run_rows(partial_datasets, fullrun_reference_by_mode(datasets), args.clip_nm)
@@ -1377,6 +1593,50 @@ def write_all_outputs(
             "rms_change_vs_strict_percent",
             "rms_improvement_vs_strict_percent",
             "rms_change_spatial_vs_planar_percent",
+        ],
+    )
+    write_rows(
+        out_dir / "tracking_paper_metrics.csv",
+        tracking_paper_rows,
+        [
+            "mode_name",
+            "csv_file",
+            "rows",
+            "status",
+            "tracking_columns_available",
+            "missing_columns",
+            "actual_columns",
+            "desired_columns",
+            "RMSE_x_mm",
+            "e_x_max_mm",
+            "e_x_p95_mm",
+            "x_RMSE_mm",
+            "y_RMSE_mm",
+            "z_RMSE_mm",
+            "x_max_abs_mm",
+            "y_max_abs_mm",
+            "z_max_abs_mm",
+        ],
+    )
+    write_rows(
+        out_dir / "residual_prediction_paper_metrics.csv",
+        residual_paper_rows,
+        [
+            "mode_name",
+            "csv_file",
+            "joint",
+            "rows",
+            "scale_used",
+            "scale_source",
+            "tau_residual_RMS",
+            "y_hat_local_RMS",
+            "scaled_y_hat_RMS",
+            "RMSE_tau_residual_vs_y_hat",
+            "RMSE_tau_residual_vs_negative_y_hat",
+            "RMSE_tau_residual_vs_scaled_y_hat",
+            "RMSE_tau_residual_vs_negative_scaled_y_hat",
+            "sign_convention_best_direction",
+            "sign_convention_caveat",
         ],
     )
     write_rows(
@@ -1471,6 +1731,8 @@ def write_all_outputs(
         alignment_summary,
         yhat_rows,
         tau_rows,
+        tracking_paper_rows,
+        residual_paper_rows,
         tracking_rows,
         scale_summary,
         partial_rows,
