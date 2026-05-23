@@ -5,7 +5,13 @@ import numpy as np
 import argparse
 
 from skygp import SkyGP_rBCM
-from hyperparam_training import fit_hparams_gpytorch
+try:
+    from hyperparam_training import fit_hparams_gpytorch
+except ModuleNotFoundError as exc:
+    fit_hparams_gpytorch = None
+    GPYTORCH_IMPORT_ERROR = exc
+else:
+    GPYTORCH_IMPORT_ERROR = None
 
 
 # ---------- Utils ----------
@@ -46,16 +52,57 @@ def fit_global_hparams(
         Xh = Xn
         Yh = Yn[:, 0]
 
-    outputscale, noise, lengthscale = fit_hparams_gpytorch(
-        Xh.astype(np.float32),
-        Yh.astype(np.float32),
-        max_points=min(max_pts_hparam, len(Xh)),
-        iters=iters,
-        lr=lr,
-        use_cuda_if_available=True,
-        print_every=print_every
+    if fit_hparams_gpytorch is not None:
+        outputscale, noise, lengthscale = fit_hparams_gpytorch(
+            Xh.astype(np.float32),
+            Yh.astype(np.float32),
+            max_points=min(max_pts_hparam, len(Xh)),
+            iters=iters,
+            lr=lr,
+            use_cuda_if_available=True,
+            print_every=print_every
+        )
+        return outputscale, noise, lengthscale
+
+    print(
+        "[WARN] GPyTorch hyperparameter fitting unavailable "
+        f"({GPYTORCH_IMPORT_ERROR}); using standardized default GP hyperparameters."
     )
+    y_std = float(np.std(Yh))
+    outputscale = np.array([max(y_std, 1e-6)], dtype=float)
+    noise = np.array([max(1e-4, 0.05 * y_std)], dtype=float)
+    lengthscale = np.ones(Xn.shape[1], dtype=float)
     return outputscale, noise, lengthscale
+
+
+def reset_prediction_state(model):
+    model.last_sorted_experts = None
+    model.last_prediction_cache = {}
+    model.last_x = None
+    model.last_expert_idx = None
+
+
+def validate_frozen_local_model(model, joint):
+    required_attrs = [
+        "X_list",
+        "Y_list",
+        "localCount",
+        "expert_centers",
+        "model_params",
+        "L_all",
+        "alpha_all",
+    ]
+    missing_or_empty = [
+        name for name in required_attrs
+        if len(getattr(model, name, [])) == 0
+    ]
+    if missing_or_empty:
+        raise RuntimeError(
+            f"joint {joint}: frozen local model has empty state: {missing_or_empty}"
+        )
+
+    if not any(int(count) > 0 for count in model.localCount):
+        raise RuntimeError(f"joint {joint}: frozen local model has no stored samples")
 
 
 def build_rBCM(x_dim, hps,
@@ -152,13 +199,31 @@ def main():
         # ① Local GP：带所有训练点（用于本地在线更新）
         # ---------------------------------------------------
         # 构建 local 模型
+        frozen_mde = max(args.mde, Xn.shape[0])
         local_model = build_rBCM(
             x_dim=X.shape[1],
             hps=hps,
-            max_data_per_expert=args.mde,
-            nearest_k=args.k,
-            max_experts=args.max_exp,
+            max_data_per_expert=frozen_mde,
+            nearest_k=1,
+            max_experts=1,
             timescale=args.timescale
+        )
+
+        local_model.offline_pretrain(
+            Xn,
+            Yn,
+            show_progress=True,
+            optimize_hparams=False,
+        )
+        validate_frozen_local_model(local_model, j)
+        reset_prediction_state(local_model)
+        mu_check, var_check = local_model.predict(Xn[0])
+        if not (np.all(np.isfinite(mu_check)) and np.all(np.isfinite(var_check))):
+            raise RuntimeError(f"joint {j}: frozen local model predict sanity check failed")
+        reset_prediction_state(local_model)
+        print(
+            f"[joint {j}] frozen local state: experts={len(local_model.X_list)}, "
+            f"samples={int(np.sum(local_model.localCount))}"
         )
 
         # ---------------------------------------------------

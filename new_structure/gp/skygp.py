@@ -2,7 +2,11 @@ import time
 import numpy as np
 from scipy.linalg import solve_triangular
 from scipy.optimize import minimize
-from tqdm import tqdm
+try:
+    from tqdm import tqdm
+except ModuleNotFoundError:
+    def tqdm(iterator, **kwargs):
+        return iterator
 
 
 class SkyGP_rBCM:
