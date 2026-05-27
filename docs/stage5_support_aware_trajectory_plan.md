@@ -212,3 +212,9 @@ The next implementation should remain offline first:
 - no GP compensation behavior modification。
 
 After the offline/preflight report exists, the next reviewed step can be a no-GP live q7 logging run following the checklist above. Conservative GP-on re-entry should only be considered after support gate pass and separate safety review.
+
+## 11. Implemented Tooling
+
+- `scripts/validate_stage5_q7_support.py` adds an offline q7-focused support preflight validator.
+- It writes summary JSON / Markdown reports with q7 support, optional 14D joint-space support, worst dimension, and blocking reason.
+- Current limitation: it can only validate support from CSV/metadata artifacts; it cannot authorize GP-on or replace later no-GP live q7 logging review.
