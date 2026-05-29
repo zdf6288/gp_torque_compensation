@@ -20,6 +20,35 @@ import threading, time
 from std_msgs.msg import String
 from collections import deque
 
+GOAL2D_TIMING_FIELDS = [
+    "event",
+    "callback_index",
+    "ros_time_s",
+    "callback_wall_ms",
+    "callback_period_ms",
+    "callback_deadline_ms",
+    "callback_deadline_miss",
+    "callback_deadline_ratio",
+    "gp_total_ms",
+    "gp_local_predict_ms",
+    "gp_cloud_like_predict_ms",
+    "gp_add_point_ms",
+    "future_request_ms",
+    "csv_append_ms",
+    "csv_save_ms",
+    "state_buffer_append_ms",
+    "residual_update_ms",
+    "data_recording_enabled",
+    "gp_prediction_enabled",
+    "gp_online_update_enabled",
+    "gp_compensation_enabled",
+    "gp_compensation_source",
+    "local_gp_called",
+    "cloud_like_gp_called",
+    "add_point_count",
+    "exception_flag",
+]
+
 class CartesianImpedanceController(Node):
     
     def __init__(self):
@@ -287,6 +316,51 @@ class CartesianImpedanceController(Node):
             f"gp_compensation_clip_nm={self.gp_compensation_clip_nm}"
         )
 
+        # GOAL2 D: controller timing instrumentation. 默认关闭，避免改变现有运行开销。
+        self.declare_parameter("timing_logging_enabled", False)
+        self.declare_parameter("timing_log_stride", 1)
+        self.declare_parameter("timing_output_dir", "outputs/goal2d_controller_timing")
+        self.declare_parameter("deadline_ratio_warn_threshold", 0.8)
+        self.declare_parameter("controller_update_rate_label", 50.0)
+
+        self.timing_logging_enabled = self._get_bool_parameter("timing_logging_enabled")
+        self.timing_log_stride = max(1, int(self.get_parameter("timing_log_stride").value))
+        self.timing_output_dir = str(self.get_parameter("timing_output_dir").value)
+        self.deadline_ratio_warn_threshold = float(
+            self.get_parameter("deadline_ratio_warn_threshold").value
+        )
+        self.controller_update_rate_label = float(
+            self.get_parameter("controller_update_rate_label").value
+        )
+        if self.controller_update_rate_label <= 0.0:
+            self.get_logger().warn(
+                "[GOAL2 D] controller_update_rate_label must be > 0; using 50.0 Hz"
+            )
+            self.controller_update_rate_label = 50.0
+        if self.deadline_ratio_warn_threshold < 0.0:
+            self.get_logger().warn(
+                "[GOAL2 D] deadline_ratio_warn_threshold must be >= 0; using 0.8"
+            )
+            self.deadline_ratio_warn_threshold = 0.8
+
+        self.callback_deadline_ms = 1000.0 / self.controller_update_rate_label
+        self.timing_history = []
+        self.timing_callback_index = 0
+        self._last_callback_perf = None
+        self._timing_disabled_after_error = False
+        self._last_csv_save_ms = None
+
+        if self.timing_logging_enabled:
+            self.get_logger().info(
+                "[GOAL2 D] Timing logging enabled: "
+                f"stride={self.timing_log_stride}, "
+                f"output_dir='{self.timing_output_dir}', "
+                f"controller_update_rate_label={self.controller_update_rate_label}, "
+                f"deadline_ms={self.callback_deadline_ms:.3f}"
+            )
+        else:
+            self.get_logger().info("[GOAL2 D] Timing logging disabled by default")
+
         self.gp_stride = 1      # 每 10 个 state callback 做一次 GP（你可以调）
         self.gp_counter = 0
         self.cloud_counter = 0
@@ -458,6 +532,159 @@ class CartesianImpedanceController(Node):
         self.get_logger().warn(f"[GP] Parameter '{name}' is not bool-like ({value}); using bool(value)")
         return bool(value)
 
+    def _disable_timing_logging(self, error):
+        if not self._timing_disabled_after_error:
+            self.get_logger().error(
+                f"[GOAL2 D] Timing instrumentation failed; disabling timing logging: {error}"
+            )
+        self._timing_disabled_after_error = True
+        self.timing_logging_enabled = False
+
+    def _start_callback_timing(self, callback_start_perf):
+        if not self.timing_logging_enabled:
+            return None
+
+        try:
+            self.timing_callback_index += 1
+            callback_index = self.timing_callback_index
+            if self._last_callback_perf is None:
+                callback_period_ms = ""
+            else:
+                callback_period_ms = (
+                    callback_start_perf - self._last_callback_perf
+                ) * 1000.0
+            self._last_callback_perf = callback_start_perf
+
+            if callback_index % self.timing_log_stride != 0:
+                return None
+
+            timing_row = {field: "" for field in GOAL2D_TIMING_FIELDS}
+            timing_row.update({
+                "event": "callback",
+                "callback_index": callback_index,
+                "callback_period_ms": callback_period_ms,
+                "callback_deadline_ms": self.callback_deadline_ms,
+                "gp_total_ms": 0.0,
+                "gp_local_predict_ms": 0.0,
+                "gp_cloud_like_predict_ms": 0.0,
+                "gp_add_point_ms": 0.0,
+                "future_request_ms": 0.0,
+                "csv_append_ms": 0.0,
+                "state_buffer_append_ms": 0.0,
+                "residual_update_ms": 0.0,
+                "local_gp_called": 0,
+                "cloud_like_gp_called": 0,
+                "add_point_count": 0,
+                "exception_flag": 0,
+            })
+            return timing_row
+        except Exception as e:
+            self._disable_timing_logging(e)
+            return None
+
+    def _finish_callback_timing(self, timing_row, callback_start_perf):
+        if timing_row is None:
+            return
+
+        try:
+            callback_wall_ms = (time.perf_counter() - callback_start_perf) * 1000.0
+            deadline_ms = self.callback_deadline_ms
+            deadline_ratio = callback_wall_ms / deadline_ms if deadline_ms > 0.0 else 0.0
+
+            timing_row.update({
+                "callback_wall_ms": callback_wall_ms,
+                "callback_deadline_ratio": deadline_ratio,
+                "callback_deadline_miss": int(callback_wall_ms > deadline_ms),
+                "data_recording_enabled": int(bool(self.data_recording_enabled)),
+                "gp_prediction_enabled": int(bool(self.gp_prediction_enabled)),
+                "gp_online_update_enabled": int(bool(self.gp_online_update_enabled)),
+                "gp_compensation_enabled": int(bool(self.gp_compensation_enabled)),
+                "gp_compensation_source": self.gp_compensation_source,
+            })
+            self.timing_history.append(timing_row)
+        except Exception as e:
+            self._disable_timing_logging(e)
+
+    def _timing_add_ms(self, timing_row, field, start_perf):
+        if timing_row is None:
+            return
+
+        try:
+            duration_ms = (time.perf_counter() - start_perf) * 1000.0
+            current_value = timing_row.get(field, 0.0)
+            if current_value == "":
+                current_value = 0.0
+            timing_row[field] = float(current_value) + duration_ms
+        except Exception as e:
+            self._disable_timing_logging(e)
+
+    def _append_csv_save_timing(self, csv_save_ms):
+        if not self.timing_logging_enabled:
+            return
+
+        try:
+            timing_row = {field: "" for field in GOAL2D_TIMING_FIELDS}
+            timing_row.update({
+                "event": "csv_save",
+                "callback_deadline_ms": self.callback_deadline_ms,
+                "csv_save_ms": csv_save_ms,
+                "data_recording_enabled": int(bool(self.data_recording_enabled)),
+                "gp_prediction_enabled": int(bool(self.gp_prediction_enabled)),
+                "gp_online_update_enabled": int(bool(self.gp_online_update_enabled)),
+                "gp_compensation_enabled": int(bool(self.gp_compensation_enabled)),
+                "gp_compensation_source": self.gp_compensation_source,
+            })
+            self.timing_history.append(timing_row)
+        except Exception as e:
+            self._disable_timing_logging(e)
+
+    def _finish_csv_save_timing(self, csv_save_start):
+        if csv_save_start is None:
+            return
+
+        try:
+            csv_save_ms = (time.perf_counter() - csv_save_start) * 1000.0
+            self._last_csv_save_ms = csv_save_ms
+            self._append_csv_save_timing(csv_save_ms)
+            self.save_timing_to_file()
+        except Exception as e:
+            self._disable_timing_logging(e)
+
+    def save_timing_to_file(self):
+        if not self.timing_logging_enabled or not self.timing_history:
+            return
+
+        try:
+            os.makedirs(self.timing_output_dir, exist_ok=True)
+            filename = os.path.join(self.timing_output_dir, "goal2d_controller_timing.csv")
+
+            with open(filename, 'w', newline='') as csvfile:
+                writer = csv.DictWriter(csvfile, fieldnames=GOAL2D_TIMING_FIELDS)
+                writer.writeheader()
+                for row in self.timing_history:
+                    writer.writerow({field: row.get(field, "") for field in GOAL2D_TIMING_FIELDS})
+
+            callback_rows = [
+                row for row in self.timing_history
+                if row.get("event") == "callback" and row.get("callback_wall_ms") != ""
+            ]
+            if callback_rows:
+                miss_count = sum(int(row.get("callback_deadline_miss", 0)) for row in callback_rows)
+                max_ratio = max(float(row.get("callback_deadline_ratio", 0.0)) for row in callback_rows)
+                msg = (
+                    f"[GOAL2 D] Saved {len(callback_rows)} callback timing rows to {filename}; "
+                    f"deadline_miss_count={miss_count}, max_deadline_ratio={max_ratio:.3f}"
+                )
+                if max_ratio >= self.deadline_ratio_warn_threshold:
+                    self.get_logger().warn(msg)
+                else:
+                    self.get_logger().info(msg)
+            else:
+                self.get_logger().info(f"[GOAL2 D] Saved timing metadata to {filename}")
+        except Exception as e:
+            self.get_logger().error(f"[GOAL2 D] Error when saving timing data: {str(e)}")
+            self.get_logger().error(f"Traceback: {traceback.format_exc()}")
+
     def dls_dyn_pinv(self, J, M, lam):
         """
         Dynamically consistent DLS pseudoinverse:
@@ -574,6 +801,12 @@ class CartesianImpedanceController(Node):
 
     def stateParameterCallback(self, msg):
         """callback function for /state_parameter subscriber"""
+        timing_row = None
+        callback_start_perf = None
+        if self.timing_logging_enabled:
+            callback_start_perf = time.perf_counter()
+            timing_row = self._start_callback_timing(callback_start_perf)
+
         try:
             # initialize t_initial, get t_elapsed, t_last and dt
             # initialize q_initial, get q, dq and ddq
@@ -640,7 +873,10 @@ class CartesianImpedanceController(Node):
 
                 ddq = (dq - self.dq_buffer) / dt
                 self.dq_buffer = dq.copy()                    
-                
+
+            if timing_row is not None:
+                timing_row["ros_time_s"] = t_elapsed
+
             # get O_T_F, mass, coriolis, flange-framed zero jacobian matrix J(q) and dJ(q)
             o_t_f_array = np.array(msg.o_t_f)                           # vectorized 4x4 pose matrix in flange frame, column-major
             mass_matrix_array = np.array(msg.mass)                      # vectorized 7x7 mass matrix, column-major
@@ -838,7 +1074,10 @@ class CartesianImpedanceController(Node):
             dq_pred_next = dq_des_joint.copy()
             if self.data_recording_enabled and self.gp_prediction_enabled:
                 Td = dt   # 或者固定 0.001
+                future_request_start = time.perf_counter() if timing_row is not None else None
                 self.request_future_trajectory(Td)
+                if future_request_start is not None:
+                    self._timing_add_ms(timing_row, "future_request_ms", future_request_start)
 
                 if self._latest_future_traj is not None:
                     x_f = np.array(self._latest_future_traj["x_des"], dtype=float)
@@ -862,12 +1101,16 @@ class CartesianImpedanceController(Node):
                 # self.prev_pred_time = None
 
             # === 计算残差 ===
+            residual_update_start = time.perf_counter() if timing_row is not None else None
             tau_residual = tau_measured - tau - gravity_measured
             if self.data_recording_enabled:
                 self.tau_residual_raw_history.append(tau_residual.tolist())
             self.tau_residual_filtered = (
                 0.02 * tau_residual + 0.98 * self.tau_residual_filtered
             )
+            if residual_update_start is not None:
+                self._timing_add_ms(timing_row, "residual_update_ms", residual_update_start)
+            state_buffer_append_start = time.perf_counter() if timing_row is not None else None
             self.state_buffer.append({
                 "t": t_elapsed,
                 "q": q.copy(),
@@ -875,10 +1118,13 @@ class CartesianImpedanceController(Node):
                 "ddq_est": ddq_est.copy(),
                 "tau_res": self.tau_residual_filtered.copy(),
             })
+            if state_buffer_append_start is not None:
+                self._timing_add_ms(timing_row, "state_buffer_append_ms", state_buffer_append_start)
             # tau = tau
 
             # === 控制循环的最后：按节拍触发一次“GP 更新”（本地 + 云端） ===
             if self.gp_active and self.use_gp and self.gp_prediction_enabled:
+                gp_total_start = time.perf_counter() if timing_row is not None else None
                 self.gp_counter += 1
                 tick = (self.gp_counter % self.gp_stride == 0)
                 # # ---------------------------------------------------------
@@ -887,7 +1133,9 @@ class CartesianImpedanceController(Node):
                     self.tau_residual_filtered,
                     self.gp_models_small,
                     # True 保持原 online update；False 用于 frozen GP evaluation，不允许 add_point。
-                    update=self.gp_online_update_enabled
+                    update=self.gp_online_update_enabled,
+                    timing_label="local",
+                    timing_row=timing_row
                 )
                 self.y_hat_local = y_hat_local
                 self.var_local = var_local
@@ -919,7 +1167,9 @@ class CartesianImpedanceController(Node):
                     tau_base,
                     self.gp_models_big,
                     # big GP 的主路径更新同样受 frozen GP 开关保护。
-                    update=self.gp_online_update_enabled
+                    update=self.gp_online_update_enabled,
+                    timing_label="cloud_like",
+                    timing_row=timing_row
                 )
 
                 # ===== 在 Td 附近均匀采样多个 rollout 点 =====
@@ -959,7 +1209,9 @@ class CartesianImpedanceController(Node):
                     q, dq_pred_next, ddq,
                     tau_base,
                     self.gp_models_big,
-                    update=False
+                    update=False,
+                    timing_label="cloud_like",
+                    timing_row=timing_row
                 )
                 self.y_hat_cloud = y_hat_i.copy()
                     # y_list.append(y_hat_i.copy())
@@ -992,6 +1244,8 @@ class CartesianImpedanceController(Node):
                 w_l = prec_l / (prec_l + prec_c)
 
                 self.y_hat_combined = w_l * self.y_hat_local + (1.0 - w_l) * self.y_hat_cloud
+                if gp_total_start is not None:
+                    self._timing_add_ms(timing_row, "gp_total_ms", gp_total_start)
 
             # tau = tau - self.y_hat_local
             # 默认 compensation 关闭时返回原始 tau；开启后才按原注释方向补偿。
@@ -1002,6 +1256,7 @@ class CartesianImpedanceController(Node):
 
             # record data only when data recording is enabled
             if self.data_recording_enabled:
+                csv_append_start = time.perf_counter() if timing_row is not None else None
                 self.tau_history.append(tau.tolist())
                 self.time_history.append(t_elapsed)
                 self.x_history.append(x.tolist())
@@ -1018,9 +1273,15 @@ class CartesianImpedanceController(Node):
                 self.y_hat_cloud_history.append(self.y_hat_cloud.tolist())    # 上一帧或刚更新的 cloud
                 self.y_hat_mem_history.append(self.y_hat_mem.tolist())
                 self.tau_residual_history.append(self.tau_residual_filtered.tolist())
+                if csv_append_start is not None:
+                    self._timing_add_ms(timing_row, "csv_append_ms", csv_append_start)
 
         except Exception as e:
+            if timing_row is not None:
+                timing_row["exception_flag"] = 1
             self.get_logger().error(f'Parameter error: {str(e)}')
+        finally:
+            self._finish_callback_timing(timing_row, callback_start_perf)
 
     def _rollout_with_frozen_tau(
         self, q0, dq0, Td, tau_cmd, mass_matrix, coriolis_vec, gravity_vec, tau_res_hat=None, n_steps=5
@@ -1498,11 +1759,30 @@ class CartesianImpedanceController(Node):
         # 符号方向沿用原注释：tau = tau - compensation。
         return tau - clipped_compensation
 
-    def _gp_predict_and_update(self, q, dq_des_joint, ddq_des_joint, tau_residual, models, update = True):
+    def _gp_predict_and_update(
+        self,
+        q,
+        dq_des_joint,
+        ddq_des_joint,
+        tau_residual,
+        models,
+        update=True,
+        timing_label=None,
+        timing_row=None,
+    ):
         """
         本地 GP：高维输入版本（14维 or 21维）
         每个关节都使用相同的 x_full = concat([q, dq, ddq])
         """
+
+        predict_timing_field = None
+        if timing_row is not None:
+            if timing_label == "local":
+                timing_row["local_gp_called"] = 1
+                predict_timing_field = "gp_local_predict_ms"
+            elif timing_label == "cloud_like":
+                timing_row["cloud_like_gp_called"] = 1
+                predict_timing_field = "gp_cloud_like_predict_ms"
 
         if not self.gp_prediction_enabled:
             return np.zeros(7, dtype=float), np.ones(7, dtype=float) * 1e6
@@ -1543,7 +1823,16 @@ class CartesianImpedanceController(Node):
             x_std = (x_full[:x_dim] - Xm[:x_dim]) / Xs[:x_dim]
 
             # -------- GP 预测 --------
-            mu_std, var_std = model.predict(x_std.astype(np.float32))
+            predict_start = (
+                time.perf_counter()
+                if timing_row is not None and predict_timing_field is not None
+                else None
+            )
+            try:
+                mu_std, var_std = model.predict(x_std.astype(np.float32))
+            finally:
+                if predict_start is not None:
+                    self._timing_add_ms(timing_row, predict_timing_field, predict_start)
             mu_std  = float(mu_std[0])
             var_std = float(var_std[0])
 
@@ -1561,10 +1850,17 @@ class CartesianImpedanceController(Node):
                 try:
                     # update=False 时用于 frozen GP evaluation，内部也阻止 add_point。
                     if update and self.gp_online_update_enabled:
-                        model.add_point(
-                            x_std.astype(np.float32),
-                            np.array([y_std], dtype=np.float32)
-                        )
+                        add_point_start = time.perf_counter() if timing_row is not None else None
+                        try:
+                            model.add_point(
+                                x_std.astype(np.float32),
+                                np.array([y_std], dtype=np.float32)
+                            )
+                        finally:
+                            if add_point_start is not None:
+                                self._timing_add_ms(timing_row, "gp_add_point_ms", add_point_start)
+                        if timing_row is not None:
+                            timing_row["add_point_count"] = int(timing_row["add_point_count"]) + 1
                         self.offline_limit=self.offline_limit+1
                 except Exception as e:
                     self.get_logger().error(f"[GP] joint{j} add_point failed: {e}")
@@ -1604,8 +1900,10 @@ class CartesianImpedanceController(Node):
     
     def save_data_to_file(self):
         """save data to CSV file"""
+        csv_save_start = time.perf_counter() if self.timing_logging_enabled else None
         if not self.tau_history:
             self.get_logger().warning('No data to save - tau_history is empty')
+            self._finish_csv_save_timing(csv_save_start)
             return
 
         try:
@@ -1763,6 +2061,8 @@ class CartesianImpedanceController(Node):
         except Exception as e:
             self.get_logger().error(f'Error when saving data: {str(e)}')
             self.get_logger().error(f'Traceback: {traceback.format_exc()}')
+
+        self._finish_csv_save_timing(csv_save_start)
 
 
 def main(args=None):

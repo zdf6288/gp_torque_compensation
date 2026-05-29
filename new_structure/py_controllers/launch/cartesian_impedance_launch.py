@@ -23,6 +23,12 @@ def generate_launch_description():
     gp_compensation_source_parameter_name = 'gp_compensation_source'
     gp_compensation_scale_parameter_name = 'gp_compensation_scale'
     gp_compensation_clip_nm_parameter_name = 'gp_compensation_clip_nm'
+    # GOAL2 D timing instrumentation 参数默认关闭，不改变 controller 行为。
+    timing_logging_enabled_parameter_name = 'timing_logging_enabled'
+    timing_log_stride_parameter_name = 'timing_log_stride'
+    timing_output_dir_parameter_name = 'timing_output_dir'
+    deadline_ratio_warn_threshold_parameter_name = 'deadline_ratio_warn_threshold'
+    controller_update_rate_label_parameter_name = 'controller_update_rate_label'
     # Stage 3A trajectory 参数默认保持 planar_circle，只有显式传参才启用 z modulation。
     trajectory_mode_parameter_name = 'trajectory_mode'
     z_amplitude_parameter_name = 'z_amplitude'
@@ -42,6 +48,13 @@ def generate_launch_description():
     gp_compensation_source = LaunchConfiguration(gp_compensation_source_parameter_name)
     gp_compensation_scale = LaunchConfiguration(gp_compensation_scale_parameter_name)
     gp_compensation_clip_nm = LaunchConfiguration(gp_compensation_clip_nm_parameter_name)
+    timing_logging_enabled = LaunchConfiguration(timing_logging_enabled_parameter_name)
+    timing_log_stride = LaunchConfiguration(timing_log_stride_parameter_name)
+    timing_output_dir = LaunchConfiguration(timing_output_dir_parameter_name)
+    deadline_ratio_warn_threshold = LaunchConfiguration(
+        deadline_ratio_warn_threshold_parameter_name)
+    controller_update_rate_label = LaunchConfiguration(
+        controller_update_rate_label_parameter_name)
     trajectory_mode = LaunchConfiguration(trajectory_mode_parameter_name)
     z_amplitude = LaunchConfiguration(z_amplitude_parameter_name)
     z_frequency_multiplier = LaunchConfiguration(z_frequency_multiplier_parameter_name)
@@ -98,6 +111,26 @@ def generate_launch_description():
             gp_compensation_clip_nm_parameter_name,
             default_value='0.5',
             description='Per-joint GP compensation clip in Nm.'),
+        DeclareLaunchArgument(
+            timing_logging_enabled_parameter_name,
+            default_value='false',
+            description='Enable GOAL2 D controller timing CSV logging.'),
+        DeclareLaunchArgument(
+            timing_log_stride_parameter_name,
+            default_value='1',
+            description='Record one controller timing row every N callbacks.'),
+        DeclareLaunchArgument(
+            timing_output_dir_parameter_name,
+            default_value='outputs/goal2d_controller_timing',
+            description='Directory for GOAL2 D controller timing CSV output.'),
+        DeclareLaunchArgument(
+            deadline_ratio_warn_threshold_parameter_name,
+            default_value='0.8',
+            description='Warn in timing summary when max callback deadline ratio reaches this threshold.'),
+        DeclareLaunchArgument(
+            controller_update_rate_label_parameter_name,
+            default_value='50.0',
+            description='Controller update-rate label in Hz for timing deadline calculations.'),
         # Stage 3A launch defaults 保持 Stage 1 / Stage 2A 的平面圆轨迹行为。
         DeclareLaunchArgument(
             trajectory_mode_parameter_name,
@@ -157,6 +190,16 @@ def generate_launch_description():
                 gp_compensation_source_parameter_name: gp_compensation_source,
                 gp_compensation_scale_parameter_name: gp_compensation_scale,
                 gp_compensation_clip_nm_parameter_name: gp_compensation_clip_nm,
+                timing_logging_enabled_parameter_name: ParameterValue(
+                    timing_logging_enabled, value_type=bool),
+                timing_log_stride_parameter_name: ParameterValue(
+                    timing_log_stride, value_type=int),
+                timing_output_dir_parameter_name: ParameterValue(
+                    timing_output_dir, value_type=str),
+                deadline_ratio_warn_threshold_parameter_name: ParameterValue(
+                    deadline_ratio_warn_threshold, value_type=float),
+                controller_update_rate_label_parameter_name: ParameterValue(
+                    controller_update_rate_label, value_type=float),
             }]
         ),
         Node(
