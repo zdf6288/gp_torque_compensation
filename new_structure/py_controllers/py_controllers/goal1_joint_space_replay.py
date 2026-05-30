@@ -13,6 +13,7 @@ DEFAULT_CSV_PATH = 'outputs/goal1_joint_trajectory/goal1_allq_spatial_rich_60s_5
 DEFAULT_DRY_RUN = True
 DEFAULT_START_REPLAY = False
 DEFAULT_PUBLISH_EFFORT = False
+DEFAULT_STATE_ONLY = False
 DEFAULT_MAX_DURATION = 3.0
 DEFAULT_START_TIME = 0.0
 DEFAULT_STATE_TOPIC = '/state_parameter'
@@ -35,6 +36,7 @@ class ReplayConfig:
     dry_run: bool = DEFAULT_DRY_RUN
     start_replay: bool = DEFAULT_START_REPLAY
     publish_effort: bool = DEFAULT_PUBLISH_EFFORT
+    state_only: bool = DEFAULT_STATE_ONLY
     max_duration: float = DEFAULT_MAX_DURATION
     start_time: float = DEFAULT_START_TIME
     state_topic: str = DEFAULT_STATE_TOPIC
@@ -119,13 +121,14 @@ def normalize_config(config: ReplayConfig) -> ReplayConfig:
     config.dry_run = parse_bool(config.dry_run, 'dry_run')
     config.start_replay = parse_bool(config.start_replay, 'start_replay')
     config.publish_effort = parse_bool(config.publish_effort, 'publish_effort')
+    config.state_only = parse_bool(config.state_only, 'state_only')
     config.max_duration = positive_float(config.max_duration, 'max_duration')
     config.start_time = nonnegative_float(config.start_time, 'start_time')
     config.state_topic = str(config.state_topic).strip()
     config.effort_topic = str(config.effort_topic).strip()
     if not config.state_topic:
         raise ValueError('state_topic must not be empty')
-    if not config.effort_topic:
+    if not config.effort_topic and not config.state_only:
         raise ValueError('effort_topic must not be empty')
     config.start_position_tolerance_rad = nonnegative_float(
         config.start_position_tolerance_rad, 'start_position_tolerance_rad'
@@ -291,6 +294,7 @@ def print_validation_summary(config: ReplayConfig, trajectory: LoadedTrajectory)
     print(f'dry_run: {config.dry_run}')
     print(f'start_replay: {config.start_replay}')
     print(f'publish_effort: {config.publish_effort}')
+    print(f'state_only: {config.state_only}')
     print('no_torque_published: true')
 
 
@@ -318,6 +322,154 @@ def subtract(lhs: Sequence[float], rhs: Sequence[float]) -> List[float]:
 
 def max_abs(values: Sequence[float]) -> float:
     return max(abs(value) for value in values)
+
+
+def run_state_only_path(
+    config: ReplayConfig, trajectory: LoadedTrajectory, argv: Sequence[str]
+) -> None:
+    import rclpy
+    from rclpy.node import Node
+    from custom_msgs.msg import StateParameter
+
+    class Goal1StateOnlyValidationNode(Node):
+        def __init__(self):
+            super().__init__('goal1_joint_space_replay_state_only')
+            self.config = config
+            self.trajectory = trajectory
+            self.latest_state = None
+            self.latest_state_time = None
+            self.refusal_reason = ''
+            self.state_subscription = self.create_subscription(
+                StateParameter, config.state_topic, self.state_callback, 10
+            )
+            self.get_logger().warn(
+                'GOAL1 state-only no-motion check: subscribing to state only; '
+                'no /effort_command publisher is created.'
+            )
+
+        def state_callback(self, msg):
+            if len(msg.position) != 7 or len(msg.velocity) != 7:
+                self.refusal_reason = (
+                    'state_parameter position/velocity must each contain 7 values'
+                )
+                return
+            q = [float(value) for value in msg.position]
+            dq = [float(value) for value in msg.velocity]
+            if not all(math.isfinite(value) for value in q + dq):
+                self.refusal_reason = 'state_parameter contains non-finite q or dq'
+                return
+            self.latest_state = (q, dq)
+            self.latest_state_time = self.get_clock().now()
+
+        def state_age_sec(self) -> Optional[float]:
+            if self.latest_state is None or self.latest_state_time is None:
+                return None
+            return (self.get_clock().now() - self.latest_state_time).nanoseconds / 1e9
+
+        def has_fresh_state(self) -> bool:
+            age = self.state_age_sec()
+            return age is not None and age <= self.config.state_timeout_sec
+
+        def wait_for_initial_state(self) -> bool:
+            deadline = self.get_clock().now().nanoseconds + int(
+                self.config.state_timeout_sec * 1e9
+            )
+            while rclpy.ok() and self.get_clock().now().nanoseconds <= deadline:
+                rclpy.spin_once(self, timeout_sec=0.02)
+                if self.refusal_reason:
+                    return False
+                if self.has_fresh_state():
+                    return True
+            self.refusal_reason = (
+                f'no fresh state on {self.config.state_topic} within '
+                f'{self.config.state_timeout_sec:.3f}s'
+            )
+            return False
+
+        def print_result(self) -> bool:
+            first_q = self.trajectory.points[0].q
+            state_age = self.state_age_sec()
+            state_fresh = self.has_fresh_state()
+
+            print('GOAL1 state-only no-motion validation')
+            print('real_robot_safe: false')
+            print('gp: false')
+            print('compensation: false')
+            print('state_only: true')
+            print(f'dry_run: {self.config.dry_run}')
+            print(f'start_replay: {self.config.start_replay}')
+            print(f'publish_effort_requested: {self.config.publish_effort}')
+            print(f'state_topic: {self.config.state_topic}')
+            print(f'csv_path: {self.config.csv_path}')
+            print(f'selected_point_count: {len(self.trajectory.points)}')
+            print(
+                'source_time_range: '
+                f'{self.trajectory.source_start_time:.9f} to '
+                f'{self.trajectory.source_end_time:.9f}'
+            )
+            print('no_effort_publisher_created: true')
+            print('no_torque_published: true')
+            print(f'state_received: {self.latest_state is not None}')
+            if state_age is None:
+                print('state_age_sec: not_available')
+            else:
+                print(f'state_age_sec: {state_age:.9f}')
+            print(f'state_fresh: {state_fresh}')
+            print(f'csv_first_q: {rounded(first_q)}')
+            print(
+                'start_position_tolerance_rad: '
+                f'{self.config.start_position_tolerance_rad:.9f}'
+            )
+
+            if self.latest_state is None:
+                print('current_q: not_available')
+                print('current_dq: not_available')
+                print('q_mismatch_per_joint: not_available')
+                print('max_q_mismatch: not_available')
+                print('state_only_pass: false')
+                print_refusal(self.refusal_reason)
+                return False
+
+            q, dq = self.latest_state
+            q_mismatch = subtract(first_q, q)
+            abs_q_mismatch = [abs(value) for value in q_mismatch]
+            max_q_mismatch = max_abs(q_mismatch)
+            passed = (
+                state_fresh
+                and max_q_mismatch <= self.config.start_position_tolerance_rad
+                and not self.refusal_reason
+            )
+
+            print(f'current_q: {rounded(q)}')
+            print(f'current_dq: {rounded(dq)}')
+            print(f'q_mismatch_per_joint: {rounded(q_mismatch)}')
+            print(f'q_mismatch_csv_minus_current_per_joint: {rounded(q_mismatch)}')
+            print(f'q_mismatch_abs_per_joint: {rounded(abs_q_mismatch)}')
+            print(f'max_q_mismatch: {max_q_mismatch:.9f}')
+            print(f'state_only_pass: {str(passed).lower()}')
+            if not passed:
+                if not self.refusal_reason:
+                    if not state_fresh:
+                        self.refusal_reason = 'state is stale before state-only validation report'
+                    else:
+                        self.refusal_reason = (
+                            'start pose mismatch: '
+                            f'max_abs_error={max_q_mismatch:.6f} rad, '
+                            f'tolerance={self.config.start_position_tolerance_rad:.6f} rad'
+                        )
+                print_refusal(self.refusal_reason)
+            return passed
+
+    rclpy.init(args=[sys.argv[0]] + list(argv))
+    node = Goal1StateOnlyValidationNode()
+    try:
+        node.wait_for_initial_state()
+        passed = node.print_result()
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+    if not passed:
+        raise SystemExit(1)
 
 
 def run_publish_path(config: ReplayConfig, trajectory: LoadedTrajectory, argv: Sequence[str]) -> None:
@@ -522,6 +674,9 @@ def cli_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         '--publish-effort', action=argparse.BooleanOptionalAction, default=DEFAULT_PUBLISH_EFFORT
     )
+    parser.add_argument(
+        '--state-only', action=argparse.BooleanOptionalAction, default=DEFAULT_STATE_ONLY
+    )
     parser.add_argument('--max-duration', type=float, default=DEFAULT_MAX_DURATION)
     parser.add_argument('--start-time', type=float, default=DEFAULT_START_TIME)
     parser.add_argument('--state-topic', default=DEFAULT_STATE_TOPIC)
@@ -556,6 +711,7 @@ def config_from_cli(argv: Sequence[str]) -> ReplayConfig:
         dry_run=args.dry_run,
         start_replay=args.start_replay,
         publish_effort=args.publish_effort,
+        state_only=args.state_only,
         max_duration=args.max_duration,
         start_time=args.start_time,
         state_topic=args.state_topic,
@@ -583,6 +739,7 @@ def read_ros_params(argv: Sequence[str]) -> ReplayConfig:
         node.declare_parameter('dry_run', DEFAULT_DRY_RUN)
         node.declare_parameter('start_replay', DEFAULT_START_REPLAY)
         node.declare_parameter('publish_effort', DEFAULT_PUBLISH_EFFORT)
+        node.declare_parameter('state_only', DEFAULT_STATE_ONLY)
         node.declare_parameter('max_duration', DEFAULT_MAX_DURATION)
         node.declare_parameter('start_time', DEFAULT_START_TIME)
         node.declare_parameter('state_topic', DEFAULT_STATE_TOPIC)
@@ -606,6 +763,7 @@ def read_ros_params(argv: Sequence[str]) -> ReplayConfig:
             dry_run=node.get_parameter('dry_run').value,
             start_replay=node.get_parameter('start_replay').value,
             publish_effort=node.get_parameter('publish_effort').value,
+            state_only=node.get_parameter('state_only').value,
             max_duration=node.get_parameter('max_duration').value,
             start_time=node.get_parameter('start_time').value,
             state_topic=node.get_parameter('state_topic').value,
@@ -634,6 +792,10 @@ def read_ros_params(argv: Sequence[str]) -> ReplayConfig:
 def run(config: ReplayConfig, argv: Sequence[str]) -> None:
     config = normalize_config(config)
     trajectory = load_goal1_csv(config)
+
+    if config.state_only:
+        run_state_only_path(config, trajectory, argv)
+        return
 
     if config.dry_run or not config.publish_effort:
         print_validation_summary(config, trajectory)

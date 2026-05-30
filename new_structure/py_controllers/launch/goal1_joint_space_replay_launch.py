@@ -15,6 +15,7 @@ def generate_launch_description():
     dry_run_parameter_name = 'dry_run'
     start_replay_parameter_name = 'start_replay'
     publish_effort_parameter_name = 'publish_effort'
+    state_only_parameter_name = 'state_only'
     kp_parameter_name = 'kp'
     kd_parameter_name = 'kd'
     torque_clip_nm_parameter_name = 'torque_clip_nm'
@@ -28,6 +29,7 @@ def generate_launch_description():
     dry_run = LaunchConfiguration(dry_run_parameter_name)
     start_replay = LaunchConfiguration(start_replay_parameter_name)
     publish_effort = LaunchConfiguration(publish_effort_parameter_name)
+    state_only = LaunchConfiguration(state_only_parameter_name)
     kp = LaunchConfiguration(kp_parameter_name)
     kd = LaunchConfiguration(kd_parameter_name)
     torque_clip_nm = LaunchConfiguration(torque_clip_nm_parameter_name)
@@ -81,6 +83,14 @@ def generate_launch_description():
             description='Additional guard required before publishing /effort_command.',
         ),
         DeclareLaunchArgument(
+            state_only_parameter_name,
+            default_value='false',
+            description=(
+                'Subscribe to /state_parameter and check the start pose only; '
+                'no /effort_command publisher is created.'
+            ),
+        ),
+        DeclareLaunchArgument(
             kp_parameter_name,
             default_value='2.0',
             description='Low joint PD proportional gain scalar or comma-separated 7 values.',
@@ -118,6 +128,7 @@ def generate_launch_description():
                 dry_run_parameter_name: ParameterValue(dry_run, value_type=bool),
                 start_replay_parameter_name: ParameterValue(start_replay, value_type=bool),
                 publish_effort_parameter_name: ParameterValue(publish_effort, value_type=bool),
+                state_only_parameter_name: ParameterValue(state_only, value_type=bool),
                 kp_parameter_name: kp,
                 kd_parameter_name: kd,
                 torque_clip_nm_parameter_name: ParameterValue(

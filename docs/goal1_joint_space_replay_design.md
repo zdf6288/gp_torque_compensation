@@ -1,8 +1,8 @@
-# GOAL1 H Joint-Space Torque Replay Skeleton
+# GOAL1 H/J Joint-Space Torque Replay Skeleton
 
 ## Purpose
 
-GOAL1 H adds a default-disabled Python skeleton for reviewing a possible joint-space torque replay route:
+GOAL1 H adds a default-disabled Python skeleton for reviewing a possible joint-space torque replay route. GOAL1 J adds a state-only validation mode and documents the remaining shutdown blocker:
 
 - `new_structure/py_controllers/py_controllers/goal1_joint_space_replay.py`
 - `new_structure/py_controllers/launch/goal1_joint_space_replay_launch.py`
@@ -24,6 +24,7 @@ The defaults are intentionally no-motion and no-effort:
 - `dry_run=true`
 - `start_replay=false`
 - `publish_effort=false`
+- `state_only=false`
 - `max_duration=3.0`
 
 With `dry_run=true` or `publish_effort=false`, the script validates the CSV and exits without publishing torque. It prints the CSV path, selected point count, selected source time range, first/last `q`, max absolute `dq`, `ddq`, optional jerk, and the guard states.
@@ -39,6 +40,27 @@ The dry-run path checks:
 - selected segment from `start_time` to `start_time + max_duration`
 
 The pure CLI dry-run path does not need to initialize a ROS graph.
+
+## State-Only Validation Mode
+
+`state_only=true` is a no-motion check for lab-side readiness review before any effort publishing is considered.
+
+When enabled, it:
+
+- reads the selected CSV segment
+- initializes a ROS node
+- subscribes only to `/state_parameter`
+- does not create a `/effort_command` publisher
+- does not publish torque
+- does not enter the publish/replay path
+- waits for a fresh state or times out
+- prints current `q`, current `dq`, first CSV `q`, per-joint mismatch, max mismatch, tolerance, pass/fail, state freshness, and explicit no-effort/no-torque flags
+
+`state_only=true` takes priority over `publish_effort=true`. If both are set, the node still performs only the state-only no-motion check and refuses to create an effort publisher.
+
+Manual command example for a future lab-side review:
+
+`ros2 launch py_controllers goal1_joint_space_replay_launch.py state_only:=true dry_run:=false start_replay:=false publish_effort:=false`
 
 ## Optional Publish Skeleton
 
@@ -75,7 +97,19 @@ The defaults are small and conservative. They are not a safety certification.
 
 ## Shutdown Caveat
 
-This skeleton does not implement a complex shutdown torque command. On selected-segment completion or refusal, it stops publishing. The downstream `cpp_relayer` last-command behavior must be reviewed on lab Linux before any real-robot attempt.
+`cpp_relayer` may hold the last received torque command. Stopping the Python publisher may not imply zero torque at the robot-side effort interface.
+
+Current GOAL1 H/J does not solve real-robot shutdown safety. On selected-segment completion or refusal, the publish skeleton stops publishing; it does not prove that downstream torque goes to zero.
+
+Before any `publish_effort=true` run, a separate lab-side safety patch/review is required. Possible future strategies include:
+
+- explicit zero command before exit
+- command timeout in `cpp_relayer`
+- stale-command refusal
+- lifecycle stop / controller switch procedure
+- operator abort plan
+
+Do not run `publish_effort=true` until this shutdown / last-command behavior is resolved.
 
 ## Launch Scope
 
