@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate an offline GOAL1 all-q conservative joint-space trajectory.
+"""Generate an offline GOAL1 all-q joint-space trajectory.
 
 This script is intentionally offline-only. It does not import ROS2, launch a
 controller, connect to Franka, publish commands, enable GP, or modify runtime
@@ -31,9 +31,9 @@ JOINT_COUNT = 7
 class MultiSineProfile:
     name: str
     nominal_q: tuple[float, ...]
-    amplitudes: tuple[tuple[float, float], ...]
-    frequencies: tuple[tuple[float, float], ...]
-    phases: tuple[tuple[float, float], ...]
+    amplitudes: tuple[tuple[float, ...], ...]
+    frequencies: tuple[tuple[float, ...], ...]
+    phases: tuple[tuple[float, ...], ...]
 
 
 # 这是第一版 conservative profile：所有 q1..q7 都运动，但幅度和频率都很低。
@@ -70,8 +70,41 @@ CONSERVATIVE_PROFILE = MultiSineProfile(
     ),
 )
 
+SPATIAL_RICH_PROFILE = MultiSineProfile(
+    name="spatial_rich",
+    nominal_q=(0.0, -0.785398163, 0.0, -2.35619449, 0.0, 1.570796327, 0.785398163),
+    amplitudes=(
+        (0.24, 0.070, 0.025),
+        (0.17, 0.055, 0.025),
+        (0.22, 0.060, 0.025),
+        (0.13, 0.045, 0.020),
+        (0.18, 0.055, 0.025),
+        (0.12, 0.040, 0.020),
+        (0.07, 0.025, 0.012),
+    ),
+    frequencies=(
+        (0.044, 0.110, 0.175),
+        (0.052, 0.128, 0.168),
+        (0.039, 0.116, 0.182),
+        (0.047, 0.104, 0.158),
+        (0.061, 0.121, 0.171),
+        (0.055, 0.137, 0.164),
+        (0.073, 0.143, 0.188),
+    ),
+    phases=(
+        (0.0, 1.4, 3.1),
+        (0.9, 2.6, 4.4),
+        (1.8, 3.5, 5.2),
+        (2.7, 4.3, 0.7),
+        (3.6, 5.1, 1.6),
+        (4.5, 0.8, 2.5),
+        (5.4, 1.7, 3.4),
+    ),
+)
+
 PROFILES = {
     "conservative": CONSERVATIVE_PROFILE,
+    "spatial_rich": SPATIAL_RICH_PROFILE,
 }
 
 # 这些 limits 只用于 offline preliminary screening。正式仿真或真机前，必须用
@@ -145,6 +178,18 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--prefix must be non-empty")
 
 
+def validate_profile(profile: MultiSineProfile) -> None:
+    for field_name in ("nominal_q", "amplitudes", "frequencies", "phases"):
+        if len(getattr(profile, field_name)) != JOINT_COUNT:
+            raise ValueError(f"profile {profile.name} has invalid {field_name} length")
+    for joint_index in range(JOINT_COUNT):
+        term_count = len(profile.amplitudes[joint_index])
+        if term_count == 0:
+            raise ValueError(f"profile {profile.name} q{joint_index + 1} has no sine terms")
+        if len(profile.frequencies[joint_index]) != term_count or len(profile.phases[joint_index]) != term_count:
+            raise ValueError(f"profile {profile.name} q{joint_index + 1} has inconsistent sine terms")
+
+
 def generate_time(np: Any, duration: float, sample_rate: float) -> tuple[Any, float]:
     dt = 1.0 / sample_rate
     sample_count = int(math.floor(duration * sample_rate)) + 1
@@ -159,8 +204,7 @@ def generate_trajectory(np: Any, time: Any, profile: MultiSineProfile, include_j
 
     for joint_index in range(JOINT_COUNT):
         q[:, joint_index] = profile.nominal_q[joint_index]
-        for term_index in range(2):
-            amplitude = profile.amplitudes[joint_index][term_index]
+        for term_index, amplitude in enumerate(profile.amplitudes[joint_index]):
             frequency = profile.frequencies[joint_index][term_index]
             phase = profile.phases[joint_index][term_index]
             omega = 2.0 * math.pi * frequency
@@ -331,7 +375,7 @@ def write_markdown_summary(path: Path, summary: dict[str, Any]) -> None:
     config = summary["generation_config"]
     safety = summary["safety_summary"]
     lines = [
-        "# GOAL1 All-q Conservative Joint Trajectory Summary",
+        "# GOAL1 All-q Joint Trajectory Summary",
         "",
         "## Generation Config",
         "",
@@ -461,6 +505,7 @@ def main() -> int:
     try:
         np = require_numpy()
         profile = PROFILES[args.profile]
+        validate_profile(profile)
         time, dt = generate_time(np, args.duration, args.sample_rate)
         trajectory = generate_trajectory(np, time, profile, args.include_jerk)
         joint_summaries, safety_summary = build_safety_summary(np, trajectory, args.include_jerk)

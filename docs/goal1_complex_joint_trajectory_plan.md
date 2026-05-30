@@ -71,7 +71,42 @@ GOAL1 B 不做：
 - `--fail-on-unsafe`
 - `--profile`
 
-第一版只支持 `conservative` profile，但脚本结构保留了未来扩展 profile 的位置。
+当前支持 `conservative` 和 `spatial_rich` profiles，且默认仍为 `conservative`。
+
+## GOAL1 D Spatial-rich Profile
+
+GOAL1 D 在同一个 offline generator 中新增 `spatial_rich` profile，用于生成更丰富的 all-q joint-space trajectory，并通过后续 FR3 MuJoCo kinematic replay 观察 end-effector 3D path。它仍然只生成 CSV、plots 和 summary，不接 ROS2 controller，不做 torque control，不启用 GP-on，也不连接 real robot。
+
+`spatial_rich` 与 `conservative` 的区别：
+
+- `conservative` 仍是默认 profile：`--profile conservative`。
+- `conservative` 的参数和默认输出行为保持不变。
+- `spatial_rich` 对 `q1..q7` 使用不同 amplitude / frequency / phase。
+- `spatial_rich` 使用 3-term multi-sine mixture，让 joint-space motion 和 FR3 end-effector path 更丰富。
+- `q7` 仍然运动，但 amplitude 保持小于主要 joints，避免腕部姿态变化过激。
+- safety checker 和 limits 不变，不为新 profile 放宽阈值。
+
+推荐生成命令：
+
+- `.venv/bin/python scripts/generate_goal1_joint_trajectory.py --profile spatial_rich --duration 30 --sample-rate 100 --include-jerk --prefix goal1_allq_spatial_rich --fail-on-unsafe`
+
+推荐 FR3 MuJoCo kinematic replay validation：
+
+- `.venv/bin/python scripts/replay_goal1_trajectory_mujoco.py --csv outputs/goal1_joint_trajectory/goal1_allq_spatial_rich.csv --model /home/dummd/mujoco_models/mujoco_menagerie/franka_fr3/fr3.xml --joint-names fr3_joint1,fr3_joint2,fr3_joint3,fr3_joint4,fr3_joint5,fr3_joint6,fr3_joint7 --ee-site attachment_site --prefix goal1_allq_spatial_rich_fr3_attachment_site`
+
+Optional short video test：
+
+- `MUJOCO_GL=egl .venv/bin/python scripts/render_goal1_mujoco_video.py --csv outputs/goal1_joint_trajectory/goal1_allq_spatial_rich.csv --width 1280 --height 720 --auto-offscreen-xml --offscreen-width 1280 --offscreen-height 720 --camera-preset close_iso --show-timestamp --show-ee-trace --trace-radius 0.02 --start-time 8.0 --max-frames 120 --prefix goal1_allq_spatial_rich_fr3_video_test_720p_trace`
+
+GOAL1 D caveats：
+
+- offline only
+- no ROS2 controller
+- no torque control
+- no real robot
+- no GP-on
+- not tracking validation
+- not hardware safety validation
 
 ## Outputs
 
