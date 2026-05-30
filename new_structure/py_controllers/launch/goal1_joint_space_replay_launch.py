@@ -1,0 +1,134 @@
+#!/usr/bin/env python3
+
+from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument
+from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
+
+
+def generate_launch_description():
+    robot_ip_parameter_name = 'robot_ip'
+    csv_path_parameter_name = 'csv_path'
+    start_time_parameter_name = 'start_time'
+    max_duration_parameter_name = 'max_duration'
+    dry_run_parameter_name = 'dry_run'
+    start_replay_parameter_name = 'start_replay'
+    publish_effort_parameter_name = 'publish_effort'
+    kp_parameter_name = 'kp'
+    kd_parameter_name = 'kd'
+    torque_clip_nm_parameter_name = 'torque_clip_nm'
+    torque_rate_limit_nm_per_s_parameter_name = 'torque_rate_limit_nm_per_s'
+    start_position_tolerance_rad_parameter_name = 'start_position_tolerance_rad'
+
+    robot_ip = LaunchConfiguration(robot_ip_parameter_name)
+    csv_path = LaunchConfiguration(csv_path_parameter_name)
+    start_time = LaunchConfiguration(start_time_parameter_name)
+    max_duration = LaunchConfiguration(max_duration_parameter_name)
+    dry_run = LaunchConfiguration(dry_run_parameter_name)
+    start_replay = LaunchConfiguration(start_replay_parameter_name)
+    publish_effort = LaunchConfiguration(publish_effort_parameter_name)
+    kp = LaunchConfiguration(kp_parameter_name)
+    kd = LaunchConfiguration(kd_parameter_name)
+    torque_clip_nm = LaunchConfiguration(torque_clip_nm_parameter_name)
+    torque_rate_limit_nm_per_s = LaunchConfiguration(
+        torque_rate_limit_nm_per_s_parameter_name
+    )
+    start_position_tolerance_rad = LaunchConfiguration(
+        start_position_tolerance_rad_parameter_name
+    )
+
+    return LaunchDescription([
+        DeclareLaunchArgument(
+            robot_ip_parameter_name,
+            default_value='',
+            description=(
+                'Robot IP is exposed for review symmetry only. '
+                'This launch does not include franka.launch.py.'
+            ),
+        ),
+        DeclareLaunchArgument(
+            csv_path_parameter_name,
+            default_value=(
+                'outputs/goal1_joint_trajectory/'
+                'goal1_allq_spatial_rich_60s_50hz.csv'
+            ),
+            description='GOAL1 joint-space CSV path.',
+        ),
+        DeclareLaunchArgument(
+            start_time_parameter_name,
+            default_value='0.0',
+            description='Source CSV start time in seconds.',
+        ),
+        DeclareLaunchArgument(
+            max_duration_parameter_name,
+            default_value='3.0',
+            description='Maximum selected replay duration in seconds.',
+        ),
+        DeclareLaunchArgument(
+            dry_run_parameter_name,
+            default_value='true',
+            description='Validate only; no effort publishing.',
+        ),
+        DeclareLaunchArgument(
+            start_replay_parameter_name,
+            default_value='false',
+            description='Additional guard required before any replay attempt.',
+        ),
+        DeclareLaunchArgument(
+            publish_effort_parameter_name,
+            default_value='false',
+            description='Additional guard required before publishing /effort_command.',
+        ),
+        DeclareLaunchArgument(
+            kp_parameter_name,
+            default_value='2.0',
+            description='Low joint PD proportional gain scalar or comma-separated 7 values.',
+        ),
+        DeclareLaunchArgument(
+            kd_parameter_name,
+            default_value='0.2',
+            description='Low joint PD derivative gain scalar or comma-separated 7 values.',
+        ),
+        DeclareLaunchArgument(
+            torque_clip_nm_parameter_name,
+            default_value='0.5',
+            description='Per-joint torque clip in Nm.',
+        ),
+        DeclareLaunchArgument(
+            torque_rate_limit_nm_per_s_parameter_name,
+            default_value='5.0',
+            description='Per-joint torque rate limit in Nm/s.',
+        ),
+        DeclareLaunchArgument(
+            start_position_tolerance_rad_parameter_name,
+            default_value='0.05',
+            description='Required current q vs first CSV q tolerance in rad.',
+        ),
+        Node(
+            package='py_controllers',
+            executable='goal1_joint_space_replay',
+            name='goal1_joint_space_replay',
+            output='screen',
+            parameters=[{
+                robot_ip_parameter_name: robot_ip,
+                csv_path_parameter_name: csv_path,
+                start_time_parameter_name: ParameterValue(start_time, value_type=float),
+                max_duration_parameter_name: ParameterValue(max_duration, value_type=float),
+                dry_run_parameter_name: ParameterValue(dry_run, value_type=bool),
+                start_replay_parameter_name: ParameterValue(start_replay, value_type=bool),
+                publish_effort_parameter_name: ParameterValue(publish_effort, value_type=bool),
+                kp_parameter_name: kp,
+                kd_parameter_name: kd,
+                torque_clip_nm_parameter_name: ParameterValue(
+                    torque_clip_nm, value_type=float
+                ),
+                torque_rate_limit_nm_per_s_parameter_name: ParameterValue(
+                    torque_rate_limit_nm_per_s, value_type=float
+                ),
+                start_position_tolerance_rad_parameter_name: ParameterValue(
+                    start_position_tolerance_rad, value_type=float
+                ),
+            }]
+        ),
+    ])
