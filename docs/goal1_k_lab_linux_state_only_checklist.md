@@ -19,7 +19,7 @@
 - 禁止 full 60s trajectory。
 - 禁止发布 `/effort_command`。
 - 禁止任何让机器人运动的操作。
-- 在 `cpp_relayer` blocker 解决前，不进入 torque publishing path。
+- 即使 `cpp_relayer` safety guard 已添加，本 checklist 仍不进入 torque publishing path。
 
 ## Gate 0: Machine / path / branch / working tree check
 
@@ -253,13 +253,16 @@ Stop condition：
 - 不证明机器人可以安全运动。
 - 只证明 lab Linux 上 state-only readiness 有一定基础。
 
-## Next required blocker before publish_effort=true
+## cpp_relayer safety guard status
 
-在任何 `publish_effort=true` 前，必须单独 review / patch `cpp_relayer`：
+`cpp_relayer` 代码现在包含 runtime safety guard：
 
-- timeout
-- zero fallback
+- configurable `command_timeout_sec`
+- no-command / stale-command zero fallback
 - stale-command refusal
-- operator abort plan
+- invalid `EffortCommand` refusal for wrong length or non-finite values
+- deactivate-time command interface zeroing
 
-在 `cpp_relayer` stale torque / hold-last-command blocker 单独处理并确认前，不允许 `publish_effort=true`。
+这只解决 stale torque / hold-last-command 的代码层 blocker，不代表 GOAL1 K 可以直接进入 torque publishing path。
+
+本 checklist 仍然只允许 `state_only=true publish_effort=false` validation。任何 `publish_effort=true` 仍然需要单独 lab-side review、operator abort plan、短时 guarded test，并在现场确认 robot / controller / topic 状态后才能考虑。

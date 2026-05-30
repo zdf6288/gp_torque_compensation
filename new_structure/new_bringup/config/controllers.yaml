@@ -18,3 +18,4 @@ franka_robot_state_broadcaster:
 cpp_relayer:
   ros__parameters:
     arm_id: panda
+    command_timeout_sec: 0.2

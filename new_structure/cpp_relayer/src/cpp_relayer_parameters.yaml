@@ -3,3 +3,7 @@ cpp_relayer:
     type: string,
     default_value: "panda",
   } 
+  command_timeout_sec: {
+    type: double,
+    default_value: 0.2,
+  }

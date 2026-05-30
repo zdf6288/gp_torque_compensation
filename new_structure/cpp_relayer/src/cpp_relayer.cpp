@@ -1,8 +1,11 @@
 #include <cpp_relayer/cpp_relayer.hpp>
 
+#include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <cstddef>
 #include <exception>
+#include <functional>
 #include <string>
 
 #include <Eigen/Eigen>
@@ -11,6 +14,11 @@
 #include "hardware_interface/types/hardware_interface_type_values.hpp"
 
 namespace cpp_relayer {
+
+namespace {
+constexpr double kDefaultCommandTimeoutSec = 0.2;
+constexpr int kWarningThrottleMs = 2000;
+}  // namespace
 
 controller_interface::InterfaceConfiguration
 CPPRelayer::command_interface_configuration() const {
@@ -41,11 +49,38 @@ controller_interface::return_type CPPRelayer::update(
     const rclcpp::Time& /*time*/,
     const rclcpp::Duration& /*period*/) {
 
-  // EffortCommand message received
-  for (int i = 0; i < num_joints; ++i) {
-    command_interfaces_[i].set_value(tau_d_received_(i));
+  const auto now = get_node()->get_clock()->now();
+  Vector7d command_to_write = Vector7d::Zero();
+  bool has_command = false;
+  bool command_is_fresh = false;
+  double command_age_sec = 0.0;
+
+  {
+    std::lock_guard<std::mutex> lock(command_mutex_);
+    has_command = received_effort_command_;
+    if (has_command) {
+      const auto command_age = now - last_command_time_;
+      command_age_sec = command_age.seconds();
+      command_is_fresh = isCommandFresh(now, last_command_time_);
+      if (command_is_fresh) {
+        command_to_write = tau_d_received_;
+      }
+    }
   }
-  // if not received, automatically send latest tau_d_received_
+
+  if (command_is_fresh) {
+    for (int i = 0; i < num_joints; ++i) {
+      command_interfaces_[i].set_value(command_to_write(i));
+    }
+  } else {
+    setZeroCommandInterfaces();
+    if (has_command) {
+      RCLCPP_WARN_THROTTLE(
+          get_node()->get_logger(), *get_node()->get_clock(), kWarningThrottleMs,
+          "Refusing stale EffortCommand: age %.3f s, timeout %.3f s. Writing zero.",
+          command_age_sec, command_timeout_sec_);
+    }
+  }
 
   // publish state parameter
   updateStateParam();
@@ -67,6 +102,7 @@ controller_interface::return_type CPPRelayer::update(
 CallbackReturn CPPRelayer::on_init() {
   try {
     auto_declare<std::string>("arm_id", "panda");
+    auto_declare<double>("command_timeout_sec", kDefaultCommandTimeoutSec);
   } 
   catch (const std::exception& e) {
     fprintf(stderr, "Exception thrown during init stage with message: %s \n", e.what());
@@ -79,9 +115,17 @@ CallbackReturn CPPRelayer::on_configure(
     const rclcpp_lifecycle::State& /*previous_state*/) {
   try {
     arm_id_ = get_node()->get_parameter("arm_id").as_string();
+    command_timeout_sec_ = get_node()->get_parameter("command_timeout_sec").as_double();
+    if (!std::isfinite(command_timeout_sec_) || command_timeout_sec_ <= 0.0) {
+      RCLCPP_WARN(
+          get_node()->get_logger(),
+          "Invalid command_timeout_sec %.3f. Falling back to safe default %.3f s.",
+          command_timeout_sec_, kDefaultCommandTimeoutSec);
+      command_timeout_sec_ = kDefaultCommandTimeoutSec;
+    }
   } 
   catch (const std::exception& e) {
-    RCLCPP_ERROR(get_node()->get_logger(), "Failed to get arm_id parameter: %s", e.what());
+    RCLCPP_ERROR(get_node()->get_logger(), "Failed to get cpp_relayer parameters: %s", e.what());
     return CallbackReturn::ERROR;
   }
 
@@ -101,6 +145,10 @@ CallbackReturn CPPRelayer::on_configure(
                                                    arm_id_ + "/" + k_robot_state_interface_name));
 
     RCLCPP_DEBUG(get_node()->get_logger(), "configured successfully");
+    RCLCPP_INFO(
+        get_node()->get_logger(),
+        "cpp_relayer configured with command_timeout_sec=%.3f s; stale commands will be zeroed.",
+        command_timeout_sec_);
     return CallbackReturn::SUCCESS;
   } 
   catch (const std::exception& e) {
@@ -114,21 +162,92 @@ CallbackReturn CPPRelayer::on_activate(
   q_ = Vector7d::Zero();
   dq_ = Vector7d::Zero();
   tau_measured_ = Vector7d::Zero();
-  tau_d_received_ = Vector7d::Zero();
   o_t_f_.fill(0.0);
   mass_.fill(0.0);
   coriolis_.fill(0.0);
   zero_jacobian_flange_.fill(0.0);
   gravity_.fill(0.0);
+
+  {
+    std::lock_guard<std::mutex> lock(command_mutex_);
+    tau_d_received_ = Vector7d::Zero();
+    received_effort_command_ = false;
+    last_command_time_ = get_node()->get_clock()->now();
+  }
+  setZeroCommandInterfaces();
   
   franka_robot_model_->assign_loaned_state_interfaces(state_interfaces_);
   updateStateParam();
 
+  RCLCPP_INFO(
+      get_node()->get_logger(),
+      "cpp_relayer activated: zero fallback enabled until a valid fresh EffortCommand arrives "
+      "(timeout %.3f s).",
+      command_timeout_sec_);
+
+  return CallbackReturn::SUCCESS;
+}
+
+CallbackReturn CPPRelayer::on_deactivate(
+    const rclcpp_lifecycle::State& /*previous_state*/) {
+  setZeroCommandInterfaces();
+  {
+    std::lock_guard<std::mutex> lock(command_mutex_);
+    tau_d_received_ = Vector7d::Zero();
+    received_effort_command_ = false;
+    last_command_time_ = get_node()->get_clock()->now();
+  }
+  RCLCPP_INFO(get_node()->get_logger(), "cpp_relayer deactivated: command interfaces zeroed.");
   return CallbackReturn::SUCCESS;
 }
 
 void CPPRelayer::effortCommandCallback(const custom_msgs::msg::EffortCommand::SharedPtr msg) {
-  tau_d_received_ = Vector7d(msg->efforts.data());
+  if (msg->efforts.size() != static_cast<std::size_t>(num_joints)) {
+    {
+      std::lock_guard<std::mutex> lock(command_mutex_);
+      received_effort_command_ = false;
+    }
+    RCLCPP_WARN_THROTTLE(
+        get_node()->get_logger(), *get_node()->get_clock(), kWarningThrottleMs,
+        "Refusing invalid EffortCommand: expected %d efforts, got %zu. Writing zero.",
+        num_joints, msg->efforts.size());
+    return;
+  }
+
+  Vector7d command = Vector7d::Zero();
+  for (std::size_t i = 0; i < msg->efforts.size(); ++i) {
+    if (!std::isfinite(msg->efforts[i])) {
+      {
+        std::lock_guard<std::mutex> lock(command_mutex_);
+        received_effort_command_ = false;
+      }
+      RCLCPP_WARN_THROTTLE(
+          get_node()->get_logger(), *get_node()->get_clock(), kWarningThrottleMs,
+          "Refusing invalid EffortCommand: effort[%zu] is not finite. Writing zero.",
+          i);
+      return;
+    }
+    command(static_cast<int>(i)) = msg->efforts[i];
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(command_mutex_);
+    tau_d_received_ = command;
+    last_command_time_ = get_node()->get_clock()->now();
+    received_effort_command_ = true;
+  }
+}
+
+void CPPRelayer::setZeroCommandInterfaces() {
+  for (auto& command_interface : command_interfaces_) {
+    command_interface.set_value(0.0);
+  }
+}
+
+bool CPPRelayer::isCommandFresh(
+    const rclcpp::Time& now, const rclcpp::Time& last_command_time) const {
+  const auto command_age = now - last_command_time;
+  return command_age.nanoseconds() >= 0 && command_age.seconds() <= command_timeout_sec_;
 }
 
 void CPPRelayer::updateStateParam() {
