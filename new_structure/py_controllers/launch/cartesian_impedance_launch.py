@@ -23,6 +23,8 @@ def generate_launch_description():
     gp_compensation_source_parameter_name = 'gp_compensation_source'
     gp_compensation_scale_parameter_name = 'gp_compensation_scale'
     gp_compensation_clip_nm_parameter_name = 'gp_compensation_clip_nm'
+    # GOAL2 D2: cloud-like control-step / takt delay；默认 2 保持旧 controller 行为。
+    delay_steps_parameter_name = 'delay_steps'
     # GOAL2 D timing instrumentation 参数默认关闭，不改变 controller 行为。
     timing_logging_enabled_parameter_name = 'timing_logging_enabled'
     timing_log_stride_parameter_name = 'timing_log_stride'
@@ -48,6 +50,7 @@ def generate_launch_description():
     gp_compensation_source = LaunchConfiguration(gp_compensation_source_parameter_name)
     gp_compensation_scale = LaunchConfiguration(gp_compensation_scale_parameter_name)
     gp_compensation_clip_nm = LaunchConfiguration(gp_compensation_clip_nm_parameter_name)
+    delay_steps = LaunchConfiguration(delay_steps_parameter_name)
     timing_logging_enabled = LaunchConfiguration(timing_logging_enabled_parameter_name)
     timing_log_stride = LaunchConfiguration(timing_log_stride_parameter_name)
     timing_output_dir = LaunchConfiguration(timing_output_dir_parameter_name)
@@ -111,6 +114,10 @@ def generate_launch_description():
             gp_compensation_clip_nm_parameter_name,
             default_value='0.5',
             description='Per-joint GP compensation clip in Nm.'),
+        DeclareLaunchArgument(
+            delay_steps_parameter_name,
+            default_value='2',
+            description='Cloud-like control-step delay; not real network cloud latency.'),
         DeclareLaunchArgument(
             timing_logging_enabled_parameter_name,
             default_value='false',
@@ -190,6 +197,8 @@ def generate_launch_description():
                 gp_compensation_source_parameter_name: gp_compensation_source,
                 gp_compensation_scale_parameter_name: gp_compensation_scale,
                 gp_compensation_clip_nm_parameter_name: gp_compensation_clip_nm,
+                delay_steps_parameter_name: ParameterValue(
+                    delay_steps, value_type=int),
                 timing_logging_enabled_parameter_name: ParameterValue(
                     timing_logging_enabled, value_type=bool),
                 timing_log_stride_parameter_name: ParameterValue(
