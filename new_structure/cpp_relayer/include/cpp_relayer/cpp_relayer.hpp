@@ -1,5 +1,7 @@
 #pragma once
 
+#include <array>
+#include <mutex>
 #include <string>
 
 #include <Eigen/Eigen>
@@ -26,10 +28,12 @@ class CPPRelayer : public controller_interface::ControllerInterface {
   CallbackReturn on_init() override;
   CallbackReturn on_configure(const rclcpp_lifecycle::State& previous_state) override;
   CallbackReturn on_activate(const rclcpp_lifecycle::State& previous_state) override;
+  CallbackReturn on_deactivate(const rclcpp_lifecycle::State& previous_state) override;
 
  private:
   std::string arm_id_;
   const int num_joints = 7;
+  double command_timeout_sec_{0.2};
   Vector7d q_;               // from state interface
   Vector7d dq_;              // from state interface
   Vector7d tau_measured_;    // from state interface
@@ -48,7 +52,11 @@ class CPPRelayer : public controller_interface::ControllerInterface {
   // Subuscriber
   rclcpp::Subscription<custom_msgs::msg::EffortCommand>::SharedPtr effort_command_sub_ ;
   bool received_effort_command_{false} ;
+  rclcpp::Time last_command_time_;
+  std::mutex command_mutex_;
   void effortCommandCallback(const custom_msgs::msg::EffortCommand::SharedPtr msg) ;
+  void setZeroCommandInterfaces();
+  bool isCommandFresh(const rclcpp::Time& now, const rclcpp::Time& last_command_time) const;
 
 
   // Publisher
