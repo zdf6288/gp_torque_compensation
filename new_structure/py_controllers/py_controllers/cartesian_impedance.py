@@ -1574,21 +1574,9 @@ class CartesianImpedanceController(Node):
 
         # ==== 必须改成加载 1..7 ====
         for j in range(1, 8):
-            local_p = os.path.join(dir_path, f"joint{j}_local.pkl")
-            cloud_p = os.path.join(dir_path, f"joint{j}_cloud.pkl")
-            p = cloud_p
+            p = os.path.join(dir_path, f"joint{j}_local.pkl")
             abs_p = os.path.abspath(p)
-
-            if not os.path.isfile(p):
-                fallback_abs_p = os.path.abspath(local_p)
-                self.get_logger().warn(
-                    f"[GP] cloud model missing for joint{j}, fallback to local: "
-                    f"missing={abs_p}, fallback={fallback_abs_p}"
-                )
-                p = local_p
-                abs_p = fallback_abs_p
-
-            self.get_logger().info(f"[GP] 尝试加载 cloud-like 模型: {abs_p}")
+            self.get_logger().info(f"[GP] 尝试加载模型: {abs_p}")
 
             if not os.path.isfile(p):
                 self.get_logger().warn(f"[GP] model file not found: {abs_p}")
@@ -1661,9 +1649,21 @@ class CartesianImpedanceController(Node):
 
         # ==== 必须改成加载 1..7 ====
         for j in range(1, 8):
-            p = os.path.join(dir_path, f"joint{j}_local.pkl")
+            local_p = os.path.join(dir_path, f"joint{j}_local.pkl")
+            cloud_p = os.path.join(dir_path, f"joint{j}_cloud.pkl")
+            p = cloud_p
             abs_p = os.path.abspath(p)
-            self.get_logger().info(f"[GP] 尝试加载模型: {abs_p}")
+
+            if not os.path.isfile(p):
+                fallback_abs_p = os.path.abspath(local_p)
+                self.get_logger().warn(
+                    f"[GP] cloud model missing for joint{j}, fallback to local: "
+                    f"missing={abs_p}, fallback={fallback_abs_p}"
+                )
+                p = local_p
+                abs_p = fallback_abs_p
+
+            self.get_logger().info(f"[GP] 尝试加载 cloud-like 模型: {abs_p}")
 
             if not os.path.isfile(p):
                 self.get_logger().warn(f"[GP] model file not found: {abs_p}")
