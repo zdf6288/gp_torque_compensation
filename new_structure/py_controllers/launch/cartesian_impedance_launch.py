@@ -18,6 +18,8 @@ def generate_launch_description():
     use_rviz_parameter_name = 'use_rviz'
     spawn_cpp_relayer_parameter_name = 'spawn_cpp_relayer'
     spawn_gp_server_parameter_name = 'spawn_gp_server'
+    spawn_fake_state_parameter_publisher_parameter_name = 'spawn_fake_state_parameter_publisher'
+    fake_state_parameter_publish_rate_hz_parameter_name = 'fake_state_parameter_publish_rate_hz'
     # Stage 1: frozen GP / compensation experiment 参数，默认值保持安全。
     gp_prediction_enabled_parameter_name = 'gp_prediction_enabled'
     gp_online_update_enabled_parameter_name = 'gp_online_update_enabled'
@@ -48,6 +50,10 @@ def generate_launch_description():
     use_rviz = LaunchConfiguration(use_rviz_parameter_name)
     spawn_cpp_relayer = LaunchConfiguration(spawn_cpp_relayer_parameter_name)
     spawn_gp_server = LaunchConfiguration(spawn_gp_server_parameter_name)
+    spawn_fake_state_parameter_publisher = LaunchConfiguration(
+        spawn_fake_state_parameter_publisher_parameter_name)
+    fake_state_parameter_publish_rate_hz = LaunchConfiguration(
+        fake_state_parameter_publish_rate_hz_parameter_name)
     gp_prediction_enabled = LaunchConfiguration(gp_prediction_enabled_parameter_name)
     gp_online_update_enabled = LaunchConfiguration(gp_online_update_enabled_parameter_name)
     gp_model_dir = LaunchConfiguration(gp_model_dir_parameter_name)
@@ -100,6 +106,15 @@ def generate_launch_description():
             spawn_gp_server_parameter_name,
             default_value='true',
             description='Allow disabling gp_server for no-GP fake/sim smoke.'),
+        DeclareLaunchArgument(
+            spawn_fake_state_parameter_publisher_parameter_name,
+            default_value='false',
+            description='Only for GOAL2 fake/sim smoke; publishes synthetic /state_parameter '
+                        'when use_fake_hardware:=true.'),
+        DeclareLaunchArgument(
+            fake_state_parameter_publish_rate_hz_parameter_name,
+            default_value='50.0',
+            description='Publish rate for GOAL2 fake/sim synthetic /state_parameter.'),
         DeclareLaunchArgument(
             gp_prediction_enabled_parameter_name,
             default_value='true',
@@ -199,6 +214,20 @@ def generate_launch_description():
             name='gp_server',
             output='screen',
             condition=IfCondition(spawn_gp_server),
+        ),
+        Node(
+            package='py_controllers',
+            executable='goal2_fake_state_parameter_publisher',
+            name='goal2_fake_state_parameter_publisher',
+            output='screen',
+            condition=IfCondition(spawn_fake_state_parameter_publisher),
+            parameters=[{
+                use_fake_hardware_parameter_name: ParameterValue(
+                    use_fake_hardware, value_type=bool),
+                'publish_rate_hz': ParameterValue(
+                    fake_state_parameter_publish_rate_hz, value_type=float),
+                'arm_id': 'panda',
+            }],
         ),
 
         Node(

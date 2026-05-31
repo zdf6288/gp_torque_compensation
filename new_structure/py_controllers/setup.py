@@ -31,6 +31,7 @@ setup(
                 'trajectory_eclipse_publisher = py_controllers.trajectory_eclipse_publisher:main',
                 'trajectory_publisher_lambda = py_controllers.trajectory_publisher_lambda:main', 
                 'gp_server = py_controllers.gp_server:main',
+                'goal2_fake_state_parameter_publisher = py_controllers.goal2_fake_state_parameter_publisher:main',
             ],
         },
 )
