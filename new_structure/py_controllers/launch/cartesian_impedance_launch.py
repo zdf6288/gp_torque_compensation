@@ -2,6 +2,7 @@
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
@@ -15,6 +16,8 @@ def generate_launch_description():
     use_fake_hardware_parameter_name = 'use_fake_hardware'
     fake_sensor_commands_parameter_name = 'fake_sensor_commands'
     use_rviz_parameter_name = 'use_rviz'
+    spawn_cpp_relayer_parameter_name = 'spawn_cpp_relayer'
+    spawn_gp_server_parameter_name = 'spawn_gp_server'
     # Stage 1: frozen GP / compensation experiment 参数，默认值保持安全。
     gp_prediction_enabled_parameter_name = 'gp_prediction_enabled'
     gp_online_update_enabled_parameter_name = 'gp_online_update_enabled'
@@ -43,6 +46,8 @@ def generate_launch_description():
     use_fake_hardware = LaunchConfiguration(use_fake_hardware_parameter_name)
     fake_sensor_commands = LaunchConfiguration(fake_sensor_commands_parameter_name)
     use_rviz = LaunchConfiguration(use_rviz_parameter_name)
+    spawn_cpp_relayer = LaunchConfiguration(spawn_cpp_relayer_parameter_name)
+    spawn_gp_server = LaunchConfiguration(spawn_gp_server_parameter_name)
     gp_prediction_enabled = LaunchConfiguration(gp_prediction_enabled_parameter_name)
     gp_online_update_enabled = LaunchConfiguration(gp_online_update_enabled_parameter_name)
     gp_model_dir = LaunchConfiguration(gp_model_dir_parameter_name)
@@ -86,6 +91,15 @@ def generate_launch_description():
             default_value='true',
             description='Use Franka Gripper as an end-effector, otherwise, the robot is loaded '
                         'without an end-effector.'),
+        DeclareLaunchArgument(
+            spawn_cpp_relayer_parameter_name,
+            default_value='true',
+            description='Allow disabling cpp_relayer only for GOAL2 fake/sim smoke where '
+                        'fake hardware lacks Franka semantic model interfaces.'),
+        DeclareLaunchArgument(
+            spawn_gp_server_parameter_name,
+            default_value='true',
+            description='Allow disabling gp_server for no-GP fake/sim smoke.'),
         DeclareLaunchArgument(
             gp_prediction_enabled_parameter_name,
             default_value='true',
@@ -171,17 +185,20 @@ def generate_launch_description():
                               }.items(),
         ),
 
+        # GOAL2 fake/sim smoke gate: fake hardware 缺少 Franka semantic interfaces；默认 true 保持真机行为不变。
         Node(
             package='controller_manager',
             executable='spawner',
             arguments=['cpp_relayer'],
             output='screen',
+            condition=IfCondition(spawn_cpp_relayer),
         ),
         Node(
             package='py_controllers',
             executable='gp_server',          # 和 setup.py 里 entry_points 名字一致
             name='gp_server',
             output='screen',
+            condition=IfCondition(spawn_gp_server),
         ),
 
         Node(

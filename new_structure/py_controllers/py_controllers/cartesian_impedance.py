@@ -426,8 +426,17 @@ class CartesianImpedanceController(Node):
         self.local_gp_history = deque(maxlen=self.gp_hist_len)
 
 
-        # 本地加载离线训练模型
-        self._load_gp_models(self.gp_model_dir)
+        # no-GP smoke 下跳过离线模型加载，避免无用的 model path warning。
+        if (not self.gp_prediction_enabled
+                and not self.gp_compensation_enabled
+                and not self.gp_online_update_enabled):
+            self.get_logger().info(
+                "[GP] Skipping GP model loading because prediction, compensation, "
+                "and online update are all disabled."
+            )
+        else:
+            # 本地加载离线训练模型
+            self._load_gp_models(self.gp_model_dir)
 
         if self.gp_ready:
             self.get_logger().info(f"[Controller] Local GP models loaded, will run local GP in control loop")
