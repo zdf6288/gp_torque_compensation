@@ -12,6 +12,7 @@
   <depend>pandas</depend>
   <depend>matplotlib</depend>
   <depend>trajectory_msgs</depend>
+  <depend>sensor_msgs</depend>
 
   <exec_depend>franka_description</exec_depend>
   <exec_depend>franka_hardware</exec_depend>

@@ -16,6 +16,9 @@ def generate_launch_description():
     start_replay_parameter_name = 'start_replay'
     publish_effort_parameter_name = 'publish_effort'
     state_only_parameter_name = 'state_only'
+    state_source_parameter_name = 'state_source'
+    state_topic_parameter_name = 'state_topic'
+    joint_state_topic_parameter_name = 'joint_state_topic'
     kp_parameter_name = 'kp'
     kd_parameter_name = 'kd'
     torque_clip_nm_parameter_name = 'torque_clip_nm'
@@ -30,6 +33,9 @@ def generate_launch_description():
     start_replay = LaunchConfiguration(start_replay_parameter_name)
     publish_effort = LaunchConfiguration(publish_effort_parameter_name)
     state_only = LaunchConfiguration(state_only_parameter_name)
+    state_source = LaunchConfiguration(state_source_parameter_name)
+    state_topic = LaunchConfiguration(state_topic_parameter_name)
+    joint_state_topic = LaunchConfiguration(joint_state_topic_parameter_name)
     kp = LaunchConfiguration(kp_parameter_name)
     kd = LaunchConfiguration(kd_parameter_name)
     torque_clip_nm = LaunchConfiguration(torque_clip_nm_parameter_name)
@@ -86,8 +92,30 @@ def generate_launch_description():
             state_only_parameter_name,
             default_value='false',
             description=(
-                'Subscribe to /state_parameter and check the start pose only; '
+                'State-only preflight checks the start pose only; '
                 'no /effort_command publisher is created.'
+            ),
+        ),
+        DeclareLaunchArgument(
+            state_source_parameter_name,
+            default_value='state_parameter',
+            description=(
+                'State source for state_only preflight: state_parameter uses '
+                '/state_parameter; joint_states uses /franka/joint_states and '
+                'avoids /state_parameter and cpp_relayer state output.'
+            ),
+        ),
+        DeclareLaunchArgument(
+            state_topic_parameter_name,
+            default_value='/state_parameter',
+            description='StateParameter topic used when state_source:=state_parameter.',
+        ),
+        DeclareLaunchArgument(
+            joint_state_topic_parameter_name,
+            default_value='/franka/joint_states',
+            description=(
+                'JointState topic used when state_source:=joint_states. '
+                'In state_only mode, no /effort_command publisher is created.'
             ),
         ),
         DeclareLaunchArgument(
@@ -129,6 +157,9 @@ def generate_launch_description():
                 start_replay_parameter_name: ParameterValue(start_replay, value_type=bool),
                 publish_effort_parameter_name: ParameterValue(publish_effort, value_type=bool),
                 state_only_parameter_name: ParameterValue(state_only, value_type=bool),
+                state_source_parameter_name: state_source,
+                state_topic_parameter_name: state_topic,
+                joint_state_topic_parameter_name: joint_state_topic,
                 kp_parameter_name: kp,
                 kd_parameter_name: kd,
                 torque_clip_nm_parameter_name: ParameterValue(

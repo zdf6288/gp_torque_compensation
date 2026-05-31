@@ -16,7 +16,9 @@ DEFAULT_PUBLISH_EFFORT = False
 DEFAULT_STATE_ONLY = False
 DEFAULT_MAX_DURATION = 3.0
 DEFAULT_START_TIME = 0.0
+DEFAULT_STATE_SOURCE = 'state_parameter'
 DEFAULT_STATE_TOPIC = '/state_parameter'
+DEFAULT_JOINT_STATE_TOPIC = '/franka/joint_states'
 DEFAULT_EFFORT_TOPIC = '/effort_command'
 DEFAULT_START_POSITION_TOLERANCE_RAD = 0.05
 DEFAULT_STATE_TIMEOUT_SEC = 0.5
@@ -28,6 +30,8 @@ DEFAULT_TORQUE_RATE_LIMIT_NM_PER_S = 5.0
 DEFAULT_HOLD_FINAL = False
 DEFAULT_HOLD_DURATION = 0.0
 DEFAULT_ROBOT_IP = ''
+ALLOWED_STATE_SOURCES = ('state_parameter', 'joint_states')
+REQUIRED_JOINT_NAMES = [f'panda_joint{idx}' for idx in range(1, 8)]
 
 
 @dataclass
@@ -39,7 +43,9 @@ class ReplayConfig:
     state_only: bool = DEFAULT_STATE_ONLY
     max_duration: float = DEFAULT_MAX_DURATION
     start_time: float = DEFAULT_START_TIME
+    state_source: str = DEFAULT_STATE_SOURCE
     state_topic: str = DEFAULT_STATE_TOPIC
+    joint_state_topic: str = DEFAULT_JOINT_STATE_TOPIC
     effort_topic: str = DEFAULT_EFFORT_TOPIC
     start_position_tolerance_rad: float = DEFAULT_START_POSITION_TOLERANCE_RAD
     state_timeout_sec: float = DEFAULT_STATE_TIMEOUT_SEC
@@ -117,6 +123,42 @@ def nonnegative_float(value, name: str) -> float:
     return value
 
 
+def extract_state_parameter_q_dq(msg) -> tuple[List[float], List[float]]:
+    if len(msg.position) != 7 or len(msg.velocity) != 7:
+        raise ValueError('state_parameter position/velocity must each contain 7 values')
+    q = [float(value) for value in msg.position]
+    dq = [float(value) for value in msg.velocity]
+    if not all(math.isfinite(value) for value in q + dq):
+        raise ValueError('state_parameter contains non-finite q or dq')
+    return q, dq
+
+
+def extract_joint_state_q_dq(msg) -> tuple[List[float], List[float]]:
+    name_to_index = {name: idx for idx, name in enumerate(msg.name)}
+    missing = [name for name in REQUIRED_JOINT_NAMES if name not in name_to_index]
+    if missing:
+        raise ValueError(f'joint_states missing required joint names: {missing}')
+
+    q = []
+    dq = []
+    for joint_name in REQUIRED_JOINT_NAMES:
+        idx = name_to_index[joint_name]
+        if idx >= len(msg.position):
+            raise ValueError(
+                f'joint_states position missing value for {joint_name} at index {idx}'
+            )
+        if idx >= len(msg.velocity):
+            raise ValueError(
+                f'joint_states velocity missing value for {joint_name} at index {idx}'
+            )
+        q.append(float(msg.position[idx]))
+        dq.append(float(msg.velocity[idx]))
+
+    if not all(math.isfinite(value) for value in q + dq):
+        raise ValueError('joint_states contains non-finite q or dq')
+    return q, dq
+
+
 def normalize_config(config: ReplayConfig) -> ReplayConfig:
     config.dry_run = parse_bool(config.dry_run, 'dry_run')
     config.start_replay = parse_bool(config.start_replay, 'start_replay')
@@ -124,10 +166,19 @@ def normalize_config(config: ReplayConfig) -> ReplayConfig:
     config.state_only = parse_bool(config.state_only, 'state_only')
     config.max_duration = positive_float(config.max_duration, 'max_duration')
     config.start_time = nonnegative_float(config.start_time, 'start_time')
+    config.state_source = str(config.state_source).strip()
+    if config.state_source not in ALLOWED_STATE_SOURCES:
+        raise ValueError(
+            f'state_source must be one of {list(ALLOWED_STATE_SOURCES)}, '
+            f'got {config.state_source!r}'
+        )
     config.state_topic = str(config.state_topic).strip()
+    config.joint_state_topic = str(config.joint_state_topic).strip()
     config.effort_topic = str(config.effort_topic).strip()
     if not config.state_topic:
         raise ValueError('state_topic must not be empty')
+    if not config.joint_state_topic:
+        raise ValueError('joint_state_topic must not be empty')
     if not config.effort_topic and not config.state_only:
         raise ValueError('effort_topic must not be empty')
     config.start_position_tolerance_rad = nonnegative_float(
@@ -295,6 +346,7 @@ def print_validation_summary(config: ReplayConfig, trajectory: LoadedTrajectory)
     print(f'start_replay: {config.start_replay}')
     print(f'publish_effort: {config.publish_effort}')
     print(f'state_only: {config.state_only}')
+    print(f'state_source: {config.state_source}')
     print('no_torque_published: true')
 
 
@@ -330,6 +382,7 @@ def run_state_only_path(
     import rclpy
     from rclpy.node import Node
     from custom_msgs.msg import StateParameter
+    from sensor_msgs.msg import JointState
 
     class Goal1StateOnlyValidationNode(Node):
         def __init__(self):
@@ -339,27 +392,41 @@ def run_state_only_path(
             self.latest_state = None
             self.latest_state_time = None
             self.refusal_reason = ''
-            self.state_subscription = self.create_subscription(
-                StateParameter, config.state_topic, self.state_callback, 10
-            )
+            if config.state_source == 'state_parameter':
+                self.state_topic_name = config.state_topic
+                self.state_subscription = self.create_subscription(
+                    StateParameter,
+                    self.state_topic_name,
+                    self.state_parameter_callback,
+                    10,
+                )
+            else:
+                self.state_topic_name = config.joint_state_topic
+                self.state_subscription = self.create_subscription(
+                    JointState,
+                    self.state_topic_name,
+                    self.joint_state_callback,
+                    10,
+                )
             self.get_logger().warn(
-                'GOAL1 state-only no-motion check: subscribing to state only; '
+                'GOAL1 state-only no-motion check: '
+                f'state_source={config.state_source}, topic={self.state_topic_name}; '
                 'no /effort_command publisher is created.'
             )
 
-        def state_callback(self, msg):
-            if len(msg.position) != 7 or len(msg.velocity) != 7:
-                self.refusal_reason = (
-                    'state_parameter position/velocity must each contain 7 values'
-                )
-                return
-            q = [float(value) for value in msg.position]
-            dq = [float(value) for value in msg.velocity]
-            if not all(math.isfinite(value) for value in q + dq):
-                self.refusal_reason = 'state_parameter contains non-finite q or dq'
-                return
-            self.latest_state = (q, dq)
-            self.latest_state_time = self.get_clock().now()
+        def state_parameter_callback(self, msg):
+            try:
+                self.latest_state = extract_state_parameter_q_dq(msg)
+                self.latest_state_time = self.get_clock().now()
+            except ValueError as exc:
+                self.refusal_reason = str(exc)
+
+        def joint_state_callback(self, msg):
+            try:
+                self.latest_state = extract_joint_state_q_dq(msg)
+                self.latest_state_time = self.get_clock().now()
+            except ValueError as exc:
+                self.refusal_reason = str(exc)
 
         def state_age_sec(self) -> Optional[float]:
             if self.latest_state is None or self.latest_state_time is None:
@@ -381,7 +448,7 @@ def run_state_only_path(
                 if self.has_fresh_state():
                     return True
             self.refusal_reason = (
-                f'no fresh state on {self.config.state_topic} within '
+                f'no fresh state on {self.state_topic_name} within '
                 f'{self.config.state_timeout_sec:.3f}s'
             )
             return False
@@ -399,7 +466,10 @@ def run_state_only_path(
             print(f'dry_run: {self.config.dry_run}')
             print(f'start_replay: {self.config.start_replay}')
             print(f'publish_effort_requested: {self.config.publish_effort}')
-            print(f'state_topic: {self.config.state_topic}')
+            print(f'state_source: {self.config.state_source}')
+            print(f'state_topic: {self.state_topic_name}')
+            print(f'state_parameter_topic: {self.config.state_topic}')
+            print(f'joint_state_topic: {self.config.joint_state_topic}')
             print(f'csv_path: {self.config.csv_path}')
             print(f'selected_point_count: {len(self.trajectory.points)}')
             print(
@@ -679,7 +749,13 @@ def cli_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument('--max-duration', type=float, default=DEFAULT_MAX_DURATION)
     parser.add_argument('--start-time', type=float, default=DEFAULT_START_TIME)
+    parser.add_argument(
+        '--state-source',
+        choices=ALLOWED_STATE_SOURCES,
+        default=DEFAULT_STATE_SOURCE,
+    )
     parser.add_argument('--state-topic', default=DEFAULT_STATE_TOPIC)
+    parser.add_argument('--joint-state-topic', default=DEFAULT_JOINT_STATE_TOPIC)
     parser.add_argument('--effort-topic', default=DEFAULT_EFFORT_TOPIC)
     parser.add_argument(
         '--start-position-tolerance-rad',
@@ -714,7 +790,9 @@ def config_from_cli(argv: Sequence[str]) -> ReplayConfig:
         state_only=args.state_only,
         max_duration=args.max_duration,
         start_time=args.start_time,
+        state_source=args.state_source,
         state_topic=args.state_topic,
+        joint_state_topic=args.joint_state_topic,
         effort_topic=args.effort_topic,
         start_position_tolerance_rad=args.start_position_tolerance_rad,
         state_timeout_sec=args.state_timeout_sec,
@@ -744,7 +822,9 @@ def read_ros_params(argv: Sequence[str]) -> ReplayConfig:
         node.declare_parameter('state_only', DEFAULT_STATE_ONLY)
         node.declare_parameter('max_duration', DEFAULT_MAX_DURATION)
         node.declare_parameter('start_time', DEFAULT_START_TIME)
+        node.declare_parameter('state_source', DEFAULT_STATE_SOURCE)
         node.declare_parameter('state_topic', DEFAULT_STATE_TOPIC)
+        node.declare_parameter('joint_state_topic', DEFAULT_JOINT_STATE_TOPIC)
         node.declare_parameter('effort_topic', DEFAULT_EFFORT_TOPIC)
         node.declare_parameter(
             'start_position_tolerance_rad', DEFAULT_START_POSITION_TOLERANCE_RAD
@@ -776,7 +856,9 @@ def read_ros_params(argv: Sequence[str]) -> ReplayConfig:
             state_only=node.get_parameter('state_only').value,
             max_duration=node.get_parameter('max_duration').value,
             start_time=node.get_parameter('start_time').value,
+            state_source=node.get_parameter('state_source').value,
             state_topic=node.get_parameter('state_topic').value,
+            joint_state_topic=node.get_parameter('joint_state_topic').value,
             effort_topic=node.get_parameter('effort_topic').value,
             start_position_tolerance_rad=node.get_parameter(
                 'start_position_tolerance_rad'
@@ -813,6 +895,11 @@ def run(config: ReplayConfig, argv: Sequence[str]) -> None:
     if not config.start_replay:
         print_validation_summary(config, trajectory)
         print_refusal('start_replay is false')
+        return
+
+    if config.state_source != 'state_parameter':
+        print_validation_summary(config, trajectory)
+        print_refusal('state_source=joint_states is only supported for state_only preflight')
         return
 
     run_publish_path(config, trajectory, argv)

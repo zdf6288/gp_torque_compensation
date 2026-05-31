@@ -82,6 +82,26 @@ This command is intended to confirm that the first CSV `q` matches the current `
 
 Do not use any effort-publishing command until a separate lab-side safety review explicitly approves it.
 
+## GOAL1 M JointState State-only Preflight
+
+For lab-side no-motion preflight, prefer `/franka/joint_states` through `state_source:=joint_states`:
+
+`ros2 launch py_controllers goal1_joint_space_replay_launch.py csv_path:=outputs/goal1_joint_trajectory/goal1_real_current_q_anchored_3s_50hz.csv state_only:=true dry_run:=true start_replay:=false publish_effort:=false state_source:=joint_states joint_state_topic:=/franka/joint_states`
+
+This path reads `sensor_msgs/JointState` and maps by joint name, not array order. The required names are `panda_joint1` through `panda_joint7`, and the internal `q/dq` order is always joint1..joint7. This matters because lab observation showed `/franka/joint_states` may publish joint5 after joint7.
+
+`/franka/joint_states` is preferred for state-only preflight because it can provide current robot `q/dq` without activating `cpp_relayer` just to get `/state_parameter`. In the lab, active `cpp_relayer` triggered visible robot motion, yellow robot state, and `communication_constraints_violation`; do not use active `cpp_relayer` casually as a state source for no-motion checks.
+
+The state-only path still preserves the no-motion boundary:
+
+- no `/effort_command` publisher is created
+- no torque is published
+- no replay is started
+- no GP-on path is used
+- no full trajectory is executed
+
+Do not run any `publish_effort:=true` command from this document. Any motion attempt requires a separate future approval and safety review.
+
 ## Lab Caveat
 
 Known lab-side caveat:
@@ -94,4 +114,4 @@ The current engineering standard is that one successful run producing usable dat
 
 ## Explicit Scope
 
-GOAL1 L only generates a recordable CSV and summaries. It does not modify `goal1_joint_space_replay.py`, launch safety defaults, `cartesian_impedance.py`, `cpp_relayer.cpp`, torque command logic, or GP behavior.
+GOAL1 L only generates a recordable CSV and summaries. GOAL1 M adds a state-only `JointState` preflight source to `goal1_joint_space_replay.py` and its launch file. It does not modify `cartesian_impedance.py`, `cpp_relayer.cpp`, torque command logic, or GP behavior.
