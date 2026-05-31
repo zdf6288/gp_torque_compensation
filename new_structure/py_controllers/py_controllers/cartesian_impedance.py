@@ -17,6 +17,7 @@ import sys
 import os, pickle
 import importlib.util
 import threading, time
+from pathlib import Path
 from std_msgs.msg import String
 from collections import deque
 
@@ -1573,9 +1574,21 @@ class CartesianImpedanceController(Node):
 
         # ==== 必须改成加载 1..7 ====
         for j in range(1, 8):
-            p = os.path.join(dir_path, f"joint{j}_local.pkl")
+            local_p = os.path.join(dir_path, f"joint{j}_local.pkl")
+            cloud_p = os.path.join(dir_path, f"joint{j}_cloud.pkl")
+            p = cloud_p
             abs_p = os.path.abspath(p)
-            self.get_logger().info(f"[GP] 尝试加载模型: {abs_p}")
+
+            if not os.path.isfile(p):
+                fallback_abs_p = os.path.abspath(local_p)
+                self.get_logger().warn(
+                    f"[GP] cloud model missing for joint{j}, fallback to local: "
+                    f"missing={abs_p}, fallback={fallback_abs_p}"
+                )
+                p = local_p
+                abs_p = fallback_abs_p
+
+            self.get_logger().info(f"[GP] 尝试加载 cloud-like 模型: {abs_p}")
 
             if not os.path.isfile(p):
                 self.get_logger().warn(f"[GP] model file not found: {abs_p}")
@@ -1902,26 +1915,54 @@ class CartesianImpedanceController(Node):
         确保在当前进程中有名为 'skygp' 的模块，
         路径指向 repo 里的 /new_structure/gp/skygp.py
         """
-        # 以当前脚本为基准，找到 gp/skygp.py
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        skygp_path = os.path.abspath(os.path.join(
-            script_dir, "..","..", "..","..","..", "..", "new_structure","gp", "skygp.py"
-        ))
-
-        if not os.path.isfile(skygp_path):
-            self.get_logger().error(f"[GP] skygp.py not found at: {skygp_path}")
-            return False
-
         # 如果已加载则跳过
         if "skygp" in sys.modules:
             return True
 
+        file_path = Path(__file__).resolve()
+        cwd_path = Path.cwd().resolve()
+
+        candidate_paths = []
+        seen = set()
+
+        # 需要同时支持 source tree 和 colcon build / symlink-install 下的 __file__。
+        for root in (file_path.parent, cwd_path):
+            for base in (root, *root.parents):
+                for candidate in (
+                    base / "new_structure" / "gp" / "skygp.py",
+                    base / "gp" / "skygp.py",
+                ):
+                    if candidate in seen:
+                        continue
+                    seen.add(candidate)
+                    candidate_paths.append(candidate)
+
+        skygp_path = next((path for path in candidate_paths if path.is_file()), None)
+        if skygp_path is None:
+            preview = "\n".join(str(path) for path in candidate_paths[:12])
+            if len(candidate_paths) > 12:
+                preview += f"\n... ({len(candidate_paths) - 12} more)"
+            self.get_logger().error(
+                "[GP] skygp.py not found.\n"
+                f"[GP] __file__: {file_path}\n"
+                f"[GP] cwd: {cwd_path}\n"
+                f"[GP] candidate paths checked ({len(candidate_paths)}):\n{preview}"
+            )
+            return False
+
         try:
-            spec = importlib.util.spec_from_file_location("skygp", skygp_path)
+            # pickle 里的旧模型引用模块名 skygp，所以这里的 module name 不能改。
+            spec = importlib.util.spec_from_file_location("skygp", str(skygp_path))
+            if spec is None or spec.loader is None:
+                self.get_logger().error(f"[GP] failed to create import spec for skygp from {skygp_path}")
+                return False
             skygp_mod = importlib.util.module_from_spec(spec)
             sys.modules["skygp"] = skygp_mod   # 关键：模块名必须叫 'skygp'
             spec.loader.exec_module(skygp_mod)
-            self.get_logger().info(f"[GP] skygp loaded from: {skygp_path}")
+            self.get_logger().info(
+                f"[GP] skygp loaded from: {skygp_path} "
+                f"(checked {len(candidate_paths)} candidate paths)"
+            )
             return True
         except Exception as e:
             self.get_logger().error(f"[GP] failed to import skygp from {skygp_path}: {e}")
