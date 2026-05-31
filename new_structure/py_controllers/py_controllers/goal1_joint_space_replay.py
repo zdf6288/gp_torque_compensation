@@ -731,10 +731,12 @@ def config_from_cli(argv: Sequence[str]) -> ReplayConfig:
 
 def read_ros_params(argv: Sequence[str]) -> ReplayConfig:
     import rclpy
+    from rcl_interfaces.msg import ParameterDescriptor
 
     rclpy.init(args=[sys.argv[0]] + list(argv))
     node = rclpy.create_node('goal1_joint_space_replay')
     try:
+        gain_parameter_descriptor = ParameterDescriptor(dynamic_typing=True)
         node.declare_parameter('csv_path', DEFAULT_CSV_PATH)
         node.declare_parameter('dry_run', DEFAULT_DRY_RUN)
         node.declare_parameter('start_replay', DEFAULT_START_REPLAY)
@@ -749,8 +751,16 @@ def read_ros_params(argv: Sequence[str]) -> ReplayConfig:
         )
         node.declare_parameter('state_timeout_sec', DEFAULT_STATE_TIMEOUT_SEC)
         node.declare_parameter('command_timeout_sec', DEFAULT_COMMAND_TIMEOUT_SEC)
-        node.declare_parameter('kp', ','.join(str(value) for value in DEFAULT_KP))
-        node.declare_parameter('kd', ','.join(str(value) for value in DEFAULT_KD))
+        node.declare_parameter(
+            'kp',
+            ','.join(str(value) for value in DEFAULT_KP),
+            gain_parameter_descriptor,
+        )
+        node.declare_parameter(
+            'kd',
+            ','.join(str(value) for value in DEFAULT_KD),
+            gain_parameter_descriptor,
+        )
         node.declare_parameter('torque_clip_nm', DEFAULT_TORQUE_CLIP_NM)
         node.declare_parameter(
             'torque_rate_limit_nm_per_s', DEFAULT_TORQUE_RATE_LIMIT_NM_PER_S
