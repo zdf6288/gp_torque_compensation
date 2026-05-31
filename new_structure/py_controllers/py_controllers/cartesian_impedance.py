@@ -2,7 +2,7 @@
 
 import rclpy
 from rclpy.node import Node
-from custom_msgs.msg import StateParameter, EffortCommand, TaskSpaceCommand
+from custom_msgs.msg import StateParameter, EffortCommand, TaskSpaceCommand, JointSpaceCommand
 from custom_msgs.srv import JointPositionAdjust
 from custom_msgs.srv import AsyncGPpredict
 from custom_msgs.srv import GetFutureTrajectory
@@ -24,6 +24,23 @@ class CartesianImpedanceController(Node):
     
     def __init__(self):
         super().__init__('cartesian_impedance')
+
+        self.declare_parameter('reference_mode', 'cartesian')
+        self.declare_parameter('joint_space_command_topic', '/joint_space_command')
+        self.reference_mode = str(self.get_parameter('reference_mode').value).strip().lower()
+        self.joint_space_command_topic = str(
+            self.get_parameter('joint_space_command_topic').value
+        ).strip()
+        if self.reference_mode not in ('cartesian', 'joint'):
+            self.get_logger().warn(
+                f"Invalid reference_mode='{self.reference_mode}', falling back to 'cartesian'"
+            )
+            self.reference_mode = 'cartesian'
+        if not self.joint_space_command_topic:
+            self.get_logger().warn(
+                "joint_space_command_topic is empty, falling back to /joint_space_command"
+            )
+            self.joint_space_command_topic = '/joint_space_command'
         
         # subscribe to /state_parameter
         self.param_subscription = self.create_subscription(
@@ -32,6 +49,15 @@ class CartesianImpedanceController(Node):
         # subscribe to /task_space_command
         self.task_command_subscription = self.create_subscription(
             TaskSpaceCommand, '/task_space_command', self.taskCommandCallback, 10)
+
+        self.joint_space_command_subscription = None
+        if self.reference_mode == 'joint':
+            self.joint_space_command_subscription = self.create_subscription(
+                JointSpaceCommand,
+                self.joint_space_command_topic,
+                self.jointSpaceCommandCallback,
+                10
+            )
         
         # subscribe to /data_recording_enabled to know when to start recording data
         self.data_recording_subscription = self.create_subscription(
@@ -60,6 +86,30 @@ class CartesianImpedanceController(Node):
         self.d_pd = np.array(self.get_parameter('d_pd').value, dtype=float)
         self.i_pid = np.array(self.get_parameter('i_pid').value, dtype=float)
         self.i_error = np.zeros(7)
+
+        # GOAL1 joint reference branch: explicit-only, low-gain, clipped, and rate-limited.
+        self.declare_parameter('joint_reference_kp', [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0])
+        self.declare_parameter('joint_reference_kd', [0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2])
+        self.declare_parameter('joint_reference_torque_clip_nm', 0.5)
+        self.declare_parameter('joint_reference_torque_rate_limit_nm_per_s', 5.0)
+        self.declare_parameter('joint_space_command_timeout_sec', 0.1)
+        self.joint_reference_kp = self._get_7d_parameter(
+            'joint_reference_kp', [2.0] * 7
+        )
+        self.joint_reference_kd = self._get_7d_parameter(
+            'joint_reference_kd', [0.2] * 7
+        )
+        self.joint_reference_torque_clip_nm = self._get_positive_float_parameter(
+            'joint_reference_torque_clip_nm', 0.5
+        )
+        self.joint_reference_torque_rate_limit_nm_per_s = self._get_positive_float_parameter(
+            'joint_reference_torque_rate_limit_nm_per_s', 5.0
+        )
+        self.joint_space_command_timeout_sec = self._get_positive_float_parameter(
+            'joint_space_command_timeout_sec', 0.1
+        )
+        self.joint_reference_last_tau = np.zeros(7, dtype=float)
+        self.joint_reference_last_tau_time = None
 
         self.declare_parameter('k_gains', [1500.0, 1250.0, 1500.0, 25.0, 25.0, 0.0])   # k_gains in impedance control (task space)
         self.k_gains = np.array(self.get_parameter('k_gains').value, dtype=float)
@@ -182,6 +232,12 @@ class CartesianImpedanceController(Node):
         self.x_des = None                   # desired position from task space command
         self.dx_des = None                  # desired velocity from task space command
         self.ddx_des = None                 # desired acceleration from task space command
+        self.joint_command_received = False
+        self.joint_command_enabled = False
+        self.joint_command_time = None
+        self.q_des_joint = np.zeros(7, dtype=float)
+        self._joint_reference_wait_logged = False
+        self._joint_reference_stale_logged = False
         self.rotation_matrix_des = np.array(
             [[1, 0, 0], [0, -1, 0], [0, 0, -1]], dtype=float)   # desired rotation matrix, z axis perpendicular to ground
         # joint position control state
@@ -194,6 +250,15 @@ class CartesianImpedanceController(Node):
 
         self.effort_msg = EffortCommand()
         self.get_logger().info('Cartesian Impedance controller node started')
+        self.get_logger().info(
+            f"Reference mode: {self.reference_mode}, "
+            f"joint_space_command_topic='{self.joint_space_command_topic}'"
+        )
+        if self.reference_mode == 'joint':
+            self.get_logger().warn(
+                "Joint reference mode is explicit-only: waiting for enabled "
+                "JointSpaceCommand before publishing joint-reference torque."
+            )
         self.get_logger().info(f'Desired joint positions: {self.q_des}')
         self.get_logger().info(f'Joint position threshold: {self.joint_position_threshold}')
 
@@ -458,6 +523,44 @@ class CartesianImpedanceController(Node):
         self.get_logger().warn(f"[GP] Parameter '{name}' is not bool-like ({value}); using bool(value)")
         return bool(value)
 
+    def _get_7d_parameter(self, name, default_values):
+        raw_value = self.get_parameter(name).value
+        try:
+            if isinstance(raw_value, str):
+                values = [
+                    float(item.strip())
+                    for item in raw_value.split(',')
+                    if item.strip()
+                ]
+            elif isinstance(raw_value, (list, tuple, np.ndarray)):
+                values = [float(item) for item in raw_value]
+            else:
+                values = [float(raw_value)] * 7
+
+            array = np.array(values, dtype=float)
+            if array.shape != (7,) or not np.all(np.isfinite(array)):
+                raise ValueError
+            return array
+        except (TypeError, ValueError):
+            self.get_logger().warn(
+                f"Parameter '{name}' must be a finite scalar or 7 values; "
+                f"using default {default_values}"
+            )
+            return np.array(default_values, dtype=float)
+
+    def _get_positive_float_parameter(self, name, default_value):
+        try:
+            value = float(self.get_parameter(name).value)
+            if not np.isfinite(value) or value <= 0.0:
+                raise ValueError
+            return value
+        except (TypeError, ValueError):
+            self.get_logger().warn(
+                f"Parameter '{name}' must be a finite value > 0.0; "
+                f"using default {default_value}"
+            )
+            return float(default_value)
+
     def dls_dyn_pinv(self, J, M, lam):
         """
         Dynamically consistent DLS pseudoinverse:
@@ -476,6 +579,33 @@ class CartesianImpedanceController(Node):
         self.x_des = np.array(msg.x_des)
         self.dx_des = np.array(msg.dx_des)
         self.ddx_des = np.array(msg.ddx_des)
+
+    def jointSpaceCommandCallback(self, msg):
+        """callback function for /joint_space_command subscriber"""
+        try:
+            q_des = np.array(msg.q_des, dtype=float)
+            dq_des = np.array(msg.dq_des, dtype=float)
+            ddq_des = np.array(msg.ddq_des, dtype=float)
+            if (
+                q_des.shape != (7,)
+                or dq_des.shape != (7,)
+                or ddq_des.shape != (7,)
+                or not np.all(np.isfinite(np.concatenate([q_des, dq_des, ddq_des])))
+            ):
+                raise ValueError("JointSpaceCommand q_des/dq_des/ddq_des must be finite length-7 arrays")
+
+            self.q_des_joint = q_des
+            self.dq_des_joint = dq_des
+            self.ddq_des_joint = ddq_des
+            self.joint_command_enabled = bool(msg.enable)
+            self.joint_command_received = True
+            self.joint_command_time = self.get_clock().now()
+            self._joint_reference_stale_logged = False
+            if self.joint_command_enabled:
+                self._joint_reference_wait_logged = False
+        except ValueError as e:
+            self.joint_command_enabled = False
+            self.get_logger().error(f"Invalid JointSpaceCommand ignored: {e}")
         
     def dataRecordingCallback(self, msg):
         """callback function for /data_recording_enabled subscriber"""
@@ -493,6 +623,125 @@ class CartesianImpedanceController(Node):
             # 如果你希望停轨迹时也关掉 GP，可以顺便关掉
             self.gp_active = False
             self.get_logger().info("[Controller] Data recording disabled -> GP compensation DEACTIVATED")
+
+    def _handle_joint_reference_control(
+        self,
+        t_now,
+        t_elapsed,
+        q,
+        dq,
+        dt,
+        ddq_est,
+        tau_measured,
+        gravity_measured
+    ):
+        if not self.joint_command_received:
+            if not self._joint_reference_wait_logged:
+                self.get_logger().warn(
+                    "reference_mode=joint but no JointSpaceCommand has been received; "
+                    "no effort command is published."
+                )
+                self._joint_reference_wait_logged = True
+            return
+
+        if not self.joint_command_enabled:
+            self.joint_reference_last_tau = np.zeros(7, dtype=float)
+            self.joint_reference_last_tau_time = None
+            return
+
+        if self.joint_command_time is None:
+            return
+
+        command_age = (t_now - self.joint_command_time).nanoseconds / 1e9
+        if command_age > self.joint_space_command_timeout_sec:
+            self.joint_reference_last_tau = np.zeros(7, dtype=float)
+            self.joint_reference_last_tau_time = None
+            if not self._joint_reference_stale_logged:
+                self.get_logger().warn(
+                    "JointSpaceCommand is stale: "
+                    f"age={command_age:.6f}s, "
+                    f"timeout={self.joint_space_command_timeout_sec:.6f}s; "
+                    "no effort command is published."
+                )
+                self._joint_reference_stale_logged = True
+            return
+
+        tau = (
+            self.joint_reference_kp * (self.q_des_joint - q)
+            + self.joint_reference_kd * (self.dq_des_joint - dq)
+        )
+        tau = np.clip(
+            tau,
+            -self.joint_reference_torque_clip_nm,
+            self.joint_reference_torque_clip_nm
+        )
+
+        if self.joint_reference_last_tau_time is None:
+            command_dt = max(dt, 1e-6)
+        else:
+            command_dt = (t_now - self.joint_reference_last_tau_time).nanoseconds / 1e9
+            command_dt = max(command_dt, 1e-6)
+        max_delta = self.joint_reference_torque_rate_limit_nm_per_s * command_dt
+        tau = self.joint_reference_last_tau + np.clip(
+            tau - self.joint_reference_last_tau,
+            -max_delta,
+            max_delta
+        )
+        self.joint_reference_last_tau = tau.copy()
+        self.joint_reference_last_tau_time = t_now
+
+        tau_residual = tau_measured - tau - gravity_measured
+        if self.data_recording_enabled:
+            self.dq_des_joint_history.append(self.dq_des_joint.tolist())
+            self.ddq_des_joint_history.append(self.ddq_des_joint.tolist())
+            self.tau_residual_raw_history.append(tau_residual.tolist())
+        self.tau_residual_filtered = (
+            0.02 * tau_residual + 0.98 * self.tau_residual_filtered
+        )
+        self.state_buffer.append({
+            "t": t_elapsed,
+            "q": q.copy(),
+            "dq": self.dq_des_joint.copy(),
+            "ddq_est": ddq_est.copy(),
+            "tau_res": self.tau_residual_filtered.copy(),
+        })
+
+        # joint reference mode 使用 message 里的 dq_des 作为 GP feature 的第二段；
+        # 这不改变现有 Cartesian 分支的 GP 调用语义。
+        if self.use_gp and self.gp_prediction_enabled:
+            y_hat_local, var_local = self._gp_predict_and_update(
+                q,
+                self.dq_des_joint,
+                self.ddq_des_joint,
+                self.tau_residual_filtered,
+                self.gp_models_small,
+                update=self.gp_online_update_enabled
+            )
+            self.y_hat_local = y_hat_local
+            self.var_local = var_local
+
+            y_hat_cloud, var_cloud = self._gp_predict_and_update(
+                q,
+                self.dq_des_joint,
+                self.ddq_des_joint,
+                self.tau_residual_filtered,
+                self.gp_models_big,
+                update=self.gp_online_update_enabled
+            )
+            self.y_hat_cloud = y_hat_cloud
+            self.var_cloud = var_cloud
+
+            eps = 1e-8
+            v_l = np.maximum(self.var_local, eps)
+            v_c = np.maximum(self.var_cloud, eps)
+            prec_l = 1.0 / v_l
+            prec_c = 1.0 / v_c
+            w_l = prec_l / (prec_l + prec_c)
+            self.y_hat_combined = w_l * self.y_hat_local + (1.0 - w_l) * self.y_hat_cloud
+
+        tau = self._apply_gp_compensation(tau)
+        self.effort_msg.efforts = tau.tolist()
+        self.effort_publisher.publish(self.effort_msg)
 
     def _future_traj_response_callback(self, future):
         try:
@@ -602,6 +851,7 @@ class CartesianImpedanceController(Node):
                 self.dq_prev = dq.copy()
                 self.ddq_est = np.zeros_like(dq)
                 self.ddq_est_initialized = True
+                ddq_est = self.ddq_est.copy()
             else:
                 t_elapsed = (t_now - self.t_initial).nanoseconds / 1e9
                 dt = (t_now - self.t_last).nanoseconds / 1e9
@@ -660,6 +910,19 @@ class CartesianImpedanceController(Node):
             lam_ns = self.dls_lambda_ns
             # 6×7
             zero_jacobian_pinv = self.dls_dyn_pinv(zero_jacobian, mass_matrix, lam_ns)   # 7×6 
+
+            if self.reference_mode == 'joint':
+                self._handle_joint_reference_control(
+                    t_now,
+                    t_elapsed,
+                    q,
+                    dq,
+                    dt,
+                    ddq_est,
+                    tau_measured,
+                    gravity_measured
+                )
+                return
 
             if self.joint_position_control_active and not self.joint_position_adjusted:
                 tau, reached, pos_err_norm = self._startup_taskspace_control(

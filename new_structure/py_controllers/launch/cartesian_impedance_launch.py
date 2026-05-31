@@ -15,6 +15,8 @@ def generate_launch_description():
     use_fake_hardware_parameter_name = 'use_fake_hardware'
     fake_sensor_commands_parameter_name = 'fake_sensor_commands'
     use_rviz_parameter_name = 'use_rviz'
+    reference_mode_parameter_name = 'reference_mode'
+    joint_space_command_topic_parameter_name = 'joint_space_command_topic'
     # Stage 1: frozen GP / compensation experiment 参数，默认值保持安全。
     gp_prediction_enabled_parameter_name = 'gp_prediction_enabled'
     gp_online_update_enabled_parameter_name = 'gp_online_update_enabled'
@@ -35,6 +37,8 @@ def generate_launch_description():
     use_fake_hardware = LaunchConfiguration(use_fake_hardware_parameter_name)
     fake_sensor_commands = LaunchConfiguration(fake_sensor_commands_parameter_name)
     use_rviz = LaunchConfiguration(use_rviz_parameter_name)
+    reference_mode = LaunchConfiguration(reference_mode_parameter_name)
+    joint_space_command_topic = LaunchConfiguration(joint_space_command_topic_parameter_name)
     gp_prediction_enabled = LaunchConfiguration(gp_prediction_enabled_parameter_name)
     gp_online_update_enabled = LaunchConfiguration(gp_online_update_enabled_parameter_name)
     gp_model_dir = LaunchConfiguration(gp_model_dir_parameter_name)
@@ -70,6 +74,14 @@ def generate_launch_description():
             default_value='true',
             description='Use Franka Gripper as an end-effector, otherwise, the robot is loaded '
                         'without an end-effector.'),
+        DeclareLaunchArgument(
+            reference_mode_parameter_name,
+            default_value='cartesian',
+            description='Controller reference mode: cartesian or joint.'),
+        DeclareLaunchArgument(
+            joint_space_command_topic_parameter_name,
+            default_value='/joint_space_command',
+            description='JointSpaceCommand topic used only when reference_mode:=joint.'),
         DeclareLaunchArgument(
             gp_prediction_enabled_parameter_name,
             default_value='true',
@@ -150,6 +162,8 @@ def generate_launch_description():
             name='cartesian_impedance',
             output='screen',
             parameters=[{
+                reference_mode_parameter_name: ParameterValue(reference_mode, value_type=str),
+                joint_space_command_topic_parameter_name: joint_space_command_topic,
                 gp_prediction_enabled_parameter_name: gp_prediction_enabled,
                 gp_online_update_enabled_parameter_name: gp_online_update_enabled,
                 gp_model_dir_parameter_name: gp_model_dir,

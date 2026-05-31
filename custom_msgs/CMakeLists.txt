@@ -17,6 +17,7 @@ set(msg_files
   "msg/EffortCommand.msg"
   "msg/StateParameter.msg"
   "msg/TaskSpaceCommand.msg"
+  "msg/JointSpaceCommand.msg"
   "msg/RobotTransformation.msg"
   "msg/DataForGP.msg"
 )
