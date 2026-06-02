@@ -368,9 +368,12 @@ class TrajectoryPublisher(Node):
             # get time, initialize varaibles
             current_time = self.get_clock().now()
             elapsed_time = (current_time - self.start_time).nanoseconds / 1e9
-            x, y, z = 0.0, 0.0, 0.0
-            dx, dy, dz = 0.0, 0.0, 0.0
-            ddx, ddy, ddz = 0.0, 0.0, 0.0
+            # 默认发布 6D task-space command。
+            # transition 阶段只插值 position，orientation 保持 0；
+            # trajectory 阶段使用 _compute_task_space_trajectory() 的完整 6D 输出。
+            x_des = [0.0] * 6
+            dx_des = [0.0] * 6
+            ddx_des = [0.0] * 6
             
             if self.use_transition and not self.transition_complete:
                 # transition: from adjusted robot position to trajectory start point
@@ -385,9 +388,14 @@ class TrajectoryPublisher(Node):
                     elapsed_time = 0.0
                     
                     # set initial position to trajectory start point
-                    x = self.trajectory_start_x
-                    y = self.trajectory_start_y
-                    z = self.trajectory_start_z
+                    x_des = [
+                        self.trajectory_start_x,
+                        self.trajectory_start_y,
+                        self.trajectory_start_z,
+                        0.0, 0.0, 0.0,
+                    ]
+                    dx_des = [0.0] * 6
+                    ddx_des = [0.0] * 6
                 else:
                     # generate smooth transition trajectory from adjusted robot position to start point
                     # use 5th order polynomial for interpolation
@@ -409,23 +417,26 @@ class TrajectoryPublisher(Node):
                     ddx = d2s_dt2 * (self.trajectory_start_x - self.robot_initial_x)
                     ddy = d2s_dt2 * (self.trajectory_start_y - self.robot_initial_y)
                     ddz = d2s_dt2 * (self.trajectory_start_z - self.robot_initial_z)
+
+                    x_des = [x, y, z, 0.0, 0.0, 0.0]
+                    dx_des = [dx, dy, dz, 0.0, 0.0, 0.0]
+                    ddx_des = [ddx, ddy, ddz, 0.0, 0.0, 0.0]
             
             # trajectory for uniform circular trajectory
             if self.transition_complete or not self.use_transition:
                 if elapsed_time > 0.0:
+                    # trajectory 阶段发布完整 6D command。
+                    # goal1_spatial_orientation_rich 的 roll/pitch/yaw 会在这里真正进入 /task_space_command。
                     x_des, dx_des, ddx_des = self._compute_task_space_trajectory(elapsed_time)
-                    x, y, z = x_des[:3]
-                    dx, dy, dz = dx_des[:3]
-                    ddx, ddy, ddz = ddx_des[:3]
             
             # publish on /task_space_command
             trajectory_msg = TaskSpaceCommand()
             trajectory_msg.header = Header()
             trajectory_msg.header.stamp = current_time.to_msg()
             trajectory_msg.header.frame_id = "base_link"
-            trajectory_msg.x_des = [x, y, z, 0.0, 0.0, 0.0]         # position (x, y, z, roll, pitch, yaw)
-            trajectory_msg.dx_des = [dx, dy, dz, 0.0, 0.0, 0.0]     # velocity
-            trajectory_msg.ddx_des = [ddx, ddy, ddz, 0.0, 0.0, 0.0] # acceleration
+            trajectory_msg.x_des = [float(v) for v in x_des]       # position + small orientation command
+            trajectory_msg.dx_des = [float(v) for v in dx_des]      # velocity
+            trajectory_msg.ddx_des = [float(v) for v in ddx_des]    # acceleration
             
             self.trajectory_publisher.publish(trajectory_msg)
             
