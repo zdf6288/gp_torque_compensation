@@ -446,11 +446,18 @@ class TrajectoryPublisher(Node):
             self.data_recording_publisher.publish(data_recording_msg)
             
             if int(elapsed_time * 1000) % 1000 == 0:
+                log_x, log_y, log_z = x_des[:3]
                 if self.use_transition and not self.transition_complete:
                     transition_elapsed = (current_time - self.transition_start_time).nanoseconds / 1e9
-                    self.get_logger().debug(f'Transition phase: t={transition_elapsed:.3f}s, pos=({x:.3f}, {y:.3f}, {z:.3f})')
+                    self.get_logger().debug(
+                        f'Transition phase: t={transition_elapsed:.3f}s, '
+                        f'pos=({log_x:.3f}, {log_y:.3f}, {log_z:.3f})'
+                    )
                 else:
-                    self.get_logger().debug(f'Circular trajectory: t={elapsed_time:.3f}s, pos=({x:.3f}, {y:.3f}, {z:.3f})')
+                    self.get_logger().debug(
+                        f'Circular trajectory: t={elapsed_time:.3f}s, '
+                        f'pos=({log_x:.3f}, {log_y:.3f}, {log_z:.3f})'
+                    )
                 
         except Exception as e:
             self.get_logger().error(f'Error in trajectory publisher: {str(e)}')
