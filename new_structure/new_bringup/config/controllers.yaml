@@ -18,3 +18,7 @@ franka_robot_state_broadcaster:
 cpp_relayer:
   ros__parameters:
     arm_id: panda
+    # GOAL1 legacy Cartesian real run:
+    # activation 时 cartesian_impedance 可能还没发布 cached EffortCommand。
+    # 这里只放宽 activate gate，不取消 runtime command_timeout_sec stale-command zeroing。
+    require_fresh_command_on_activate: false
