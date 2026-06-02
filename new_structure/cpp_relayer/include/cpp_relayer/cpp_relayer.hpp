@@ -34,6 +34,7 @@ class CPPRelayer : public controller_interface::ControllerInterface {
   std::string arm_id_;
   const int num_joints = 7;
   double command_timeout_sec_{0.2};
+  bool require_fresh_command_on_activate_{true};
   Vector7d q_;               // from state interface
   Vector7d dq_;              // from state interface
   Vector7d tau_measured_;    // from state interface
