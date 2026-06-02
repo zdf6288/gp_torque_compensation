@@ -74,6 +74,30 @@ class CartesianImpedanceController(Node):
         self.kpn_gains = np.array(self.get_parameter('kpn_gains').value, dtype=float)
         self.dpn_gains = 1 * np.sqrt(np.array(self.kpn_gains))                        # dpn_gains for nullspace
 
+        # GOAL1 q7 nullspace probe.
+        # 默认关闭；只用于验证 legacy Cartesian pipeline 下是否能通过 nullspace 轻微激发 q7。
+        # 这不是 GP compensation，也不是 full 7DoF controller。
+        # 输出经过 N.T nullspace projection，并带单独 torque clip。
+        self.declare_parameter('goal1_q7_nullspace_enabled', False)
+        self.declare_parameter('goal1_q7_nullspace_amplitude_rad', 0.03)
+        self.declare_parameter('goal1_q7_nullspace_frequency_hz', 0.05)
+        self.declare_parameter('goal1_q7_nullspace_kp', 0.5)
+        self.declare_parameter('goal1_q7_nullspace_kd', 0.2)
+        self.declare_parameter('goal1_q7_nullspace_tau_clip_nm', 0.3)
+        self.goal1_q7_nullspace_enabled = bool(
+            self.get_parameter('goal1_q7_nullspace_enabled').value)
+        self.goal1_q7_nullspace_amplitude_rad = float(
+            self.get_parameter('goal1_q7_nullspace_amplitude_rad').value)
+        self.goal1_q7_nullspace_frequency_hz = float(
+            self.get_parameter('goal1_q7_nullspace_frequency_hz').value)
+        self.goal1_q7_nullspace_kp = float(
+            self.get_parameter('goal1_q7_nullspace_kp').value)
+        self.goal1_q7_nullspace_kd = float(
+            self.get_parameter('goal1_q7_nullspace_kd').value)
+        self.goal1_q7_nullspace_tau_clip_nm = float(
+            self.get_parameter('goal1_q7_nullspace_tau_clip_nm').value)
+        self.goal1_q7_nullspace_q7_anchor = None
+
         self.x_i_error = np.zeros(6, dtype=float)
         self.i_gains = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=float)
         self.prev_x_error = np.zeros(6, dtype=float)
@@ -212,6 +236,15 @@ class CartesianImpedanceController(Node):
             '[GOAL1] orientation command enabled='
             f'{self.goal1_orientation_command_enabled}, '
             f'max_abs_rad={self.goal1_orientation_max_abs_rad}'
+        )
+        self.get_logger().info(
+            '[GOAL1] q7 nullspace probe enabled='
+            f'{self.goal1_q7_nullspace_enabled}, '
+            f'amp_rad={self.goal1_q7_nullspace_amplitude_rad}, '
+            f'freq_hz={self.goal1_q7_nullspace_frequency_hz}, '
+            f'kp={self.goal1_q7_nullspace_kp}, '
+            f'kd={self.goal1_q7_nullspace_kd}, '
+            f'tau_clip_nm={self.goal1_q7_nullspace_tau_clip_nm}'
         )
 
         # filter parameters
@@ -818,7 +851,39 @@ class CartesianImpedanceController(Node):
             # tau_nullspace = ((np.eye(7) - zero_jacobian_pinv @ zero_jacobian) 
             #     @ (self.dpn_gains * (self.dq_des - dq)))
             N = np.eye(7) - zero_jacobian_pinv @ zero_jacobian   # or using your 5DoF jacobian
-            tau_nullspace = N.T @ (- self.dpn_gains * dq)        # dq_des = 0 时就是减振
+            nullspace_cmd = - self.dpn_gains * dq                 # legacy nullspace damping
+
+            if self.goal1_q7_nullspace_enabled and self.data_recording_enabled:
+                # GOAL1 q7 probe 只在正式轨迹录数阶段启用，不影响 startup / transition。
+                # 第一次进入录数阶段时锁定 q7 anchor，避免相对固定 home 姿态产生跳变。
+                if self.goal1_q7_nullspace_q7_anchor is None:
+                    self.goal1_q7_nullspace_q7_anchor = float(q[6])
+                    self.get_logger().info(
+                        '[GOAL1] q7 nullspace anchor set to '
+                        f'{self.goal1_q7_nullspace_q7_anchor:.6f} rad'
+                    )
+
+                omega_q7 = 2.0 * np.pi * self.goal1_q7_nullspace_frequency_hz
+                amp_q7 = self.goal1_q7_nullspace_amplitude_rad
+
+                q7_ref = self.goal1_q7_nullspace_q7_anchor + amp_q7 * np.sin(omega_q7 * float(t_elapsed))
+                dq7_ref = amp_q7 * omega_q7 * np.cos(omega_q7 * float(t_elapsed))
+
+                tau_q7_raw = (
+                    self.goal1_q7_nullspace_kp * (q7_ref - q[6])
+                    + self.goal1_q7_nullspace_kd * (dq7_ref - dq[6])
+                )
+                tau_q7 = float(np.clip(
+                    tau_q7_raw,
+                    -self.goal1_q7_nullspace_tau_clip_nm,
+                    self.goal1_q7_nullspace_tau_clip_nm,
+                ))
+
+                q7_cmd = np.zeros(7, dtype=float)
+                q7_cmd[6] = tau_q7
+                nullspace_cmd = nullspace_cmd + q7_cmd
+
+            tau_nullspace = N.T @ nullspace_cmd
             tau = tau + tau_nullspace
             tau = tau + self.friction_compensation(dq)
 

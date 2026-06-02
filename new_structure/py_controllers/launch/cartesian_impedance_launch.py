@@ -25,6 +25,12 @@ def generate_launch_description():
     gp_compensation_clip_nm_parameter_name = 'gp_compensation_clip_nm'
     goal1_orientation_command_enabled_parameter_name = 'goal1_orientation_command_enabled'
     goal1_orientation_max_abs_rad_parameter_name = 'goal1_orientation_max_abs_rad'
+    goal1_q7_nullspace_enabled_parameter_name = 'goal1_q7_nullspace_enabled'
+    goal1_q7_nullspace_amplitude_rad_parameter_name = 'goal1_q7_nullspace_amplitude_rad'
+    goal1_q7_nullspace_frequency_hz_parameter_name = 'goal1_q7_nullspace_frequency_hz'
+    goal1_q7_nullspace_kp_parameter_name = 'goal1_q7_nullspace_kp'
+    goal1_q7_nullspace_kd_parameter_name = 'goal1_q7_nullspace_kd'
+    goal1_q7_nullspace_tau_clip_nm_parameter_name = 'goal1_q7_nullspace_tau_clip_nm'
     # Stage 3A trajectory 参数默认保持 planar_circle，只有显式传参才启用 z modulation。
     trajectory_mode_parameter_name = 'trajectory_mode'
     z_amplitude_parameter_name = 'z_amplitude'
@@ -59,6 +65,12 @@ def generate_launch_description():
     gp_compensation_clip_nm = LaunchConfiguration(gp_compensation_clip_nm_parameter_name)
     goal1_orientation_command_enabled = LaunchConfiguration(goal1_orientation_command_enabled_parameter_name)
     goal1_orientation_max_abs_rad = LaunchConfiguration(goal1_orientation_max_abs_rad_parameter_name)
+    goal1_q7_nullspace_enabled = LaunchConfiguration(goal1_q7_nullspace_enabled_parameter_name)
+    goal1_q7_nullspace_amplitude_rad = LaunchConfiguration(goal1_q7_nullspace_amplitude_rad_parameter_name)
+    goal1_q7_nullspace_frequency_hz = LaunchConfiguration(goal1_q7_nullspace_frequency_hz_parameter_name)
+    goal1_q7_nullspace_kp = LaunchConfiguration(goal1_q7_nullspace_kp_parameter_name)
+    goal1_q7_nullspace_kd = LaunchConfiguration(goal1_q7_nullspace_kd_parameter_name)
+    goal1_q7_nullspace_tau_clip_nm = LaunchConfiguration(goal1_q7_nullspace_tau_clip_nm_parameter_name)
     trajectory_mode = LaunchConfiguration(trajectory_mode_parameter_name)
     z_amplitude = LaunchConfiguration(z_amplitude_parameter_name)
     z_frequency_multiplier = LaunchConfiguration(z_frequency_multiplier_parameter_name)
@@ -136,6 +148,30 @@ def generate_launch_description():
             goal1_orientation_max_abs_rad_parameter_name,
             default_value='0.035',
             description='Safety clip for GOAL1 roll/pitch/yaw command in radians.'),
+        DeclareLaunchArgument(
+            goal1_q7_nullspace_enabled_parameter_name,
+            default_value='false',
+            description='Enable GOAL1 default-off q7 nullspace probe.'),
+        DeclareLaunchArgument(
+            goal1_q7_nullspace_amplitude_rad_parameter_name,
+            default_value='0.03',
+            description='GOAL1 q7 nullspace probe amplitude in radians.'),
+        DeclareLaunchArgument(
+            goal1_q7_nullspace_frequency_hz_parameter_name,
+            default_value='0.05',
+            description='GOAL1 q7 nullspace probe frequency in Hz.'),
+        DeclareLaunchArgument(
+            goal1_q7_nullspace_kp_parameter_name,
+            default_value='0.5',
+            description='GOAL1 q7 nullspace probe proportional gain.'),
+        DeclareLaunchArgument(
+            goal1_q7_nullspace_kd_parameter_name,
+            default_value='0.2',
+            description='GOAL1 q7 nullspace probe damping gain.'),
+        DeclareLaunchArgument(
+            goal1_q7_nullspace_tau_clip_nm_parameter_name,
+            default_value='0.3',
+            description='GOAL1 q7 nullspace probe torque clip in Nm.'),
         # Stage 3A launch defaults 保持 Stage 1 / Stage 2A 的平面圆轨迹行为。
         DeclareLaunchArgument(
             trajectory_mode_parameter_name,
@@ -251,6 +287,18 @@ def generate_launch_description():
                     goal1_orientation_command_enabled, value_type=bool),
                 goal1_orientation_max_abs_rad_parameter_name: ParameterValue(
                     goal1_orientation_max_abs_rad, value_type=float),
+                goal1_q7_nullspace_enabled_parameter_name: ParameterValue(
+                    goal1_q7_nullspace_enabled, value_type=bool),
+                goal1_q7_nullspace_amplitude_rad_parameter_name: ParameterValue(
+                    goal1_q7_nullspace_amplitude_rad, value_type=float),
+                goal1_q7_nullspace_frequency_hz_parameter_name: ParameterValue(
+                    goal1_q7_nullspace_frequency_hz, value_type=float),
+                goal1_q7_nullspace_kp_parameter_name: ParameterValue(
+                    goal1_q7_nullspace_kp, value_type=float),
+                goal1_q7_nullspace_kd_parameter_name: ParameterValue(
+                    goal1_q7_nullspace_kd, value_type=float),
+                goal1_q7_nullspace_tau_clip_nm_parameter_name: ParameterValue(
+                    goal1_q7_nullspace_tau_clip_nm, value_type=float),
             }]
         ),
         Node(
