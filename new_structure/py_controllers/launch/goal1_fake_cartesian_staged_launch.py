@@ -11,6 +11,8 @@ def generate_launch_description():
     mock_rate_parameter_name = 'mock_state_rate_hz'
     trajectory_mode_parameter_name = 'trajectory_mode'
     circle_frequency_parameter_name = 'circle_frequency'
+    z_amplitude_parameter_name = 'z_amplitude'
+    z_frequency_multiplier_parameter_name = 'z_frequency_multiplier'
     transition_duration_parameter_name = 'transition_duration'
     trajectory_start_delay_parameter_name = 'trajectory_start_delay_sec'
     cartesian_start_delay_parameter_name = 'cartesian_start_delay_sec'
@@ -18,6 +20,8 @@ def generate_launch_description():
     mock_state_rate_hz = LaunchConfiguration(mock_rate_parameter_name)
     trajectory_mode = LaunchConfiguration(trajectory_mode_parameter_name)
     circle_frequency = LaunchConfiguration(circle_frequency_parameter_name)
+    z_amplitude = LaunchConfiguration(z_amplitude_parameter_name)
+    z_frequency_multiplier = LaunchConfiguration(z_frequency_multiplier_parameter_name)
     transition_duration = LaunchConfiguration(transition_duration_parameter_name)
     trajectory_start_delay_sec = LaunchConfiguration(trajectory_start_delay_parameter_name)
     cartesian_start_delay_sec = LaunchConfiguration(cartesian_start_delay_parameter_name)
@@ -39,7 +43,11 @@ def generate_launch_description():
         output='screen',
         parameters=[{
             trajectory_mode_parameter_name: ParameterValue(trajectory_mode, value_type=str),
-            'z_amplitude': 0.0,
+            z_amplitude_parameter_name: ParameterValue(z_amplitude, value_type=float),
+            z_frequency_multiplier_parameter_name: ParameterValue(
+                z_frequency_multiplier,
+                value_type=float,
+            ),
             circle_frequency_parameter_name: ParameterValue(circle_frequency, value_type=float),
             transition_duration_parameter_name: ParameterValue(
                 transition_duration,
@@ -81,6 +89,16 @@ def generate_launch_description():
             circle_frequency_parameter_name,
             default_value='0.1',
             description='Offline trajectory publisher circle frequency in Hz.',
+        ),
+        DeclareLaunchArgument(
+            z_amplitude_parameter_name,
+            default_value='0.02',
+            description='Fake/no-motion z modulation amplitude in meters.',
+        ),
+        DeclareLaunchArgument(
+            z_frequency_multiplier_parameter_name,
+            default_value='0.5',
+            description='Fake/no-motion z modulation frequency multiplier.',
         ),
         DeclareLaunchArgument(
             transition_duration_parameter_name,

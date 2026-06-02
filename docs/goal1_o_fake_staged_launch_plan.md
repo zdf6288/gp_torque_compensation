@@ -74,7 +74,11 @@ The launch file intentionally does not:
 `trajectory_publisher` is launched with:
 
 - `trajectory_mode=planar_circle` by default
-- `z_amplitude=0.0`
+- `z_amplitude=0.02`
+- `z_frequency_multiplier=0.5`
+
+The z modulation parameters are only meaningful when `trajectory_mode` is explicitly set to
+`z_modulated_circle`; the default `planar_circle` mode remains the fake/no-motion baseline.
 
 ## Mock State Publisher
 
@@ -122,6 +126,13 @@ Expected offline endpoint shape:
 - `/state_parameter`: publisher is `goal1_mock_state_parameter_publisher`; subscribers include `trajectory_publisher` and `cartesian_impedance`.
 - `/task_space_command`: publisher is `trajectory_publisher`; subscriber is `cartesian_impedance`.
 - `/effort_command`: publisher may be `cartesian_impedance`; there should be no `cpp_relayer` subscriber in this prototype.
+
+Optional fake/no-motion z-modulated endpoint check:
+
+- `ros2 launch py_controllers goal1_fake_cartesian_staged_launch.py trajectory_mode:=z_modulated_circle z_amplitude:=0.02 z_frequency_multiplier:=0.5`
+
+This command is still fake/no-motion only. It must not be combined with real `franka.launch.py`,
+`cpp_relayer`, `controller_manager`, `robot_ip`, or any real robot command sequence.
 
 ## GenericSystem Fake Hardware Limitation
 
