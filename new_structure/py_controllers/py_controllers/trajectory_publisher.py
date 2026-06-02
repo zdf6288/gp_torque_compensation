@@ -53,6 +53,16 @@ class TrajectoryPublisher(Node):
         # 默认 0.0，避免未显式选择 Stage 3A 时改变已有平面轨迹。
         self.declare_parameter('z_amplitude', 0.0)
         self.declare_parameter('z_frequency_multiplier', 0.5)
+
+        # GOAL1 spatial-rich Cartesian trajectory 参数。
+        # 默认保持小幅、低频、平滑有界，适合作为 fake/no-motion 和 short no-GP real run 的首版轨迹。
+        self.declare_parameter('goal1_x_amplitude', 0.025)
+        self.declare_parameter('goal1_y_amplitude', 0.025)
+        self.declare_parameter('goal1_z_amplitude', 0.015)
+        self.declare_parameter('goal1_x_frequency_multiplier', 1.0)
+        self.declare_parameter('goal1_y_frequency_multiplier', 1.5)
+        self.declare_parameter('goal1_z_frequency_multiplier', 0.5)
+
         self.radius = self.get_parameter('circle_radius').value
         self.frequency = self.get_parameter('circle_frequency').value
         self.center_x = self.get_parameter('circle_center_x').value
@@ -61,7 +71,17 @@ class TrajectoryPublisher(Node):
         self.trajectory_mode = self.get_parameter('trajectory_mode').value
         self.z_amplitude = self.get_parameter('z_amplitude').value
         self.z_frequency_multiplier = self.get_parameter('z_frequency_multiplier').value
-        self.supported_trajectory_modes = ('planar_circle', 'z_modulated_circle')
+        self.goal1_x_amplitude = self.get_parameter('goal1_x_amplitude').value
+        self.goal1_y_amplitude = self.get_parameter('goal1_y_amplitude').value
+        self.goal1_z_amplitude = self.get_parameter('goal1_z_amplitude').value
+        self.goal1_x_frequency_multiplier = self.get_parameter('goal1_x_frequency_multiplier').value
+        self.goal1_y_frequency_multiplier = self.get_parameter('goal1_y_frequency_multiplier').value
+        self.goal1_z_frequency_multiplier = self.get_parameter('goal1_z_frequency_multiplier').value
+        self.supported_trajectory_modes = (
+            'planar_circle',
+            'z_modulated_circle',
+            'goal1_spatial_rich',
+        )
 
         if self.trajectory_mode not in self.supported_trajectory_modes:
             # 真实机器人上不静默 fallback，避免参数拼写错误导致运行了非预期轨迹。
@@ -119,6 +139,18 @@ class TrajectoryPublisher(Node):
         self.get_logger().info(
             f'Z modulation amplitude: {self.z_amplitude} m, '
             f'frequency multiplier: {self.z_frequency_multiplier}'
+        )
+        self.get_logger().info(
+            'GOAL1 spatial-rich amplitudes: '
+            f'x={self.goal1_x_amplitude} m, '
+            f'y={self.goal1_y_amplitude} m, '
+            f'z={self.goal1_z_amplitude} m'
+        )
+        self.get_logger().info(
+            'GOAL1 spatial-rich frequency multipliers: '
+            f'x={self.goal1_x_frequency_multiplier}, '
+            f'y={self.goal1_y_frequency_multiplier}, '
+            f'z={self.goal1_z_frequency_multiplier}'
         )
         self.get_logger().info(f'Trajectory start point: ({self.trajectory_start_x:.3f}, {self.trajectory_start_y:.3f}, {self.trajectory_start_z:.3f})')
         if self.use_transition:
@@ -198,24 +230,76 @@ class TrajectoryPublisher(Node):
         """计算 post-transition 轨迹；live 发布和 /future_task_space 共用，避免预测不一致。"""
         omega = 2.0 * np.pi * self.frequency
 
-        x = self.center_x + self.radius * np.cos(omega * t)
-        y = self.center_y + self.radius * np.sin(omega * t)
+        if self.trajectory_mode == 'goal1_spatial_rich':
+            # GOAL1: spatial-rich Cartesian trajectory。
+            # 这里仍然只生成 task-space position / velocity / acceleration command，
+            # 不修改 controller、tau、nullspace 或 q7 target。q7 是否明显运动需要实验后用 joint log 验证。
+            #
+            # 每个轴使用不同频率倍率和轻量 harmonic，并用归一化因子限制最大位移在 amplitude 附近。
+            # 这样比 planar_circle / simple z_modulated_circle 更能激发多轴运动，但仍保持 smooth bounded。
+            ax = float(self.goal1_x_amplitude)
+            ay = float(self.goal1_y_amplitude)
+            az = float(self.goal1_z_amplitude)
 
-        dx = -self.radius * omega * np.sin(omega * t)
-        dy = self.radius * omega * np.cos(omega * t)
+            wx = float(self.goal1_x_frequency_multiplier) * omega
+            wy = float(self.goal1_y_frequency_multiplier) * omega
+            wz = float(self.goal1_z_frequency_multiplier) * omega
 
-        ddx = -self.radius * omega**2 * np.cos(omega * t)
-        ddy = -self.radius * omega**2 * np.sin(omega * t)
+            x_norm = 1.35
+            y_norm = 1.25
+            z_norm = 1.20
 
-        if self.trajectory_mode == 'z_modulated_circle':
-            z_omega = self.z_frequency_multiplier * omega
-            z = self.center_z + self.z_amplitude * np.sin(z_omega * t)
-            dz = self.z_amplitude * z_omega * np.cos(z_omega * t)
-            ddz = -self.z_amplitude * z_omega**2 * np.sin(z_omega * t)
+            # 使用 cos(t)-1 / sin(t) 组合，让 t=0 时轨迹从 center 开始。
+            # 这样 first real run 的 transition 目标更可控，同时仍保持三轴 smooth bounded multi-sine。
+            x = self.center_x + ax * (
+                np.cos(wx * t) - 1.0 + 0.35 * np.sin(2.0 * wx * t)
+            ) / x_norm
+            y = self.center_y + ay * (
+                np.sin(wy * t) + 0.25 * (np.cos(2.0 * wy * t) - 1.0)
+            ) / y_norm
+            z = self.center_z + az * (
+                np.sin(wz * t) + 0.20 * (np.cos(3.0 * wz * t) - 1.0)
+            ) / z_norm
+
+            dx = ax * (
+                -wx * np.sin(wx * t) + 0.70 * wx * np.cos(2.0 * wx * t)
+            ) / x_norm
+            dy = ay * (
+                wy * np.cos(wy * t) - 0.50 * wy * np.sin(2.0 * wy * t)
+            ) / y_norm
+            dz = az * (
+                wz * np.cos(wz * t) - 0.60 * wz * np.sin(3.0 * wz * t)
+            ) / z_norm
+
+            ddx = ax * (
+                -wx**2 * np.cos(wx * t) - 1.40 * wx**2 * np.sin(2.0 * wx * t)
+            ) / x_norm
+            ddy = ay * (
+                -wy**2 * np.sin(wy * t) - 1.00 * wy**2 * np.cos(2.0 * wy * t)
+            ) / y_norm
+            ddz = az * (
+                -wz**2 * np.sin(wz * t) - 1.80 * wz**2 * np.cos(3.0 * wz * t)
+            ) / z_norm
+
         else:
-            z = self.center_z
-            dz = 0.0
-            ddz = 0.0
+            x = self.center_x + self.radius * np.cos(omega * t)
+            y = self.center_y + self.radius * np.sin(omega * t)
+
+            dx = -self.radius * omega * np.sin(omega * t)
+            dy = self.radius * omega * np.cos(omega * t)
+
+            ddx = -self.radius * omega**2 * np.cos(omega * t)
+            ddy = -self.radius * omega**2 * np.sin(omega * t)
+
+            if self.trajectory_mode == 'z_modulated_circle':
+                z_omega = self.z_frequency_multiplier * omega
+                z = self.center_z + self.z_amplitude * np.sin(z_omega * t)
+                dz = self.z_amplitude * z_omega * np.cos(z_omega * t)
+                ddz = -self.z_amplitude * z_omega**2 * np.sin(z_omega * t)
+            else:
+                z = self.center_z
+                dz = 0.0
+                ddz = 0.0
 
         x_des = [x, y, z, 0.0, 0.0, 0.0]
         dx_des = [dx, dy, dz, 0.0, 0.0, 0.0]

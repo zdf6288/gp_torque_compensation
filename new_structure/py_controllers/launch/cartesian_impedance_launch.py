@@ -29,6 +29,13 @@ def generate_launch_description():
     z_frequency_multiplier_parameter_name = 'z_frequency_multiplier'
     circle_frequency_parameter_name = 'circle_frequency'
     transition_duration_parameter_name = 'transition_duration'
+    rounds_per_mode_parameter_name = 'rounds_per_mode'
+    goal1_x_amplitude_parameter_name = 'goal1_x_amplitude'
+    goal1_y_amplitude_parameter_name = 'goal1_y_amplitude'
+    goal1_z_amplitude_parameter_name = 'goal1_z_amplitude'
+    goal1_x_frequency_multiplier_parameter_name = 'goal1_x_frequency_multiplier'
+    goal1_y_frequency_multiplier_parameter_name = 'goal1_y_frequency_multiplier'
+    goal1_z_frequency_multiplier_parameter_name = 'goal1_z_frequency_multiplier'
 
     robot_ip = LaunchConfiguration(robot_ip_parameter_name)
     load_gripper = LaunchConfiguration(load_gripper_parameter_name)
@@ -47,6 +54,13 @@ def generate_launch_description():
     z_frequency_multiplier = LaunchConfiguration(z_frequency_multiplier_parameter_name)
     circle_frequency = LaunchConfiguration(circle_frequency_parameter_name)
     transition_duration = LaunchConfiguration(transition_duration_parameter_name)
+    rounds_per_mode = LaunchConfiguration(rounds_per_mode_parameter_name)
+    goal1_x_amplitude = LaunchConfiguration(goal1_x_amplitude_parameter_name)
+    goal1_y_amplitude = LaunchConfiguration(goal1_y_amplitude_parameter_name)
+    goal1_z_amplitude = LaunchConfiguration(goal1_z_amplitude_parameter_name)
+    goal1_x_frequency_multiplier = LaunchConfiguration(goal1_x_frequency_multiplier_parameter_name)
+    goal1_y_frequency_multiplier = LaunchConfiguration(goal1_y_frequency_multiplier_parameter_name)
+    goal1_z_frequency_multiplier = LaunchConfiguration(goal1_z_frequency_multiplier_parameter_name)
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -119,6 +133,34 @@ def generate_launch_description():
             transition_duration_parameter_name,
             default_value='3.0',
             description='Smooth transition duration before trajectory recording starts.'),
+        DeclareLaunchArgument(
+            rounds_per_mode_parameter_name,
+            default_value='6',
+            description='Number of trajectory rounds before auto stop / GP mode switch.'),
+        DeclareLaunchArgument(
+            goal1_x_amplitude_parameter_name,
+            default_value='0.025',
+            description='GOAL1 spatial-rich x amplitude in meters.'),
+        DeclareLaunchArgument(
+            goal1_y_amplitude_parameter_name,
+            default_value='0.025',
+            description='GOAL1 spatial-rich y amplitude in meters.'),
+        DeclareLaunchArgument(
+            goal1_z_amplitude_parameter_name,
+            default_value='0.015',
+            description='GOAL1 spatial-rich z amplitude in meters.'),
+        DeclareLaunchArgument(
+            goal1_x_frequency_multiplier_parameter_name,
+            default_value='1.0',
+            description='GOAL1 spatial-rich x frequency multiplier relative to circle omega.'),
+        DeclareLaunchArgument(
+            goal1_y_frequency_multiplier_parameter_name,
+            default_value='1.5',
+            description='GOAL1 spatial-rich y frequency multiplier relative to circle omega.'),
+        DeclareLaunchArgument(
+            goal1_z_frequency_multiplier_parameter_name,
+            default_value='0.5',
+            description='GOAL1 spatial-rich z frequency multiplier relative to circle omega.'),
 
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource([PathJoinSubstitution(
@@ -172,6 +214,19 @@ def generate_launch_description():
                 circle_frequency_parameter_name: ParameterValue(circle_frequency, value_type=float),
                 transition_duration_parameter_name: ParameterValue(
                     transition_duration, value_type=float),
+                rounds_per_mode_parameter_name: ParameterValue(rounds_per_mode, value_type=int),
+                goal1_x_amplitude_parameter_name: ParameterValue(
+                    goal1_x_amplitude, value_type=float),
+                goal1_y_amplitude_parameter_name: ParameterValue(
+                    goal1_y_amplitude, value_type=float),
+                goal1_z_amplitude_parameter_name: ParameterValue(
+                    goal1_z_amplitude, value_type=float),
+                goal1_x_frequency_multiplier_parameter_name: ParameterValue(
+                    goal1_x_frequency_multiplier, value_type=float),
+                goal1_y_frequency_multiplier_parameter_name: ParameterValue(
+                    goal1_y_frequency_multiplier, value_type=float),
+                goal1_z_frequency_multiplier_parameter_name: ParameterValue(
+                    goal1_z_frequency_multiplier, value_type=float),
             }]
         ),
         # Node(
