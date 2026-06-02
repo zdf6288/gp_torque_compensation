@@ -7,3 +7,7 @@ cpp_relayer:
     type: double,
     default_value: 0.2,
   }
+  require_fresh_command_on_activate: {
+    type: bool,
+    default_value: true,
+  }

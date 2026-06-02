@@ -19,3 +19,4 @@ cpp_relayer:
   ros__parameters:
     arm_id: panda
     command_timeout_sec: 0.2
+    require_fresh_command_on_activate: true

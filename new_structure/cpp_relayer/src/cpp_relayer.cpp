@@ -103,6 +103,7 @@ CallbackReturn CPPRelayer::on_init() {
   try {
     auto_declare<std::string>("arm_id", "panda");
     auto_declare<double>("command_timeout_sec", kDefaultCommandTimeoutSec);
+    auto_declare<bool>("require_fresh_command_on_activate", true);
   } 
   catch (const std::exception& e) {
     fprintf(stderr, "Exception thrown during init stage with message: %s \n", e.what());
@@ -116,6 +117,8 @@ CallbackReturn CPPRelayer::on_configure(
   try {
     arm_id_ = get_node()->get_parameter("arm_id").as_string();
     command_timeout_sec_ = get_node()->get_parameter("command_timeout_sec").as_double();
+    require_fresh_command_on_activate_ =
+        get_node()->get_parameter("require_fresh_command_on_activate").as_bool();
     if (!std::isfinite(command_timeout_sec_) || command_timeout_sec_ <= 0.0) {
       RCLCPP_WARN(
           get_node()->get_logger(),
@@ -147,8 +150,10 @@ CallbackReturn CPPRelayer::on_configure(
     RCLCPP_DEBUG(get_node()->get_logger(), "configured successfully");
     RCLCPP_INFO(
         get_node()->get_logger(),
-        "cpp_relayer configured with command_timeout_sec=%.3f s; stale commands will be zeroed.",
-        command_timeout_sec_);
+        "cpp_relayer configured with command_timeout_sec=%.3f s, "
+        "require_fresh_command_on_activate=%s; stale commands will be zeroed.",
+        command_timeout_sec_,
+        require_fresh_command_on_activate_ ? "true" : "false");
     return CallbackReturn::SUCCESS;
   } 
   catch (const std::exception& e) {
@@ -168,22 +173,85 @@ CallbackReturn CPPRelayer::on_activate(
   zero_jacobian_flange_.fill(0.0);
   gravity_.fill(0.0);
 
-  {
-    std::lock_guard<std::mutex> lock(command_mutex_);
-    tau_d_received_ = Vector7d::Zero();
-    received_effort_command_ = false;
-    last_command_time_ = get_node()->get_clock()->now();
+  const auto now = get_node()->get_clock()->now();
+  Vector7d command_to_write = Vector7d::Zero();
+  bool has_command = false;
+  bool command_is_fresh = false;
+  bool command_values_are_finite = false;
+  double command_age_sec = 0.0;
+
+  if (require_fresh_command_on_activate_) {
+    {
+      std::lock_guard<std::mutex> lock(command_mutex_);
+      has_command = received_effort_command_;
+      if (has_command) {
+        const auto command_age = now - last_command_time_;
+        command_age_sec = command_age.seconds();
+        command_is_fresh = isCommandFresh(now, last_command_time_);
+        command_values_are_finite = tau_d_received_.allFinite();
+        if (command_is_fresh && command_values_are_finite) {
+          command_to_write = tau_d_received_;
+        }
+      }
+    }
+
+    if (!has_command) {
+      setZeroCommandInterfaces();
+      RCLCPP_ERROR(
+          get_node()->get_logger(),
+          "Refusing cpp_relayer activation: no cached EffortCommand is available "
+          "(has_command=false, command_age_sec=not_available, timeout %.3f s, "
+          "require_fresh_command_on_activate=true).",
+          command_timeout_sec_);
+      return CallbackReturn::FAILURE;
+    }
+
+    if (!command_is_fresh || !command_values_are_finite) {
+      setZeroCommandInterfaces();
+      RCLCPP_ERROR(
+          get_node()->get_logger(),
+          "Refusing cpp_relayer activation: cached EffortCommand is not usable "
+          "(has_command=true, command_age_sec=%.3f s, timeout %.3f s, fresh=%s, "
+          "finite=%s, require_fresh_command_on_activate=true).",
+          command_age_sec, command_timeout_sec_,
+          command_is_fresh ? "true" : "false",
+          command_values_are_finite ? "true" : "false");
+      return CallbackReturn::FAILURE;
+    }
+
+    for (int i = 0; i < num_joints; ++i) {
+      command_interfaces_[i].set_value(command_to_write(i));
+    }
+  } else {
+    {
+      std::lock_guard<std::mutex> lock(command_mutex_);
+      tau_d_received_ = Vector7d::Zero();
+      received_effort_command_ = false;
+      last_command_time_ = now;
+    }
+    setZeroCommandInterfaces();
+    RCLCPP_WARN(
+        get_node()->get_logger(),
+        "cpp_relayer legacy zero activation is enabled "
+        "(require_fresh_command_on_activate=false).");
   }
-  setZeroCommandInterfaces();
   
   franka_robot_model_->assign_loaned_state_interfaces(state_interfaces_);
   updateStateParam();
 
-  RCLCPP_INFO(
-      get_node()->get_logger(),
-      "cpp_relayer activated: zero fallback enabled until a valid fresh EffortCommand arrives "
-      "(timeout %.3f s).",
-      command_timeout_sec_);
+  if (require_fresh_command_on_activate_) {
+    RCLCPP_INFO(
+        get_node()->get_logger(),
+        "cpp_relayer activated with fresh cached EffortCommand "
+        "(command_age_sec=%.3f s, timeout %.3f s).",
+        command_age_sec, command_timeout_sec_);
+  } else {
+    RCLCPP_INFO(
+        get_node()->get_logger(),
+        "cpp_relayer activated: zero fallback enabled until a valid fresh EffortCommand arrives "
+        "(timeout %.3f s).",
+        command_timeout_sec_);
+  }
 
   return CallbackReturn::SUCCESS;
 }
