@@ -63,6 +63,15 @@ class TrajectoryPublisher(Node):
         self.declare_parameter('goal1_y_frequency_multiplier', 1.5)
         self.declare_parameter('goal1_z_frequency_multiplier', 0.5)
 
+        # GOAL1 optional orientation-rich command.
+        # 默认小角度，只有 trajectory_mode:=goal1_spatial_orientation_rich 时才发布非零 roll/pitch/yaw。
+        self.declare_parameter('goal1_roll_amplitude', 0.02)
+        self.declare_parameter('goal1_pitch_amplitude', 0.02)
+        self.declare_parameter('goal1_yaw_amplitude', 0.02)
+        self.declare_parameter('goal1_roll_frequency_multiplier', 0.5)
+        self.declare_parameter('goal1_pitch_frequency_multiplier', 0.75)
+        self.declare_parameter('goal1_yaw_frequency_multiplier', 1.0)
+
         self.radius = self.get_parameter('circle_radius').value
         self.frequency = self.get_parameter('circle_frequency').value
         self.center_x = self.get_parameter('circle_center_x').value
@@ -77,10 +86,17 @@ class TrajectoryPublisher(Node):
         self.goal1_x_frequency_multiplier = self.get_parameter('goal1_x_frequency_multiplier').value
         self.goal1_y_frequency_multiplier = self.get_parameter('goal1_y_frequency_multiplier').value
         self.goal1_z_frequency_multiplier = self.get_parameter('goal1_z_frequency_multiplier').value
+        self.goal1_roll_amplitude = self.get_parameter('goal1_roll_amplitude').value
+        self.goal1_pitch_amplitude = self.get_parameter('goal1_pitch_amplitude').value
+        self.goal1_yaw_amplitude = self.get_parameter('goal1_yaw_amplitude').value
+        self.goal1_roll_frequency_multiplier = self.get_parameter('goal1_roll_frequency_multiplier').value
+        self.goal1_pitch_frequency_multiplier = self.get_parameter('goal1_pitch_frequency_multiplier').value
+        self.goal1_yaw_frequency_multiplier = self.get_parameter('goal1_yaw_frequency_multiplier').value
         self.supported_trajectory_modes = (
             'planar_circle',
             'z_modulated_circle',
             'goal1_spatial_rich',
+            'goal1_spatial_orientation_rich',
         )
 
         if self.trajectory_mode not in self.supported_trajectory_modes:
@@ -151,6 +167,12 @@ class TrajectoryPublisher(Node):
             f'x={self.goal1_x_frequency_multiplier}, '
             f'y={self.goal1_y_frequency_multiplier}, '
             f'z={self.goal1_z_frequency_multiplier}'
+        )
+        self.get_logger().info(
+            'GOAL1 orientation-rich amplitudes: '
+            f'roll={self.goal1_roll_amplitude} rad, '
+            f'pitch={self.goal1_pitch_amplitude} rad, '
+            f'yaw={self.goal1_yaw_amplitude} rad'
         )
         self.get_logger().info(f'Trajectory start point: ({self.trajectory_start_x:.3f}, {self.trajectory_start_y:.3f}, {self.trajectory_start_z:.3f})')
         if self.use_transition:
@@ -230,10 +252,11 @@ class TrajectoryPublisher(Node):
         """计算 post-transition 轨迹；live 发布和 /future_task_space 共用，避免预测不一致。"""
         omega = 2.0 * np.pi * self.frequency
 
-        if self.trajectory_mode == 'goal1_spatial_rich':
+        if self.trajectory_mode in ('goal1_spatial_rich', 'goal1_spatial_orientation_rich'):
             # GOAL1: spatial-rich Cartesian trajectory。
-            # 这里仍然只生成 task-space position / velocity / acceleration command，
-            # 不修改 controller、tau、nullspace 或 q7 target。q7 是否明显运动需要实验后用 joint log 验证。
+            # goal1_spatial_rich 只生成 position command。
+            # goal1_spatial_orientation_rich 额外生成 small bounded roll/pitch/yaw command。
+            # 不修改 tau/nullspace/q7 target。q7 是否明显运动需要实验后用 joint log 验证。
             #
             # 每个轴使用不同频率倍率和轻量 harmonic，并用归一化因子限制最大位移在 amplitude 附近。
             # 这样比 planar_circle / simple z_modulated_circle 更能激发多轴运动，但仍保持 smooth bounded。
@@ -301,9 +324,33 @@ class TrajectoryPublisher(Node):
                 dz = 0.0
                 ddz = 0.0
 
-        x_des = [x, y, z, 0.0, 0.0, 0.0]
-        dx_des = [dx, dy, dz, 0.0, 0.0, 0.0]
-        ddx_des = [ddx, ddy, ddz, 0.0, 0.0, 0.0]
+        if self.trajectory_mode == 'goal1_spatial_orientation_rich':
+            # Small bounded orientation command.
+            # roll/pitch/yaw are interpreted by cartesian_impedance.py only when
+            # goal1_orientation_command_enabled:=true is explicitly enabled there.
+            wr = float(self.goal1_roll_frequency_multiplier) * omega
+            wp = float(self.goal1_pitch_frequency_multiplier) * omega
+            wyaw = float(self.goal1_yaw_frequency_multiplier) * omega
+
+            roll = float(self.goal1_roll_amplitude) * np.sin(wr * t)
+            pitch = float(self.goal1_pitch_amplitude) * np.sin(wp * t + np.pi / 4.0)
+            yaw = float(self.goal1_yaw_amplitude) * np.sin(wyaw * t + np.pi / 2.0)
+
+            droll = float(self.goal1_roll_amplitude) * wr * np.cos(wr * t)
+            dpitch = float(self.goal1_pitch_amplitude) * wp * np.cos(wp * t + np.pi / 4.0)
+            dyaw = float(self.goal1_yaw_amplitude) * wyaw * np.cos(wyaw * t + np.pi / 2.0)
+
+            ddroll = -float(self.goal1_roll_amplitude) * wr**2 * np.sin(wr * t)
+            ddpitch = -float(self.goal1_pitch_amplitude) * wp**2 * np.sin(wp * t + np.pi / 4.0)
+            ddyaw = -float(self.goal1_yaw_amplitude) * wyaw**2 * np.sin(wyaw * t + np.pi / 2.0)
+        else:
+            roll = pitch = yaw = 0.0
+            droll = dpitch = dyaw = 0.0
+            ddroll = ddpitch = ddyaw = 0.0
+
+        x_des = [x, y, z, roll, pitch, yaw]
+        dx_des = [dx, dy, dz, droll, dpitch, dyaw]
+        ddx_des = [ddx, ddy, ddz, ddroll, ddpitch, ddyaw]
 
         return x_des, dx_des, ddx_des
     

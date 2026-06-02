@@ -23,6 +23,8 @@ def generate_launch_description():
     gp_compensation_source_parameter_name = 'gp_compensation_source'
     gp_compensation_scale_parameter_name = 'gp_compensation_scale'
     gp_compensation_clip_nm_parameter_name = 'gp_compensation_clip_nm'
+    goal1_orientation_command_enabled_parameter_name = 'goal1_orientation_command_enabled'
+    goal1_orientation_max_abs_rad_parameter_name = 'goal1_orientation_max_abs_rad'
     # Stage 3A trajectory 参数默认保持 planar_circle，只有显式传参才启用 z modulation。
     trajectory_mode_parameter_name = 'trajectory_mode'
     z_amplitude_parameter_name = 'z_amplitude'
@@ -36,6 +38,12 @@ def generate_launch_description():
     goal1_x_frequency_multiplier_parameter_name = 'goal1_x_frequency_multiplier'
     goal1_y_frequency_multiplier_parameter_name = 'goal1_y_frequency_multiplier'
     goal1_z_frequency_multiplier_parameter_name = 'goal1_z_frequency_multiplier'
+    goal1_roll_amplitude_parameter_name = 'goal1_roll_amplitude'
+    goal1_pitch_amplitude_parameter_name = 'goal1_pitch_amplitude'
+    goal1_yaw_amplitude_parameter_name = 'goal1_yaw_amplitude'
+    goal1_roll_frequency_multiplier_parameter_name = 'goal1_roll_frequency_multiplier'
+    goal1_pitch_frequency_multiplier_parameter_name = 'goal1_pitch_frequency_multiplier'
+    goal1_yaw_frequency_multiplier_parameter_name = 'goal1_yaw_frequency_multiplier'
 
     robot_ip = LaunchConfiguration(robot_ip_parameter_name)
     load_gripper = LaunchConfiguration(load_gripper_parameter_name)
@@ -49,6 +57,8 @@ def generate_launch_description():
     gp_compensation_source = LaunchConfiguration(gp_compensation_source_parameter_name)
     gp_compensation_scale = LaunchConfiguration(gp_compensation_scale_parameter_name)
     gp_compensation_clip_nm = LaunchConfiguration(gp_compensation_clip_nm_parameter_name)
+    goal1_orientation_command_enabled = LaunchConfiguration(goal1_orientation_command_enabled_parameter_name)
+    goal1_orientation_max_abs_rad = LaunchConfiguration(goal1_orientation_max_abs_rad_parameter_name)
     trajectory_mode = LaunchConfiguration(trajectory_mode_parameter_name)
     z_amplitude = LaunchConfiguration(z_amplitude_parameter_name)
     z_frequency_multiplier = LaunchConfiguration(z_frequency_multiplier_parameter_name)
@@ -61,6 +71,12 @@ def generate_launch_description():
     goal1_x_frequency_multiplier = LaunchConfiguration(goal1_x_frequency_multiplier_parameter_name)
     goal1_y_frequency_multiplier = LaunchConfiguration(goal1_y_frequency_multiplier_parameter_name)
     goal1_z_frequency_multiplier = LaunchConfiguration(goal1_z_frequency_multiplier_parameter_name)
+    goal1_roll_amplitude = LaunchConfiguration(goal1_roll_amplitude_parameter_name)
+    goal1_pitch_amplitude = LaunchConfiguration(goal1_pitch_amplitude_parameter_name)
+    goal1_yaw_amplitude = LaunchConfiguration(goal1_yaw_amplitude_parameter_name)
+    goal1_roll_frequency_multiplier = LaunchConfiguration(goal1_roll_frequency_multiplier_parameter_name)
+    goal1_pitch_frequency_multiplier = LaunchConfiguration(goal1_pitch_frequency_multiplier_parameter_name)
+    goal1_yaw_frequency_multiplier = LaunchConfiguration(goal1_yaw_frequency_multiplier_parameter_name)
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -112,6 +128,14 @@ def generate_launch_description():
             gp_compensation_clip_nm_parameter_name,
             default_value='0.5',
             description='Per-joint GP compensation clip in Nm.'),
+        DeclareLaunchArgument(
+            goal1_orientation_command_enabled_parameter_name,
+            default_value='false',
+            description='Enable GOAL1 small orientation command parsing in cartesian_impedance.'),
+        DeclareLaunchArgument(
+            goal1_orientation_max_abs_rad_parameter_name,
+            default_value='0.035',
+            description='Safety clip for GOAL1 roll/pitch/yaw command in radians.'),
         # Stage 3A launch defaults 保持 Stage 1 / Stage 2A 的平面圆轨迹行为。
         DeclareLaunchArgument(
             trajectory_mode_parameter_name,
@@ -161,6 +185,30 @@ def generate_launch_description():
             goal1_z_frequency_multiplier_parameter_name,
             default_value='0.5',
             description='GOAL1 spatial-rich z frequency multiplier relative to circle omega.'),
+        DeclareLaunchArgument(
+            goal1_roll_amplitude_parameter_name,
+            default_value='0.02',
+            description='GOAL1 orientation-rich roll amplitude in radians.'),
+        DeclareLaunchArgument(
+            goal1_pitch_amplitude_parameter_name,
+            default_value='0.02',
+            description='GOAL1 orientation-rich pitch amplitude in radians.'),
+        DeclareLaunchArgument(
+            goal1_yaw_amplitude_parameter_name,
+            default_value='0.02',
+            description='GOAL1 orientation-rich yaw amplitude in radians.'),
+        DeclareLaunchArgument(
+            goal1_roll_frequency_multiplier_parameter_name,
+            default_value='0.5',
+            description='GOAL1 orientation-rich roll frequency multiplier relative to circle omega.'),
+        DeclareLaunchArgument(
+            goal1_pitch_frequency_multiplier_parameter_name,
+            default_value='0.75',
+            description='GOAL1 orientation-rich pitch frequency multiplier relative to circle omega.'),
+        DeclareLaunchArgument(
+            goal1_yaw_frequency_multiplier_parameter_name,
+            default_value='1.0',
+            description='GOAL1 orientation-rich yaw frequency multiplier relative to circle omega.'),
 
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource([PathJoinSubstitution(
@@ -199,6 +247,10 @@ def generate_launch_description():
                 gp_compensation_source_parameter_name: gp_compensation_source,
                 gp_compensation_scale_parameter_name: gp_compensation_scale,
                 gp_compensation_clip_nm_parameter_name: gp_compensation_clip_nm,
+                goal1_orientation_command_enabled_parameter_name: ParameterValue(
+                    goal1_orientation_command_enabled, value_type=bool),
+                goal1_orientation_max_abs_rad_parameter_name: ParameterValue(
+                    goal1_orientation_max_abs_rad, value_type=float),
             }]
         ),
         Node(
@@ -227,6 +279,18 @@ def generate_launch_description():
                     goal1_y_frequency_multiplier, value_type=float),
                 goal1_z_frequency_multiplier_parameter_name: ParameterValue(
                     goal1_z_frequency_multiplier, value_type=float),
+                goal1_roll_amplitude_parameter_name: ParameterValue(
+                    goal1_roll_amplitude, value_type=float),
+                goal1_pitch_amplitude_parameter_name: ParameterValue(
+                    goal1_pitch_amplitude, value_type=float),
+                goal1_yaw_amplitude_parameter_name: ParameterValue(
+                    goal1_yaw_amplitude, value_type=float),
+                goal1_roll_frequency_multiplier_parameter_name: ParameterValue(
+                    goal1_roll_frequency_multiplier, value_type=float),
+                goal1_pitch_frequency_multiplier_parameter_name: ParameterValue(
+                    goal1_pitch_frequency_multiplier, value_type=float),
+                goal1_yaw_frequency_multiplier_parameter_name: ParameterValue(
+                    goal1_yaw_frequency_multiplier, value_type=float),
             }]
         ),
         # Node(

@@ -182,8 +182,20 @@ class CartesianImpedanceController(Node):
         self.x_des = None                   # desired position from task space command
         self.dx_des = None                  # desired velocity from task space command
         self.ddx_des = None                 # desired acceleration from task space command
-        self.rotation_matrix_des = np.array(
-            [[1, 0, 0], [0, -1, 0], [0, 0, -1]], dtype=float)   # desired rotation matrix, z axis perpendicular to ground
+        self.base_rotation_matrix_des = np.array(
+            [[1, 0, 0], [0, -1, 0], [0, 0, -1]], dtype=float)   # desired base rotation matrix, z axis perpendicular to ground
+        self.rotation_matrix_des = self.base_rotation_matrix_des.copy()
+
+        # GOAL1 orientation command support.
+        # 默认关闭，保持 legacy Cartesian controller 行为不变。
+        # 开启后，/task_space_command 的 x_des[3:6] 被解释为相对 base_rotation_matrix_des 的 small roll/pitch/yaw offset。
+        self.declare_parameter('goal1_orientation_command_enabled', False)
+        self.declare_parameter('goal1_orientation_max_abs_rad', 0.035)
+        self.goal1_orientation_command_enabled = bool(
+            self.get_parameter('goal1_orientation_command_enabled').value)
+        self.goal1_orientation_max_abs_rad = float(
+            self.get_parameter('goal1_orientation_max_abs_rad').value)
+
         # joint position control state
         self.joint_position_control_active = True   # start with joint position control
         self.joint_position_adjusted = False        # flag for joint position adjustment
@@ -196,6 +208,11 @@ class CartesianImpedanceController(Node):
         self.get_logger().info('Cartesian Impedance controller node started')
         self.get_logger().info(f'Desired joint positions: {self.q_des}')
         self.get_logger().info(f'Joint position threshold: {self.joint_position_threshold}')
+        self.get_logger().info(
+            '[GOAL1] orientation command enabled='
+            f'{self.goal1_orientation_command_enabled}, '
+            f'max_abs_rad={self.goal1_orientation_max_abs_rad}'
+        )
 
         # filter parameters
         self.filter_freq = 20.0                                      # filter frequency for tau
@@ -473,9 +490,26 @@ class CartesianImpedanceController(Node):
     def taskCommandCallback(self, msg):
         """callback function for /task_space_command subscriber"""
         self.task_command_received = True
-        self.x_des = np.array(msg.x_des)
-        self.dx_des = np.array(msg.dx_des)
-        self.ddx_des = np.array(msg.ddx_des)
+        self.x_des = np.array(msg.x_des, dtype=float)
+        self.dx_des = np.array(msg.dx_des, dtype=float)
+        self.ddx_des = np.array(msg.ddx_des, dtype=float)
+
+        if self.goal1_orientation_command_enabled:
+            # GOAL1 orientation modulation:
+            # msg.x_des[3:6] is treated as a small roll/pitch/yaw offset around the legacy base orientation.
+            # The command is clipped here so a typo or bad trajectory cannot request a large orientation jump.
+            rpy_offset = np.clip(
+                self.x_des[3:6],
+                -self.goal1_orientation_max_abs_rad,
+                self.goal1_orientation_max_abs_rad,
+            )
+            self.rotation_matrix_des = (
+                self.base_rotation_matrix_des
+                @ Rotation.from_euler('xyz', rpy_offset).as_matrix()
+            )
+        else:
+            # 默认保持原 legacy 固定姿态目标，不受 trajectory_publisher 后三维影响。
+            self.rotation_matrix_des = self.base_rotation_matrix_des.copy()
         
     def dataRecordingCallback(self, msg):
         """callback function for /data_recording_enabled subscriber"""
