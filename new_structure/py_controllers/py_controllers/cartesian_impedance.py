@@ -1597,12 +1597,12 @@ class CartesianImpedanceController(Node):
             self._gp_clip_active = np.zeros(7, dtype=int)
             return tau
 
-        # source 支持 local/cloud/combined；combined 使用两个 prediction 的保守平均。
+        # source 支持 local/cloud/combined；combined 使用控制循环中已有的 variance-weighted prediction。
         if self.gp_compensation_source == "cloud":
             compensation = self.y_hat_cloud
             self._gp_source_code = 2
         elif self.gp_compensation_source == "combined":
-            compensation = 0.5 * (self.y_hat_local + self.y_hat_cloud)
+            compensation = self.y_hat_combined
             self._gp_source_code = 3
         else:
             compensation = self.y_hat_local
