@@ -112,9 +112,10 @@ def generate_launch_description():
             state_source_parameter_name,
             default_value='state_parameter',
             description=(
-                'State source for state_only preflight: state_parameter uses '
-                '/state_parameter; joint_states uses /franka/joint_states and '
-                'avoids /state_parameter and cpp_relayer state output.'
+                'State source for state_only preflight or final effort replay: '
+                'state_parameter uses /state_parameter; joint_states uses '
+                '/franka/joint_states and avoids /state_parameter as the replay '
+                'state input. publish_reference still uses state_parameter.'
             ),
         ),
         DeclareLaunchArgument(

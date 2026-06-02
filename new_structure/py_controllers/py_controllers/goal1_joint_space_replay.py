@@ -738,6 +738,7 @@ def run_publish_path(config: ReplayConfig, trajectory: LoadedTrajectory, argv: S
     import rclpy
     from rclpy.node import Node
     from custom_msgs.msg import EffortCommand, StateParameter
+    from sensor_msgs.msg import JointState
 
     class Goal1JointSpaceReplayNode(Node):
         def __init__(self):
@@ -757,9 +758,22 @@ def run_publish_path(config: ReplayConfig, trajectory: LoadedTrajectory, argv: S
                 trajectory, config.command_timeout_sec
             )
 
-            self.state_subscription = self.create_subscription(
-                StateParameter, config.state_topic, self.state_callback, 10
-            )
+            if config.state_source == 'state_parameter':
+                self.state_topic_name = config.state_topic
+                self.state_subscription = self.create_subscription(
+                    StateParameter,
+                    self.state_topic_name,
+                    self.state_parameter_callback,
+                    10,
+                )
+            else:
+                self.state_topic_name = config.joint_state_topic
+                self.state_subscription = self.create_subscription(
+                    JointState,
+                    self.state_topic_name,
+                    self.joint_state_callback,
+                    10,
+                )
             self.effort_publisher = self.create_publisher(
                 EffortCommand, config.effort_topic, 10
             )
@@ -768,24 +782,51 @@ def run_publish_path(config: ReplayConfig, trajectory: LoadedTrajectory, argv: S
                 'GOAL1 joint-space torque replay skeleton is not real-robot safe by itself. '
                 'No GP, no compensation, no inverse dynamics.'
             )
+            self.log_gate_status(max_q_mismatch=None)
 
-        def state_callback(self, msg):
-            if len(msg.position) != 7 or len(msg.velocity) != 7:
-                self.refuse('state_parameter position/velocity must each contain 7 values')
-                return
-            q = [float(value) for value in msg.position]
-            dq = [float(value) for value in msg.velocity]
-            if not all(math.isfinite(value) for value in q + dq):
-                self.refuse('state_parameter contains non-finite q or dq')
-                return
-            self.latest_state = (q, dq)
-            self.latest_state_time = self.get_clock().now()
+        def state_parameter_callback(self, msg):
+            try:
+                self.latest_state = extract_state_parameter_q_dq(msg)
+                self.latest_state_time = self.get_clock().now()
+            except ValueError as exc:
+                self.refuse(str(exc))
+
+        def joint_state_callback(self, msg):
+            try:
+                self.latest_state = extract_joint_state_q_dq(msg)
+                self.latest_state_time = self.get_clock().now()
+            except ValueError as exc:
+                self.refuse(str(exc))
+
+        def state_age_sec(self) -> Optional[float]:
+            if self.latest_state is None or self.latest_state_time is None:
+                return None
+            return (self.get_clock().now() - self.latest_state_time).nanoseconds / 1e9
 
         def has_fresh_state(self) -> bool:
-            if self.latest_state is None or self.latest_state_time is None:
-                return False
-            age = (self.get_clock().now() - self.latest_state_time).nanoseconds / 1e9
-            return age <= self.config.state_timeout_sec
+            age = self.state_age_sec()
+            return age is not None and age <= self.config.state_timeout_sec
+
+        def log_gate_status(self, max_q_mismatch: Optional[float]) -> None:
+            if max_q_mismatch is None:
+                max_q_mismatch_text = 'not_available'
+            else:
+                max_q_mismatch_text = f'{max_q_mismatch:.9f}'
+            self.get_logger().warn(
+                'GOAL1 final effort replay gate status: '
+                f'state_source: {self.config.state_source}, '
+                f'state_topic: {self.state_topic_name}, '
+                f'state_received: {self.latest_state is not None}, '
+                f'state_fresh: {self.has_fresh_state()}, '
+                f'max_q_mismatch: {max_q_mismatch_text}, '
+                f'publish_effort: {self.config.publish_effort}, '
+                f'publish_reference: {self.config.publish_reference}, '
+                f'dry_run: {self.config.dry_run}, '
+                f'start_replay: {self.config.start_replay}, '
+                f'torque_clip_nm: {self.config.torque_clip_nm:.9f}, '
+                'torque_rate_limit_nm_per_s: '
+                f'{self.config.torque_rate_limit_nm_per_s:.9f}'
+            )
 
         def wait_for_initial_state(self) -> bool:
             deadline = self.get_clock().now().nanoseconds + int(
@@ -793,22 +834,27 @@ def run_publish_path(config: ReplayConfig, trajectory: LoadedTrajectory, argv: S
             )
             while rclpy.ok() and self.get_clock().now().nanoseconds <= deadline:
                 rclpy.spin_once(self, timeout_sec=0.02)
+                if self.done:
+                    return False
                 if self.has_fresh_state():
                     return True
+            self.log_gate_status(max_q_mismatch=None)
             self.refuse(
-                f'no fresh state on {self.config.state_topic} within '
+                f'no fresh state on {self.state_topic_name} within '
                 f'{self.config.state_timeout_sec:.3f}s'
             )
             return False
 
         def validate_start_pose(self) -> bool:
             if not self.has_fresh_state():
+                self.log_gate_status(max_q_mismatch=None)
                 self.refuse('state is stale before replay start')
                 return False
             q, _ = self.latest_state
             first_q = self.trajectory.points[0].q
             error = subtract(first_q, q)
             max_error = max_abs(error)
+            self.log_gate_status(max_q_mismatch=max_error)
             if max_error > self.config.start_position_tolerance_rad:
                 self.refuse(
                     'start pose mismatch: '
@@ -1104,14 +1150,9 @@ def run(config: ReplayConfig, argv: Sequence[str]) -> None:
     if config.publish_reference:
         if config.state_source != 'state_parameter':
             print_validation_summary(config, trajectory)
-            print_refusal('state_source=joint_states is only supported for state_only preflight')
+            print_refusal('state_source=joint_states is not supported for publish_reference mode')
             return
         run_reference_path(config, trajectory, argv)
-        return
-
-    if config.state_source != 'state_parameter':
-        print_validation_summary(config, trajectory)
-        print_refusal('state_source=joint_states is only supported for state_only preflight')
         return
 
     run_publish_path(config, trajectory, argv)
