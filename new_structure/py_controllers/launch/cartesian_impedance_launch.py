@@ -44,6 +44,23 @@ def generate_launch_description():
     goal1_x_frequency_multiplier_parameter_name = 'goal1_x_frequency_multiplier'
     goal1_y_frequency_multiplier_parameter_name = 'goal1_y_frequency_multiplier'
     goal1_z_frequency_multiplier_parameter_name = 'goal1_z_frequency_multiplier'
+    goal1_multisine_x_primary_amplitude_parameter_name = 'goal1_multisine_x_primary_amplitude'
+    goal1_multisine_x_secondary_amplitude_parameter_name = 'goal1_multisine_x_secondary_amplitude'
+    goal1_multisine_y_primary_amplitude_parameter_name = 'goal1_multisine_y_primary_amplitude'
+    goal1_multisine_y_secondary_amplitude_parameter_name = 'goal1_multisine_y_secondary_amplitude'
+    goal1_multisine_z_primary_amplitude_parameter_name = 'goal1_multisine_z_primary_amplitude'
+    goal1_multisine_z_secondary_amplitude_parameter_name = 'goal1_multisine_z_secondary_amplitude'
+    goal1_multisine_x_primary_frequency_multiplier_parameter_name = 'goal1_multisine_x_primary_frequency_multiplier'
+    goal1_multisine_x_secondary_frequency_multiplier_parameter_name = 'goal1_multisine_x_secondary_frequency_multiplier'
+    goal1_multisine_y_primary_frequency_multiplier_parameter_name = 'goal1_multisine_y_primary_frequency_multiplier'
+    goal1_multisine_y_secondary_frequency_multiplier_parameter_name = 'goal1_multisine_y_secondary_frequency_multiplier'
+    goal1_multisine_z_primary_frequency_multiplier_parameter_name = 'goal1_multisine_z_primary_frequency_multiplier'
+    goal1_multisine_z_secondary_frequency_multiplier_parameter_name = 'goal1_multisine_z_secondary_frequency_multiplier'
+    goal1_multisine_phi_x2_parameter_name = 'goal1_multisine_phi_x2'
+    goal1_multisine_phi_y1_parameter_name = 'goal1_multisine_phi_y1'
+    goal1_multisine_phi_y2_parameter_name = 'goal1_multisine_phi_y2'
+    goal1_multisine_phi_z1_parameter_name = 'goal1_multisine_phi_z1'
+    goal1_multisine_phi_z2_parameter_name = 'goal1_multisine_phi_z2'
     goal1_roll_amplitude_parameter_name = 'goal1_roll_amplitude'
     goal1_pitch_amplitude_parameter_name = 'goal1_pitch_amplitude'
     goal1_yaw_amplitude_parameter_name = 'goal1_yaw_amplitude'
@@ -83,6 +100,23 @@ def generate_launch_description():
     goal1_x_frequency_multiplier = LaunchConfiguration(goal1_x_frequency_multiplier_parameter_name)
     goal1_y_frequency_multiplier = LaunchConfiguration(goal1_y_frequency_multiplier_parameter_name)
     goal1_z_frequency_multiplier = LaunchConfiguration(goal1_z_frequency_multiplier_parameter_name)
+    goal1_multisine_x_primary_amplitude = LaunchConfiguration(goal1_multisine_x_primary_amplitude_parameter_name)
+    goal1_multisine_x_secondary_amplitude = LaunchConfiguration(goal1_multisine_x_secondary_amplitude_parameter_name)
+    goal1_multisine_y_primary_amplitude = LaunchConfiguration(goal1_multisine_y_primary_amplitude_parameter_name)
+    goal1_multisine_y_secondary_amplitude = LaunchConfiguration(goal1_multisine_y_secondary_amplitude_parameter_name)
+    goal1_multisine_z_primary_amplitude = LaunchConfiguration(goal1_multisine_z_primary_amplitude_parameter_name)
+    goal1_multisine_z_secondary_amplitude = LaunchConfiguration(goal1_multisine_z_secondary_amplitude_parameter_name)
+    goal1_multisine_x_primary_frequency_multiplier = LaunchConfiguration(goal1_multisine_x_primary_frequency_multiplier_parameter_name)
+    goal1_multisine_x_secondary_frequency_multiplier = LaunchConfiguration(goal1_multisine_x_secondary_frequency_multiplier_parameter_name)
+    goal1_multisine_y_primary_frequency_multiplier = LaunchConfiguration(goal1_multisine_y_primary_frequency_multiplier_parameter_name)
+    goal1_multisine_y_secondary_frequency_multiplier = LaunchConfiguration(goal1_multisine_y_secondary_frequency_multiplier_parameter_name)
+    goal1_multisine_z_primary_frequency_multiplier = LaunchConfiguration(goal1_multisine_z_primary_frequency_multiplier_parameter_name)
+    goal1_multisine_z_secondary_frequency_multiplier = LaunchConfiguration(goal1_multisine_z_secondary_frequency_multiplier_parameter_name)
+    goal1_multisine_phi_x2 = LaunchConfiguration(goal1_multisine_phi_x2_parameter_name)
+    goal1_multisine_phi_y1 = LaunchConfiguration(goal1_multisine_phi_y1_parameter_name)
+    goal1_multisine_phi_y2 = LaunchConfiguration(goal1_multisine_phi_y2_parameter_name)
+    goal1_multisine_phi_z1 = LaunchConfiguration(goal1_multisine_phi_z1_parameter_name)
+    goal1_multisine_phi_z2 = LaunchConfiguration(goal1_multisine_phi_z2_parameter_name)
     goal1_roll_amplitude = LaunchConfiguration(goal1_roll_amplitude_parameter_name)
     goal1_pitch_amplitude = LaunchConfiguration(goal1_pitch_amplitude_parameter_name)
     goal1_yaw_amplitude = LaunchConfiguration(goal1_yaw_amplitude_parameter_name)
@@ -176,7 +210,10 @@ def generate_launch_description():
         DeclareLaunchArgument(
             trajectory_mode_parameter_name,
             default_value='planar_circle',
-            description='Trajectory mode: planar_circle or z_modulated_circle.'),
+            description=(
+                'Trajectory mode: planar_circle, z_modulated_circle, goal1_spatial_rich, '
+                'goal1_spatial_multisine, or goal1_spatial_orientation_rich.'
+            )),
         DeclareLaunchArgument(
             z_amplitude_parameter_name,
             default_value='0.0',
@@ -221,6 +258,74 @@ def generate_launch_description():
             goal1_z_frequency_multiplier_parameter_name,
             default_value='0.5',
             description='GOAL1 spatial-rich z frequency multiplier relative to circle omega.'),
+        DeclareLaunchArgument(
+            goal1_multisine_x_primary_amplitude_parameter_name,
+            default_value='0.040',
+            description='GOAL1 spatial multisine x primary amplitude in meters.'),
+        DeclareLaunchArgument(
+            goal1_multisine_x_secondary_amplitude_parameter_name,
+            default_value='0.012',
+            description='GOAL1 spatial multisine x secondary amplitude in meters.'),
+        DeclareLaunchArgument(
+            goal1_multisine_y_primary_amplitude_parameter_name,
+            default_value='0.035',
+            description='GOAL1 spatial multisine y primary amplitude in meters.'),
+        DeclareLaunchArgument(
+            goal1_multisine_y_secondary_amplitude_parameter_name,
+            default_value='0.012',
+            description='GOAL1 spatial multisine y secondary amplitude in meters.'),
+        DeclareLaunchArgument(
+            goal1_multisine_z_primary_amplitude_parameter_name,
+            default_value='0.030',
+            description='GOAL1 spatial multisine z primary amplitude in meters.'),
+        DeclareLaunchArgument(
+            goal1_multisine_z_secondary_amplitude_parameter_name,
+            default_value='0.010',
+            description='GOAL1 spatial multisine z secondary amplitude in meters.'),
+        DeclareLaunchArgument(
+            goal1_multisine_x_primary_frequency_multiplier_parameter_name,
+            default_value='1.0',
+            description='GOAL1 spatial multisine x primary frequency multiplier relative to circle omega.'),
+        DeclareLaunchArgument(
+            goal1_multisine_x_secondary_frequency_multiplier_parameter_name,
+            default_value='2.1',
+            description='GOAL1 spatial multisine x secondary frequency multiplier relative to circle omega.'),
+        DeclareLaunchArgument(
+            goal1_multisine_y_primary_frequency_multiplier_parameter_name,
+            default_value='1.3',
+            description='GOAL1 spatial multisine y primary frequency multiplier relative to circle omega.'),
+        DeclareLaunchArgument(
+            goal1_multisine_y_secondary_frequency_multiplier_parameter_name,
+            default_value='2.4',
+            description='GOAL1 spatial multisine y secondary frequency multiplier relative to circle omega.'),
+        DeclareLaunchArgument(
+            goal1_multisine_z_primary_frequency_multiplier_parameter_name,
+            default_value='0.7',
+            description='GOAL1 spatial multisine z primary frequency multiplier relative to circle omega.'),
+        DeclareLaunchArgument(
+            goal1_multisine_z_secondary_frequency_multiplier_parameter_name,
+            default_value='1.9',
+            description='GOAL1 spatial multisine z secondary frequency multiplier relative to circle omega.'),
+        DeclareLaunchArgument(
+            goal1_multisine_phi_x2_parameter_name,
+            default_value='0.7',
+            description='GOAL1 spatial multisine x secondary phase in radians.'),
+        DeclareLaunchArgument(
+            goal1_multisine_phi_y1_parameter_name,
+            default_value='0.4',
+            description='GOAL1 spatial multisine y primary phase in radians.'),
+        DeclareLaunchArgument(
+            goal1_multisine_phi_y2_parameter_name,
+            default_value='1.3',
+            description='GOAL1 spatial multisine y secondary phase in radians.'),
+        DeclareLaunchArgument(
+            goal1_multisine_phi_z1_parameter_name,
+            default_value='0.2',
+            description='GOAL1 spatial multisine z primary phase in radians.'),
+        DeclareLaunchArgument(
+            goal1_multisine_phi_z2_parameter_name,
+            default_value='1.1',
+            description='GOAL1 spatial multisine z secondary phase in radians.'),
         DeclareLaunchArgument(
             goal1_roll_amplitude_parameter_name,
             default_value='0.02',
@@ -327,6 +432,40 @@ def generate_launch_description():
                     goal1_y_frequency_multiplier, value_type=float),
                 goal1_z_frequency_multiplier_parameter_name: ParameterValue(
                     goal1_z_frequency_multiplier, value_type=float),
+                goal1_multisine_x_primary_amplitude_parameter_name: ParameterValue(
+                    goal1_multisine_x_primary_amplitude, value_type=float),
+                goal1_multisine_x_secondary_amplitude_parameter_name: ParameterValue(
+                    goal1_multisine_x_secondary_amplitude, value_type=float),
+                goal1_multisine_y_primary_amplitude_parameter_name: ParameterValue(
+                    goal1_multisine_y_primary_amplitude, value_type=float),
+                goal1_multisine_y_secondary_amplitude_parameter_name: ParameterValue(
+                    goal1_multisine_y_secondary_amplitude, value_type=float),
+                goal1_multisine_z_primary_amplitude_parameter_name: ParameterValue(
+                    goal1_multisine_z_primary_amplitude, value_type=float),
+                goal1_multisine_z_secondary_amplitude_parameter_name: ParameterValue(
+                    goal1_multisine_z_secondary_amplitude, value_type=float),
+                goal1_multisine_x_primary_frequency_multiplier_parameter_name: ParameterValue(
+                    goal1_multisine_x_primary_frequency_multiplier, value_type=float),
+                goal1_multisine_x_secondary_frequency_multiplier_parameter_name: ParameterValue(
+                    goal1_multisine_x_secondary_frequency_multiplier, value_type=float),
+                goal1_multisine_y_primary_frequency_multiplier_parameter_name: ParameterValue(
+                    goal1_multisine_y_primary_frequency_multiplier, value_type=float),
+                goal1_multisine_y_secondary_frequency_multiplier_parameter_name: ParameterValue(
+                    goal1_multisine_y_secondary_frequency_multiplier, value_type=float),
+                goal1_multisine_z_primary_frequency_multiplier_parameter_name: ParameterValue(
+                    goal1_multisine_z_primary_frequency_multiplier, value_type=float),
+                goal1_multisine_z_secondary_frequency_multiplier_parameter_name: ParameterValue(
+                    goal1_multisine_z_secondary_frequency_multiplier, value_type=float),
+                goal1_multisine_phi_x2_parameter_name: ParameterValue(
+                    goal1_multisine_phi_x2, value_type=float),
+                goal1_multisine_phi_y1_parameter_name: ParameterValue(
+                    goal1_multisine_phi_y1, value_type=float),
+                goal1_multisine_phi_y2_parameter_name: ParameterValue(
+                    goal1_multisine_phi_y2, value_type=float),
+                goal1_multisine_phi_z1_parameter_name: ParameterValue(
+                    goal1_multisine_phi_z1, value_type=float),
+                goal1_multisine_phi_z2_parameter_name: ParameterValue(
+                    goal1_multisine_phi_z2, value_type=float),
                 goal1_roll_amplitude_parameter_name: ParameterValue(
                     goal1_roll_amplitude, value_type=float),
                 goal1_pitch_amplitude_parameter_name: ParameterValue(

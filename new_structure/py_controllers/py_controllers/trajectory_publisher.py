@@ -63,6 +63,26 @@ class TrajectoryPublisher(Node):
         self.declare_parameter('goal1_y_frequency_multiplier', 1.5)
         self.declare_parameter('goal1_z_frequency_multiplier', 0.5)
 
+        # GOAL1 spatial multisine Cartesian trajectory 参数。
+        # 默认只在 trajectory_mode:=goal1_spatial_multisine 时生效。
+        self.declare_parameter('goal1_multisine_x_primary_amplitude', 0.040)
+        self.declare_parameter('goal1_multisine_x_secondary_amplitude', 0.012)
+        self.declare_parameter('goal1_multisine_y_primary_amplitude', 0.035)
+        self.declare_parameter('goal1_multisine_y_secondary_amplitude', 0.012)
+        self.declare_parameter('goal1_multisine_z_primary_amplitude', 0.030)
+        self.declare_parameter('goal1_multisine_z_secondary_amplitude', 0.010)
+        self.declare_parameter('goal1_multisine_x_primary_frequency_multiplier', 1.0)
+        self.declare_parameter('goal1_multisine_x_secondary_frequency_multiplier', 2.1)
+        self.declare_parameter('goal1_multisine_y_primary_frequency_multiplier', 1.3)
+        self.declare_parameter('goal1_multisine_y_secondary_frequency_multiplier', 2.4)
+        self.declare_parameter('goal1_multisine_z_primary_frequency_multiplier', 0.7)
+        self.declare_parameter('goal1_multisine_z_secondary_frequency_multiplier', 1.9)
+        self.declare_parameter('goal1_multisine_phi_x2', 0.7)
+        self.declare_parameter('goal1_multisine_phi_y1', 0.4)
+        self.declare_parameter('goal1_multisine_phi_y2', 1.3)
+        self.declare_parameter('goal1_multisine_phi_z1', 0.2)
+        self.declare_parameter('goal1_multisine_phi_z2', 1.1)
+
         # GOAL1 optional orientation-rich command.
         # 默认小角度，只有 trajectory_mode:=goal1_spatial_orientation_rich 时才发布非零 roll/pitch/yaw。
         self.declare_parameter('goal1_roll_amplitude', 0.02)
@@ -86,6 +106,23 @@ class TrajectoryPublisher(Node):
         self.goal1_x_frequency_multiplier = self.get_parameter('goal1_x_frequency_multiplier').value
         self.goal1_y_frequency_multiplier = self.get_parameter('goal1_y_frequency_multiplier').value
         self.goal1_z_frequency_multiplier = self.get_parameter('goal1_z_frequency_multiplier').value
+        self.goal1_multisine_x_primary_amplitude = self.get_parameter('goal1_multisine_x_primary_amplitude').value
+        self.goal1_multisine_x_secondary_amplitude = self.get_parameter('goal1_multisine_x_secondary_amplitude').value
+        self.goal1_multisine_y_primary_amplitude = self.get_parameter('goal1_multisine_y_primary_amplitude').value
+        self.goal1_multisine_y_secondary_amplitude = self.get_parameter('goal1_multisine_y_secondary_amplitude').value
+        self.goal1_multisine_z_primary_amplitude = self.get_parameter('goal1_multisine_z_primary_amplitude').value
+        self.goal1_multisine_z_secondary_amplitude = self.get_parameter('goal1_multisine_z_secondary_amplitude').value
+        self.goal1_multisine_x_primary_frequency_multiplier = self.get_parameter('goal1_multisine_x_primary_frequency_multiplier').value
+        self.goal1_multisine_x_secondary_frequency_multiplier = self.get_parameter('goal1_multisine_x_secondary_frequency_multiplier').value
+        self.goal1_multisine_y_primary_frequency_multiplier = self.get_parameter('goal1_multisine_y_primary_frequency_multiplier').value
+        self.goal1_multisine_y_secondary_frequency_multiplier = self.get_parameter('goal1_multisine_y_secondary_frequency_multiplier').value
+        self.goal1_multisine_z_primary_frequency_multiplier = self.get_parameter('goal1_multisine_z_primary_frequency_multiplier').value
+        self.goal1_multisine_z_secondary_frequency_multiplier = self.get_parameter('goal1_multisine_z_secondary_frequency_multiplier').value
+        self.goal1_multisine_phi_x2 = self.get_parameter('goal1_multisine_phi_x2').value
+        self.goal1_multisine_phi_y1 = self.get_parameter('goal1_multisine_phi_y1').value
+        self.goal1_multisine_phi_y2 = self.get_parameter('goal1_multisine_phi_y2').value
+        self.goal1_multisine_phi_z1 = self.get_parameter('goal1_multisine_phi_z1').value
+        self.goal1_multisine_phi_z2 = self.get_parameter('goal1_multisine_phi_z2').value
         self.goal1_roll_amplitude = self.get_parameter('goal1_roll_amplitude').value
         self.goal1_pitch_amplitude = self.get_parameter('goal1_pitch_amplitude').value
         self.goal1_yaw_amplitude = self.get_parameter('goal1_yaw_amplitude').value
@@ -96,6 +133,7 @@ class TrajectoryPublisher(Node):
             'planar_circle',
             'z_modulated_circle',
             'goal1_spatial_rich',
+            'goal1_spatial_multisine',
             'goal1_spatial_orientation_rich',
         )
 
@@ -168,6 +206,34 @@ class TrajectoryPublisher(Node):
             f'y={self.goal1_y_frequency_multiplier}, '
             f'z={self.goal1_z_frequency_multiplier}'
         )
+        self.get_logger().info(
+            'GOAL1 spatial multisine amplitudes: '
+            f'x1={self.goal1_multisine_x_primary_amplitude} m, '
+            f'x2={self.goal1_multisine_x_secondary_amplitude} m, '
+            f'y1={self.goal1_multisine_y_primary_amplitude} m, '
+            f'y2={self.goal1_multisine_y_secondary_amplitude} m, '
+            f'z1={self.goal1_multisine_z_primary_amplitude} m, '
+            f'z2={self.goal1_multisine_z_secondary_amplitude} m'
+        )
+        self.get_logger().info(
+            'GOAL1 spatial multisine frequency multipliers: '
+            f'x1={self.goal1_multisine_x_primary_frequency_multiplier}, '
+            f'x2={self.goal1_multisine_x_secondary_frequency_multiplier}, '
+            f'y1={self.goal1_multisine_y_primary_frequency_multiplier}, '
+            f'y2={self.goal1_multisine_y_secondary_frequency_multiplier}, '
+            f'z1={self.goal1_multisine_z_primary_frequency_multiplier}, '
+            f'z2={self.goal1_multisine_z_secondary_frequency_multiplier}'
+        )
+        self.get_logger().info(
+            'GOAL1 spatial multisine phases: '
+            f'phi_x2={self.goal1_multisine_phi_x2}, '
+            f'phi_y1={self.goal1_multisine_phi_y1}, '
+            f'phi_y2={self.goal1_multisine_phi_y2}, '
+            f'phi_z1={self.goal1_multisine_phi_z1}, '
+            f'phi_z2={self.goal1_multisine_phi_z2}'
+        )
+        if self.trajectory_mode == 'goal1_spatial_multisine':
+            self.get_logger().info('GOAL1 spatial multisine trajectory is active')
         self.get_logger().info(
             'GOAL1 orientation-rich amplitudes: '
             f'roll={self.goal1_roll_amplitude} rad, '
@@ -304,6 +370,69 @@ class TrajectoryPublisher(Node):
                 -wz**2 * np.sin(wz * t) - 1.80 * wz**2 * np.cos(3.0 * wz * t)
             ) / z_norm
 
+        elif self.trajectory_mode == 'goal1_spatial_multisine':
+            ax1 = float(self.goal1_multisine_x_primary_amplitude)
+            ax2 = float(self.goal1_multisine_x_secondary_amplitude)
+            ay1 = float(self.goal1_multisine_y_primary_amplitude)
+            ay2 = float(self.goal1_multisine_y_secondary_amplitude)
+            az1 = float(self.goal1_multisine_z_primary_amplitude)
+            az2 = float(self.goal1_multisine_z_secondary_amplitude)
+
+            wx1 = float(self.goal1_multisine_x_primary_frequency_multiplier) * omega
+            wx2 = float(self.goal1_multisine_x_secondary_frequency_multiplier) * omega
+            wy1 = float(self.goal1_multisine_y_primary_frequency_multiplier) * omega
+            wy2 = float(self.goal1_multisine_y_secondary_frequency_multiplier) * omega
+            wz1 = float(self.goal1_multisine_z_primary_frequency_multiplier) * omega
+            wz2 = float(self.goal1_multisine_z_secondary_frequency_multiplier) * omega
+
+            phi_x2 = float(self.goal1_multisine_phi_x2)
+            phi_y1 = float(self.goal1_multisine_phi_y1)
+            phi_y2 = float(self.goal1_multisine_phi_y2)
+            phi_z1 = float(self.goal1_multisine_phi_z1)
+            phi_z2 = float(self.goal1_multisine_phi_z2)
+
+            x = (
+                self.center_x
+                + ax1 * np.sin(wx1 * t)
+                + ax2 * np.sin(wx2 * t + phi_x2)
+            )
+            y = (
+                self.center_y
+                + ay1 * np.cos(wy1 * t + phi_y1)
+                + ay2 * np.sin(wy2 * t + phi_y2)
+            )
+            z = (
+                self.center_z
+                + az1 * np.sin(wz1 * t + phi_z1)
+                + az2 * np.sin(wz2 * t + phi_z2)
+            )
+
+            dx = (
+                ax1 * wx1 * np.cos(wx1 * t)
+                + ax2 * wx2 * np.cos(wx2 * t + phi_x2)
+            )
+            dy = (
+                -ay1 * wy1 * np.sin(wy1 * t + phi_y1)
+                + ay2 * wy2 * np.cos(wy2 * t + phi_y2)
+            )
+            dz = (
+                az1 * wz1 * np.cos(wz1 * t + phi_z1)
+                + az2 * wz2 * np.cos(wz2 * t + phi_z2)
+            )
+
+            ddx = (
+                -ax1 * wx1**2 * np.sin(wx1 * t)
+                - ax2 * wx2**2 * np.sin(wx2 * t + phi_x2)
+            )
+            ddy = (
+                -ay1 * wy1**2 * np.cos(wy1 * t + phi_y1)
+                - ay2 * wy2**2 * np.sin(wy2 * t + phi_y2)
+            )
+            ddz = (
+                -az1 * wz1**2 * np.sin(wz1 * t + phi_z1)
+                - az2 * wz2**2 * np.sin(wz2 * t + phi_z2)
+            )
+
         else:
             x = self.center_x + self.radius * np.cos(omega * t)
             y = self.center_y + self.radius * np.sin(omega * t)
@@ -380,10 +509,12 @@ class TrajectoryPublisher(Node):
                 transition_elapsed = (current_time - self.transition_start_time).nanoseconds / 1e9
                 
                 if transition_elapsed >= self.transition_duration:
-                    # transition complete, start circular trajectory
+                    # transition complete, start selected trajectory
                     self.transition_complete = True
-                    self.get_logger().info('Transition complete, starting circular trajectory')
-                    # reset start time for circular trajectory
+                    self.get_logger().info(
+                        f'Transition complete, starting trajectory mode: {self.trajectory_mode}'
+                    )
+                    # reset start time for selected trajectory
                     self.start_time = current_time
                     elapsed_time = 0.0
                     
@@ -422,7 +553,7 @@ class TrajectoryPublisher(Node):
                     dx_des = [dx, dy, dz, 0.0, 0.0, 0.0]
                     ddx_des = [ddx, ddy, ddz, 0.0, 0.0, 0.0]
             
-            # trajectory for uniform circular trajectory
+            # trajectory after smooth transition
             if self.transition_complete or not self.use_transition:
                 if elapsed_time > 0.0:
                     # trajectory 阶段发布完整 6D command。
@@ -455,7 +586,7 @@ class TrajectoryPublisher(Node):
                     )
                 else:
                     self.get_logger().debug(
-                        f'Circular trajectory: t={elapsed_time:.3f}s, '
+                        f'Trajectory mode {self.trajectory_mode}: t={elapsed_time:.3f}s, '
                         f'pos=({log_x:.3f}, {log_y:.3f}, {log_z:.3f})'
                     )
                 
@@ -560,7 +691,7 @@ class TrajectoryPublisher(Node):
 
             else:
                 # —— 已经过渡完，进入圆轨迹 —— #
-                # 圆轨迹的时间从 transition 结束时刻算起：
+                # 轨迹时间从 transition 结束时刻算起：
                 t_circle = transition_elapsed - self.transition_duration
                 if t_circle < 0.0:
                     t_circle = 0.0
