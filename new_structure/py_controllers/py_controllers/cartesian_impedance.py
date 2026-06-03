@@ -280,6 +280,13 @@ class CartesianImpedanceController(Node):
         self.dq_history = []
         self.dq_des_joint_history = []   # desired joint velocity
         self.ddq_des_joint_history = []  # desired joint acceleration
+        self.tau_nominal_history = []
+        self.tau_final_history = []
+        self.gp_source_code_history = []
+        self.gp_selected_raw_history = []
+        self.gp_scaled_history = []
+        self.gp_applied_history = []
+        self.gp_clip_active_history = []
         # set signal handler
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
@@ -292,6 +299,13 @@ class CartesianImpedanceController(Node):
         self.ddq_des_joint = np.zeros(7)
         self.tau_residual = np.zeros(7)
         self.tau_memory = np.zeros(7)
+        self._tau_nominal = np.zeros(7, dtype=float)
+        self._tau_final = np.zeros(7, dtype=float)
+        self._gp_source_code = 0
+        self._gp_selected_raw = np.zeros(7, dtype=float)
+        self._gp_scaled = np.zeros(7, dtype=float)
+        self._gp_applied = np.zeros(7, dtype=float)
+        self._gp_clip_active = np.zeros(7, dtype=int)
 
         # Stage 1: frozen GP / compensation 实验开关。默认保持原 online update 和原 model 路径。
         # compensation 默认关闭，避免 GP prediction 在未显式开启时影响最终 tau。
@@ -739,7 +753,9 @@ class CartesianImpedanceController(Node):
             w_l = prec_l / (prec_l + prec_c)
             self.y_hat_combined = w_l * self.y_hat_local + (1.0 - w_l) * self.y_hat_cloud
 
+        self._tau_nominal = tau.copy()
         tau = self._apply_gp_compensation(tau)
+        self._tau_final = tau.copy()
         self.effort_msg.efforts = tau.tolist()
         self.effort_publisher.publish(self.effort_msg)
 
@@ -1258,7 +1274,9 @@ class CartesianImpedanceController(Node):
 
             # tau = tau - self.y_hat_local
             # 默认 compensation 关闭时返回原始 tau；开启后才按原注释方向补偿。
+            self._tau_nominal = tau.copy()
             tau = self._apply_gp_compensation(tau)
+            self._tau_final = tau.copy()
             # publish on topic /effort_command
             self.effort_msg.efforts = tau.tolist()
             self.effort_publisher.publish(self.effort_msg)
@@ -1266,6 +1284,13 @@ class CartesianImpedanceController(Node):
             # record data only when data recording is enabled
             if self.data_recording_enabled:
                 self.tau_history.append(tau.tolist())
+                self.tau_nominal_history.append(self._tau_nominal.tolist())
+                self.tau_final_history.append(self._tau_final.tolist())
+                self.gp_source_code_history.append(int(self._gp_source_code))
+                self.gp_selected_raw_history.append(self._gp_selected_raw.tolist())
+                self.gp_scaled_history.append(self._gp_scaled.tolist())
+                self.gp_applied_history.append(self._gp_applied.tolist())
+                self.gp_clip_active_history.append(self._gp_clip_active.tolist())
                 self.time_history.append(t_elapsed)
                 self.x_history.append(x.tolist())
                 self.x_des_history.append(self.x_des.tolist())
@@ -1731,23 +1756,35 @@ class CartesianImpedanceController(Node):
     def _apply_gp_compensation(self, tau):
         # 默认不改变最终 tau，只有显式开启 gp_compensation_enabled 才进入 torque command。
         if not self.gp_prediction_enabled or not self.gp_compensation_enabled:
+            self._gp_source_code = 0
+            self._gp_selected_raw = np.zeros(7, dtype=float)
+            self._gp_scaled = np.zeros(7, dtype=float)
+            self._gp_applied = np.zeros(7, dtype=float)
+            self._gp_clip_active = np.zeros(7, dtype=int)
             return tau
 
-        # source 支持 local/cloud/combined；combined 使用两个 prediction 的保守平均。
+        # combined 当前是 local/cloud variance fusion candidate；paper/historical 先走 shadow logging。
         if self.gp_compensation_source == "cloud":
             compensation = self.y_hat_cloud
+            self._gp_source_code = 2
         elif self.gp_compensation_source == "combined":
-            compensation = 0.5 * (self.y_hat_local + self.y_hat_cloud)
+            compensation = self.y_hat_combined
+            self._gp_source_code = 3
         else:
             compensation = self.y_hat_local
+            self._gp_source_code = 1
 
         # 先 scale 再 per-joint clip，避免 GP prediction 直接大幅影响 torque command。
-        scaled_compensation = self.gp_compensation_scale * np.asarray(compensation, dtype=float)
-        clipped_compensation = np.clip(
-            scaled_compensation,
+        self._gp_selected_raw = np.asarray(compensation, dtype=float).copy()
+        self._gp_scaled = self.gp_compensation_scale * self._gp_selected_raw
+        self._gp_applied = np.clip(
+            self._gp_scaled,
             -self.gp_compensation_clip_nm,
             self.gp_compensation_clip_nm
         )
+        self._gp_clip_active = (
+            np.abs(self._gp_scaled - self._gp_applied) > 1e-12
+        ).astype(int)
 
         if not self._gp_compensation_logged:
             self.get_logger().warn(
@@ -1759,7 +1796,7 @@ class CartesianImpedanceController(Node):
             self._gp_compensation_logged = True
 
         # 符号方向沿用原注释：tau = tau - compensation。
-        return tau - clipped_compensation
+        return tau - self._gp_applied
 
     def _gp_predict_and_update(self, q, dq_des_joint, ddq_des_joint, tau_residual, models, update = True):
         """
@@ -1891,6 +1928,13 @@ class CartesianImpedanceController(Node):
                 self.y_hat_history,
                 self.tau_residual_history,
                 self.tau_residual_raw_history,
+                self.tau_nominal_history,
+                self.tau_final_history,
+                self.gp_source_code_history,
+                self.gp_selected_raw_history,
+                self.gp_scaled_history,
+                self.gp_applied_history,
+                self.gp_clip_active_history,
                 self.pred_time_history,
                 self.q_pred_history,
                 self.dq_pred_history,
@@ -1929,6 +1973,20 @@ class CartesianImpedanceController(Node):
                 header.extend([f'dq_future_actual_{i+1}' for i in range(7)])
                 header.extend([f'q_pred_err_{i+1}' for i in range(7)])
                 header.extend([f'dq_pred_err_{i+1}' for i in range(7)])
+                header.extend([
+                    'gp_prediction_enabled',
+                    'gp_online_update_enabled',
+                    'gp_compensation_enabled',
+                    'gp_compensation_source_code',
+                    'gp_compensation_scale',
+                    'gp_compensation_clip_nm',
+                ])
+                header.extend([f'tau_nominal_{i+1}' for i in range(7)])
+                header.extend([f'tau_final_{i+1}' for i in range(7)])
+                header.extend([f'gp_selected_raw_{i+1}' for i in range(7)])
+                header.extend([f'gp_scaled_{i+1}' for i in range(7)])
+                header.extend([f'gp_applied_{i+1}' for i in range(7)])
+                header.extend([f'gp_clip_active_{i+1}' for i in range(7)])
                 writer.writerow(header)
 
                 for i in range(min_len):
@@ -2018,6 +2076,56 @@ class CartesianImpedanceController(Node):
                         row.extend(self.dq_pred_err_history[i])
                     else:
                         row.extend([0.0] * 7)
+
+                    if i < len(self.gp_source_code_history):
+                        gp_source_code = int(self.gp_source_code_history[i])
+                    else:
+                        gp_source_code = int(self._gp_source_code)
+
+                    row.extend([
+                        int(bool(self.gp_prediction_enabled)),
+                        int(bool(self.gp_online_update_enabled)),
+                        int(bool(self.gp_compensation_enabled)),
+                        gp_source_code,
+                        self.gp_compensation_scale,
+                        self.gp_compensation_clip_nm,
+                    ])
+
+                    if i < len(self.tau_nominal_history):
+                        row.extend(self.tau_nominal_history[i])
+                    else:
+                        row.extend([0.0] * 7)
+
+                    if i < len(self.tau_final_history):
+                        row.extend(self.tau_final_history[i])
+                    else:
+                        row.extend([0.0] * 7)
+
+                    if i < len(self.gp_selected_raw_history):
+                        row.extend(self.gp_selected_raw_history[i])
+                    else:
+                        row.extend([0.0] * 7)
+
+                    if i < len(self.gp_scaled_history):
+                        row.extend(self.gp_scaled_history[i])
+                    else:
+                        row.extend([0.0] * 7)
+
+                    if i < len(self.gp_applied_history):
+                        row.extend(self.gp_applied_history[i])
+                    else:
+                        row.extend([0.0] * 7)
+
+                    if i < len(self.gp_clip_active_history):
+                        row.extend([int(v) for v in self.gp_clip_active_history[i]])
+                    else:
+                        row.extend([0] * 7)
+
+                    if len(row) != len(header):
+                        self.get_logger().warning(
+                            f"CSV row length mismatch at row {i}: "
+                            f"header={len(header)}, row={len(row)}"
+                        )
 
                     writer.writerow(row)
 
