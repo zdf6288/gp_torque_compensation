@@ -18,6 +18,7 @@
 
 推荐输入 archive：
 
+- `~/gp_torque_data_archives/goal1_20260603/goal1_spatial_multisine_full_frozen_and_online_matrix_20260603.tar.gz`
 - `/mnt/c/Users/dummd/Downloads/goal1_spatial_multisine_full_frozen_and_online_matrix_20260603.tar.gz`
 
 默认输出目录：
@@ -35,8 +36,11 @@
 - `run_manifest.csv`
 - `sanity_summary.csv`
 - `tracking_summary.csv`
+- `tracking_summary_scale1_only.csv`
 - `gp_compensation_summary.csv`
+- `gp_compensation_summary_scale1_only.csv`
 - `clip_summary.csv`
+- `clip_summary_scale1_only.csv`
 - `analysis_summary.md`
 
 如果 `matplotlib` 可用且没有传入 `--no-plots`，还会生成：
@@ -47,6 +51,11 @@
 - `clip_active_count_by_run.png`
 - `clip_active_count_by_joint.png`
 - `nogp_begin_vs_end_drift.png`
+- `frozen_tracking_rmse_comparison_scale1_only.png`
+- `online_tracking_rmse_comparison_scale1_only.png`
+- `max_abs_gp_applied_by_run_scale1_only.png`
+- `clip_active_count_by_run_scale1_only.png`
+- `clip_active_count_by_joint_scale1_only.png`
 
 ## Latest Generated Snapshot
 
@@ -63,6 +72,13 @@
 - Online local scale 1.0 的 `max_abs_gp_applied=0.5`，`total_clip_active_count=3`，clip active 在 j3。
 - Online cloud scale 1.0 的 `max_abs_gp_applied=0.481494182318`，`total_clip_active_count=0`。
 - Online combined scale 1.0 的 `max_abs_gp_applied=0.5`，`total_clip_active_count=4`，clip active 在 j3 和 j4。
+
+Scale 1.0-only plots 用来隔离主视觉对比：
+
+- `frozen_tracking_rmse_comparison_scale1_only.png` 包含 no-GP begin、frozen local/cloud/combined scale 1.0、no-GP repeat end，不包含 short validation 或 scale 0.1。
+- `online_tracking_rmse_comparison_scale1_only.png` 只包含 online local/cloud/combined scale 1.0。
+- `max_abs_gp_applied_by_run_scale1_only.png` 和 `clip_active_count_by_run_scale1_only.png` 只包含 scale 1.0 且 GP-on 的 frozen/online local/cloud/combined runs。
+- `clip_active_count_by_joint_scale1_only.png` 汇总 scale 1.0 runs 的 per-joint clip active count。
 
 ## Interpretation Boundary
 

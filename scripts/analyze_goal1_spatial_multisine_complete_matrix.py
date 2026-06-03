@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import io
 import math
 import os
 import sys
@@ -54,8 +55,11 @@ SUMMARY_FILES = [
     "run_manifest.csv",
     "sanity_summary.csv",
     "tracking_summary.csv",
+    "tracking_summary_scale1_only.csv",
     "gp_compensation_summary.csv",
+    "gp_compensation_summary_scale1_only.csv",
     "clip_summary.csv",
+    "clip_summary_scale1_only.csv",
     "analysis_summary.md",
 ]
 
@@ -506,11 +510,15 @@ def ordered_runs(csv_paths: dict[str, Path]) -> list[tuple[str, Path]]:
 
 
 def write_csv(path: Path, fieldnames: list[str], rows: list[dict[str, Any]]) -> None:
-    with path.open("w", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
-        writer.writeheader()
-        for row in rows:
-            writer.writerow({field: row.get(field, "") for field in fieldnames})
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=fieldnames, extrasaction="ignore")
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({field: row.get(field, "") for field in fieldnames})
+    content = buffer.getvalue()
+    if path.exists() and path.read_text() == content:
+        return
+    path.write_text(content)
 
 
 def base_summary_row(run: dict[str, Any]) -> dict[str, Any]:
@@ -630,7 +638,31 @@ def write_sanity_summary(runs: list[dict[str, Any]], output_dir: Path) -> None:
     )
 
 
-def write_tracking_summary(runs: list[dict[str, Any]], output_dir: Path) -> None:
+TRACKING_FIELDS = [
+    "run_name",
+    "category",
+    "source",
+    "scale",
+    "clip_nm",
+    "online_update_enabled",
+    "prediction_enabled",
+    "compensation_enabled",
+    "tracking_available",
+    "desired_position_columns",
+    "actual_position_columns",
+    "rmse_x_mm",
+    "rmse_y_mm",
+    "rmse_z_mm",
+    "rmse_3d_mm",
+    "mean_3d_error_mm",
+    "max_3d_error_mm",
+    "position_like_columns",
+    "status",
+    "warnings",
+]
+
+
+def tracking_rows_for_runs(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     rows = []
     for run in runs:
         row = base_summary_row(run)
@@ -652,33 +684,11 @@ def write_tracking_summary(runs: list[dict[str, Any]], output_dir: Path) -> None
             }
         )
         rows.append(row)
+    return rows
 
-    write_csv(
-        output_dir / "tracking_summary.csv",
-        [
-            "run_name",
-            "category",
-            "source",
-            "scale",
-            "clip_nm",
-            "online_update_enabled",
-            "prediction_enabled",
-            "compensation_enabled",
-            "tracking_available",
-            "desired_position_columns",
-            "actual_position_columns",
-            "rmse_x_mm",
-            "rmse_y_mm",
-            "rmse_z_mm",
-            "rmse_3d_mm",
-            "mean_3d_error_mm",
-            "max_3d_error_mm",
-            "position_like_columns",
-            "status",
-            "warnings",
-        ],
-        rows,
-    )
+
+def write_tracking_summary(runs: list[dict[str, Any]], output_dir: Path) -> None:
+    write_csv(output_dir / "tracking_summary.csv", TRACKING_FIELDS, tracking_rows_for_runs(runs))
 
 
 def add_per_joint_fields(row: dict[str, Any], prefix: str, values: list[float]) -> None:
@@ -686,7 +696,7 @@ def add_per_joint_fields(row: dict[str, Any], prefix: str, values: list[float]) 
         row[f"{prefix}_{idx}"] = format_float(value)
 
 
-def write_gp_compensation_summary(runs: list[dict[str, Any]], output_dir: Path) -> None:
+def gp_compensation_rows_for_runs(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     rows = []
     for run in runs:
         row = base_summary_row(run)
@@ -709,8 +719,10 @@ def write_gp_compensation_summary(runs: list[dict[str, Any]], output_dir: Path) 
         add_per_joint_fields(row, "max_abs_gp_applied_j", run["per_joint_max_abs_gp_applied"])
         add_per_joint_fields(row, "rms_gp_applied_j", run["per_joint_rms_gp_applied"])
         rows.append(row)
+    return rows
 
-    fields = [
+
+GP_COMPENSATION_FIELDS = [
         "run_name",
         "category",
         "source",
@@ -725,21 +737,24 @@ def write_gp_compensation_summary(runs: list[dict[str, Any]], output_dir: Path) 
         "rms_gp_scaled",
         "max_abs_gp_applied",
         "rms_gp_applied",
-    ]
-    for metric in (
-        "max_abs_gp_selected_raw_j",
-        "rms_gp_selected_raw_j",
-        "max_abs_gp_scaled_j",
-        "rms_gp_scaled_j",
-        "max_abs_gp_applied_j",
-        "rms_gp_applied_j",
-    ):
-        fields += [f"{metric}_{idx}" for idx in range(1, JOINT_COUNT + 1)]
-    fields += ["status", "warnings"]
-    write_csv(output_dir / "gp_compensation_summary.csv", fields, rows)
+]
+for metric in (
+    "max_abs_gp_selected_raw_j",
+    "rms_gp_selected_raw_j",
+    "max_abs_gp_scaled_j",
+    "rms_gp_scaled_j",
+    "max_abs_gp_applied_j",
+    "rms_gp_applied_j",
+):
+    GP_COMPENSATION_FIELDS += [f"{metric}_{idx}" for idx in range(1, JOINT_COUNT + 1)]
+GP_COMPENSATION_FIELDS += ["status", "warnings"]
 
 
-def write_clip_summary(runs: list[dict[str, Any]], output_dir: Path) -> None:
+def write_gp_compensation_summary(runs: list[dict[str, Any]], output_dir: Path) -> None:
+    write_csv(output_dir / "gp_compensation_summary.csv", GP_COMPENSATION_FIELDS, gp_compensation_rows_for_runs(runs))
+
+
+def clip_rows_for_runs(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     rows = []
     for run in runs:
         total_cells = run["rows"] * JOINT_COUNT
@@ -756,8 +771,10 @@ def write_clip_summary(runs: list[dict[str, Any]], output_dir: Path) -> None:
         for idx, count in enumerate(run["per_joint_clip_active_count"], start=1):
             row[f"gp_clip_active_j{idx}"] = count
         rows.append(row)
+    return rows
 
-    fields = [
+
+CLIP_FIELDS = [
         "run_name",
         "category",
         "source",
@@ -769,10 +786,29 @@ def write_clip_summary(runs: list[dict[str, Any]], output_dir: Path) -> None:
         "total_clip_active_count",
         "clip_active_ratio",
         "max_abs_gp_applied",
-    ]
-    fields += [f"gp_clip_active_j{idx}" for idx in range(1, JOINT_COUNT + 1)]
-    fields += ["status", "warnings"]
-    write_csv(output_dir / "clip_summary.csv", fields, rows)
+]
+CLIP_FIELDS += [f"gp_clip_active_j{idx}" for idx in range(1, JOINT_COUNT + 1)]
+CLIP_FIELDS += ["status", "warnings"]
+
+
+def write_clip_summary(runs: list[dict[str, Any]], output_dir: Path) -> None:
+    write_csv(output_dir / "clip_summary.csv", CLIP_FIELDS, clip_rows_for_runs(runs))
+
+
+def is_scale_one(run: dict[str, Any]) -> bool:
+    scale = run["scale"]
+    return scale is not None and math.isfinite(scale) and abs(scale - 1.0) <= 1e-9
+
+
+def write_scale1_csv_subsets(runs: list[dict[str, Any]], output_dir: Path) -> None:
+    scale1_runs = [run for run in runs if is_scale_one(run)]
+    write_csv(output_dir / "tracking_summary_scale1_only.csv", TRACKING_FIELDS, tracking_rows_for_runs(scale1_runs))
+    write_csv(
+        output_dir / "gp_compensation_summary_scale1_only.csv",
+        GP_COMPENSATION_FIELDS,
+        gp_compensation_rows_for_runs(scale1_runs),
+    )
+    write_csv(output_dir / "clip_summary_scale1_only.csv", CLIP_FIELDS, clip_rows_for_runs(scale1_runs))
 
 
 def short_label(run: dict[str, Any]) -> str:
@@ -815,6 +851,101 @@ def plot_bar(plt: Any, labels: list[str], values: list[float], title: str, ylabe
     fig.tight_layout()
     fig.savefig(output_path)
     plt.close(fig)
+
+
+def run_by_name(runs: list[dict[str, Any]], run_name: str) -> dict[str, Any] | None:
+    return next((run for run in runs if run["run_name"] == run_name), None)
+
+
+def selected_runs_by_name(runs: list[dict[str, Any]], run_names: list[str]) -> list[dict[str, Any]]:
+    selected = []
+    for run_name in run_names:
+        run = run_by_name(runs, run_name)
+        if run is not None:
+            selected.append(run)
+    return selected
+
+
+def write_scale1_plots(plt: Any, runs: list[dict[str, Any]], output_dir: Path) -> None:
+    frozen_scale1_tracking = selected_runs_by_name(
+        runs,
+        [
+            "goal1_spatial_multisine_nogp_3000_20260603",
+            "goal1_spatial_multisine_local_scale10_clip05_3000_20260603",
+            "goal1_spatial_multisine_cloud_scale10_clip05_3000_20260603",
+            "goal1_spatial_multisine_combined_scale10_clip05_3000_20260603",
+            "goal1_spatial_multisine_nogp_repeat_end_3000_20260603",
+        ],
+    )
+    frozen_scale1_tracking = [run for run in frozen_scale1_tracking if run["tracking"]["tracking_available"]]
+    if frozen_scale1_tracking:
+        plot_bar(
+            plt,
+            [short_label(run) for run in frozen_scale1_tracking],
+            [run["tracking"]["rmse_3d_mm"] for run in frozen_scale1_tracking],
+            "Frozen scale 1.0 3D tracking RMSE",
+            "RMSE 3D position error (mm)",
+            output_dir / "frozen_tracking_rmse_comparison_scale1_only.png",
+        )
+
+    online_scale1_tracking = selected_runs_by_name(
+        runs,
+        [
+            "goal1_spatial_multisine_online_local_scale10_clip05_3000_20260603",
+            "goal1_spatial_multisine_online_cloud_scale10_clip05_3000_20260603",
+            "goal1_spatial_multisine_online_combined_scale10_clip05_3000_20260603",
+        ],
+    )
+    online_scale1_tracking = [run for run in online_scale1_tracking if run["tracking"]["tracking_available"]]
+    if online_scale1_tracking:
+        plot_bar(
+            plt,
+            [short_label(run) for run in online_scale1_tracking],
+            [run["tracking"]["rmse_3d_mm"] for run in online_scale1_tracking],
+            "Online scale 1.0 3D tracking RMSE",
+            "RMSE 3D position error (mm)",
+            output_dir / "online_tracking_rmse_comparison_scale1_only.png",
+        )
+
+    gp_on_scale1 = selected_runs_by_name(
+        runs,
+        [
+            "goal1_spatial_multisine_local_scale10_clip05_3000_20260603",
+            "goal1_spatial_multisine_cloud_scale10_clip05_3000_20260603",
+            "goal1_spatial_multisine_combined_scale10_clip05_3000_20260603",
+            "goal1_spatial_multisine_online_local_scale10_clip05_3000_20260603",
+            "goal1_spatial_multisine_online_cloud_scale10_clip05_3000_20260603",
+            "goal1_spatial_multisine_online_combined_scale10_clip05_3000_20260603",
+        ],
+    )
+    if gp_on_scale1:
+        plot_bar(
+            plt,
+            [short_label(run) for run in gp_on_scale1],
+            [run["max_abs_gp_applied"] for run in gp_on_scale1],
+            "Scale 1.0 max abs GP applied by run",
+            "max |gp_applied| (Nm)",
+            output_dir / "max_abs_gp_applied_by_run_scale1_only.png",
+        )
+        plot_bar(
+            plt,
+            [short_label(run) for run in gp_on_scale1],
+            [run["total_clip_active_count"] for run in gp_on_scale1],
+            "Scale 1.0 clip active count by run",
+            "clip active samples across joints",
+            output_dir / "clip_active_count_by_run_scale1_only.png",
+        )
+
+    scale1_runs = [run for run in runs if is_scale_one(run)]
+    joint_counts = [sum(run["per_joint_clip_active_count"][idx] for run in scale1_runs) for idx in range(JOINT_COUNT)]
+    plot_bar(
+        plt,
+        [f"j{idx}" for idx in range(1, JOINT_COUNT + 1)],
+        joint_counts,
+        "Scale 1.0 clip active count by joint",
+        "clip active samples",
+        output_dir / "clip_active_count_by_joint_scale1_only.png",
+    )
 
 
 def write_plots(runs: list[dict[str, Any]], output_dir: Path) -> None:
@@ -883,6 +1014,7 @@ def write_plots(runs: list[dict[str, Any]], output_dir: Path) -> None:
             "RMSE 3D position error (mm)",
             output_dir / "nogp_begin_vs_end_drift.png",
         )
+    write_scale1_plots(plt, runs, output_dir)
 
 
 def markdown_table(rows: list[dict[str, Any]], columns: list[str], limit: int | None = None) -> list[str]:
@@ -947,6 +1079,11 @@ def write_analysis_summary(runs: list[dict[str, Any]], output_dir: Path, missing
                 "- `clip_active_count_by_run.png`",
                 "- `clip_active_count_by_joint.png`",
                 "- `nogp_begin_vs_end_drift.png`",
+                "- `frozen_tracking_rmse_comparison_scale1_only.png`",
+                "- `online_tracking_rmse_comparison_scale1_only.png`",
+                "- `max_abs_gp_applied_by_run_scale1_only.png`",
+                "- `clip_active_count_by_run_scale1_only.png`",
+                "- `clip_active_count_by_joint_scale1_only.png`",
             ]
         )
 
@@ -978,6 +1115,8 @@ def write_analysis_summary(runs: list[dict[str, Any]], output_dir: Path, missing
             "## Clip interpretation",
             "",
             "`clip=0.5` is kept as the safety bound. If frozen scale 1.0 runs show no clip activation, that supports not increasing the clip for this matrix. If online scale 1.0 runs activate the clip, that indicates online update can push GP output closer to the safety bound and supports keeping `clip=0.5`.",
+            "",
+            "The scale 1.0-only plots isolate the main visual comparison: no-GP begin/end baselines, frozen local/cloud/combined scale 1.0 tracking, and the contrast between frozen and online scale 1.0 clip activity.",
             "",
         ]
     )
@@ -1024,6 +1163,7 @@ def write_all_outputs(runs: list[dict[str, Any]], output_dir: Path, missing_expe
     write_tracking_summary(runs, output_dir)
     write_gp_compensation_summary(runs, output_dir)
     write_clip_summary(runs, output_dir)
+    write_scale1_csv_subsets(runs, output_dir)
     if not no_plots:
         write_plots(runs, output_dir)
     write_analysis_summary(runs, output_dir, missing_expected, not no_plots)
