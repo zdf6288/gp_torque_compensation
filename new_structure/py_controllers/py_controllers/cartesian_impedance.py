@@ -319,6 +319,14 @@ class CartesianImpedanceController(Node):
         self.hist_db_gated_source_code_history = []
         self.hist_db_pred_history = []
         self.hist_db_gated_pred_history = []
+        self.hist_soft_valid_history = []
+        self.hist_soft_nearest_distance_history = []
+        self.hist_soft_raw_w_hist_history = []
+        self.hist_soft_norm_w_local_history = []
+        self.hist_soft_norm_w_cloud_history = []
+        self.hist_soft_norm_w_hist_history = []
+        self.hist_soft_pred_history = []
+        self.hist_soft_delta_vs_local_cloud_history = []
         # set signal handler
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
@@ -369,6 +377,11 @@ class CartesianImpedanceController(Node):
         self.declare_parameter("gp_historical_db_max_distance", 1.0)
         self.declare_parameter("gp_historical_db_disable_when_online_update", True)
         self.declare_parameter("gp_historical_db_fallback_source", "cloud")
+        self.declare_parameter("gp_historical_soft_shadow_enabled", False)
+        self.declare_parameter("gp_historical_soft_alpha", 1.0)
+        self.declare_parameter("gp_historical_soft_distance_threshold", 0.2)
+        self.declare_parameter("gp_historical_soft_online_scale", 0.02)
+        self.declare_parameter("gp_historical_soft_non_online_scale", 1.0)
 
         self.gp_prediction_enabled = self._get_bool_parameter("gp_prediction_enabled")
         self.gp_online_update_enabled = self._get_bool_parameter("gp_online_update_enabled")
@@ -430,6 +443,21 @@ class CartesianImpedanceController(Node):
         self.gp_historical_db_fallback_source = str(
             self.get_parameter("gp_historical_db_fallback_source").value
         ).strip().lower()
+        self.gp_historical_soft_shadow_enabled = self._get_bool_parameter(
+            "gp_historical_soft_shadow_enabled"
+        )
+        self.gp_historical_soft_alpha = self._get_nonnegative_float_parameter(
+            "gp_historical_soft_alpha", 1.0
+        )
+        self.gp_historical_soft_distance_threshold = self._get_nonnegative_float_parameter(
+            "gp_historical_soft_distance_threshold", 0.2
+        )
+        self.gp_historical_soft_online_scale = self._get_nonnegative_float_parameter(
+            "gp_historical_soft_online_scale", 0.02
+        )
+        self.gp_historical_soft_non_online_scale = self._get_nonnegative_float_parameter(
+            "gp_historical_soft_non_online_scale", 1.0
+        )
         self._gp_compensation_logged = False
 
         # clip 只接受非负幅值；负数配置按绝对值处理，避免反向区间。
@@ -564,6 +592,15 @@ class CartesianImpedanceController(Node):
             "disable_when_online_update="
             f"{self.gp_historical_db_disable_when_online_update}, "
             f"fallback_source='{self.gp_historical_db_fallback_source}'; "
+            "shadow-only and does not enter tau_final"
+        )
+        self.get_logger().info(
+            "[GP Hist Soft] Soft-weight shadow logging controls: "
+            f"enabled={self.gp_historical_soft_shadow_enabled}, "
+            f"alpha={self.gp_historical_soft_alpha}, "
+            f"distance_threshold={self.gp_historical_soft_distance_threshold}, "
+            f"online_scale={self.gp_historical_soft_online_scale}, "
+            f"non_online_scale={self.gp_historical_soft_non_online_scale}; "
             "shadow-only and does not enter tau_final"
         )
         if (
@@ -784,6 +821,19 @@ class CartesianImpedanceController(Node):
         except (TypeError, ValueError):
             self.get_logger().warn(
                 f"Parameter '{name}' must be a finite value > 0.0; "
+                f"using default {default_value}"
+            )
+            return float(default_value)
+
+    def _get_nonnegative_float_parameter(self, name, default_value):
+        try:
+            value = float(self.get_parameter(name).value)
+            if not np.isfinite(value) or value < 0.0:
+                raise ValueError
+            return value
+        except (TypeError, ValueError):
+            self.get_logger().warn(
+                f"Parameter '{name}' must be a finite value >= 0.0; "
                 f"using default {default_value}"
             )
             return float(default_value)
@@ -1608,6 +1658,26 @@ class CartesianImpedanceController(Node):
                 )
                 self.hist_db_pred_history.append(self.hist_db_pred.tolist())
                 self.hist_db_gated_pred_history.append(self.hist_db_gated_pred.tolist())
+                self.hist_soft_valid_history.append(int(self.hist_soft_valid))
+                self.hist_soft_nearest_distance_history.append(
+                    float(self.hist_soft_nearest_distance)
+                )
+                self.hist_soft_raw_w_hist_history.append(
+                    float(self.hist_soft_raw_w_hist)
+                )
+                self.hist_soft_norm_w_local_history.append(
+                    float(self.hist_soft_norm_w_local)
+                )
+                self.hist_soft_norm_w_cloud_history.append(
+                    float(self.hist_soft_norm_w_cloud)
+                )
+                self.hist_soft_norm_w_hist_history.append(
+                    float(self.hist_soft_norm_w_hist)
+                )
+                self.hist_soft_pred_history.append(self.hist_soft_pred.tolist())
+                self.hist_soft_delta_vs_local_cloud_history.append(
+                    self.hist_soft_delta_vs_local_cloud.tolist()
+                )
                 self.time_history.append(t_elapsed)
                 self.x_history.append(x.tolist())
                 self.x_des_history.append(self.x_des.tolist())
@@ -2291,6 +2361,7 @@ class CartesianImpedanceController(Node):
         self.hist_db_pred = zero.copy()
         self.hist_db_gated_pred = zero.copy()
         self.hist_db_gated_source_code = 0
+        self._reset_historical_soft_shadow_state()
 
     def _update_historical_residual_db_shadow_state(self, q, dq):
         result = self._query_historical_residual_db_shadow(q, dq)
@@ -2308,6 +2379,139 @@ class CartesianImpedanceController(Node):
             dtype=float,
         ).copy()
         self.hist_db_gated_source_code = int(result["gated_source_code"])
+        self._update_historical_soft_shadow_state()
+
+    def _new_historical_soft_shadow_result(self):
+        zero = np.zeros(7, dtype=float)
+        return {
+            "valid": 0,
+            "nearest_distance": 0.0,
+            "raw_w_hist": 0.0,
+            "norm_w_local": 0.0,
+            "norm_w_cloud": 0.0,
+            "norm_w_hist": 0.0,
+            "prediction": zero.copy(),
+            "delta_vs_local_cloud": zero.copy(),
+        }
+
+    def _compute_historical_soft_shadow(self):
+        """Compute persistent historical soft fusion for shadow logging only."""
+        result = self._new_historical_soft_shadow_result()
+        if not self.gp_historical_soft_shadow_enabled:
+            return result
+
+        # 这是 shadow-only evaluator，不写入 active torque，也不改变 tau_final。
+        # DB hard gate fail 时必须 fail closed，避免 fallback prediction 被误记为
+        # historical soft prediction。
+        if (
+            not self.hist_db_loaded
+            or not self.hist_db_query_valid
+            or not self.hist_db_available
+            or not self.hist_db_distance_pass
+            or self.hist_db_k_used <= 0
+            or self.hist_db_gated_source_code != 4
+        ):
+            return result
+
+        try:
+            nearest_distance = float(self.hist_db_nearest_distance)
+            hist_db_pred = np.asarray(self.hist_db_pred, dtype=float)
+            hist_db_gated_pred = np.asarray(self.hist_db_gated_pred, dtype=float)
+            y_hat_local = np.asarray(self.y_hat_local, dtype=float)
+            y_hat_cloud = np.asarray(self.y_hat_cloud, dtype=float)
+        except (TypeError, ValueError):
+            return result
+
+        inputs = (hist_db_pred, hist_db_gated_pred, y_hat_local, y_hat_cloud)
+        if (
+            not np.isfinite(nearest_distance)
+            or nearest_distance < 0.0
+            or any(value.shape != (7,) for value in inputs)
+            or any(not np.all(np.isfinite(value)) for value in inputs)
+        ):
+            # finite check 失败时 fail closed，避免无效 shadow 数据被误判为可用。
+            return result
+
+        with np.errstate(over="ignore", invalid="ignore", under="ignore"):
+            raw_w_hist = float(np.exp(-self.gp_historical_soft_alpha * nearest_distance))
+        if nearest_distance > self.gp_historical_soft_distance_threshold:
+            raw_w_hist = 0.0
+
+        # online update 场景下 historical 与当前模型分布可能不一致，因此强降权。
+        if self.gp_online_update_enabled:
+            raw_w_hist *= self.gp_historical_soft_online_scale
+        else:
+            raw_w_hist *= self.gp_historical_soft_non_online_scale
+
+        w_local_base = 0.5
+        w_cloud_base = 0.5
+        sum_w = w_local_base + w_cloud_base + raw_w_hist
+        if not np.isfinite(raw_w_hist) or not np.isfinite(sum_w) or sum_w <= 0.0:
+            return result
+
+        norm_w_local = w_local_base / sum_w
+        norm_w_cloud = w_cloud_base / sum_w
+        norm_w_hist = raw_w_hist / sum_w
+        local_cloud_shadow = 0.5 * y_hat_local + 0.5 * y_hat_cloud
+        prediction = (
+            norm_w_local * y_hat_local
+            + norm_w_cloud * y_hat_cloud
+            + norm_w_hist * hist_db_gated_pred
+        )
+        delta_vs_local_cloud = prediction - local_cloud_shadow
+
+        scalar_outputs = (
+            norm_w_local,
+            norm_w_cloud,
+            norm_w_hist,
+        )
+        vector_outputs = (local_cloud_shadow, prediction, delta_vs_local_cloud)
+        if (
+            any(not np.isfinite(value) for value in scalar_outputs)
+            or any(not np.all(np.isfinite(value)) for value in vector_outputs)
+        ):
+            # 输出 finite check 同样 fail closed；这些值永远不进入 active torque。
+            return result
+
+        result.update({
+            "valid": 1,
+            "nearest_distance": nearest_distance,
+            "raw_w_hist": raw_w_hist,
+            "norm_w_local": norm_w_local,
+            "norm_w_cloud": norm_w_cloud,
+            "norm_w_hist": norm_w_hist,
+            "prediction": prediction.copy(),
+            "delta_vs_local_cloud": delta_vs_local_cloud.copy(),
+        })
+        return result
+
+    def _reset_historical_soft_shadow_state(self):
+        result = self._new_historical_soft_shadow_result()
+        self.hist_soft_valid = int(result["valid"])
+        self.hist_soft_nearest_distance = float(result["nearest_distance"])
+        self.hist_soft_raw_w_hist = float(result["raw_w_hist"])
+        self.hist_soft_norm_w_local = float(result["norm_w_local"])
+        self.hist_soft_norm_w_cloud = float(result["norm_w_cloud"])
+        self.hist_soft_norm_w_hist = float(result["norm_w_hist"])
+        self.hist_soft_pred = np.asarray(result["prediction"], dtype=float).copy()
+        self.hist_soft_delta_vs_local_cloud = np.asarray(
+            result["delta_vs_local_cloud"],
+            dtype=float,
+        ).copy()
+
+    def _update_historical_soft_shadow_state(self):
+        result = self._compute_historical_soft_shadow()
+        self.hist_soft_valid = int(result["valid"])
+        self.hist_soft_nearest_distance = float(result["nearest_distance"])
+        self.hist_soft_raw_w_hist = float(result["raw_w_hist"])
+        self.hist_soft_norm_w_local = float(result["norm_w_local"])
+        self.hist_soft_norm_w_cloud = float(result["norm_w_cloud"])
+        self.hist_soft_norm_w_hist = float(result["norm_w_hist"])
+        self.hist_soft_pred = np.asarray(result["prediction"], dtype=float).copy()
+        self.hist_soft_delta_vs_local_cloud = np.asarray(
+            result["delta_vs_local_cloud"],
+            dtype=float,
+        ).copy()
 
     def _as_finite_7d(self, value, fill_value=0.0):
         try:
@@ -2887,6 +3091,14 @@ class CartesianImpedanceController(Node):
                 self.hist_db_gated_source_code_history,
                 self.hist_db_pred_history,
                 self.hist_db_gated_pred_history,
+                self.hist_soft_valid_history,
+                self.hist_soft_nearest_distance_history,
+                self.hist_soft_raw_w_hist_history,
+                self.hist_soft_norm_w_local_history,
+                self.hist_soft_norm_w_cloud_history,
+                self.hist_soft_norm_w_hist_history,
+                self.hist_soft_pred_history,
+                self.hist_soft_delta_vs_local_cloud_history,
                 self.pred_time_history,
                 self.q_pred_history,
                 self.dq_pred_history,
@@ -2987,6 +3199,24 @@ class CartesianImpedanceController(Node):
                 ])
                 header.extend([f'hist_db_pred_{i+1}' for i in range(7)])
                 header.extend([f'hist_db_gated_pred_{i+1}' for i in range(7)])
+                header.extend([
+                    'hist_soft_enabled',
+                    'hist_soft_valid',
+                    'hist_soft_online_mode',
+                    'hist_soft_alpha',
+                    'hist_soft_distance_threshold',
+                    'hist_soft_online_scale',
+                    'hist_soft_non_online_scale',
+                    'hist_soft_nearest_distance',
+                    'hist_soft_raw_w_hist',
+                    'hist_soft_norm_w_local',
+                    'hist_soft_norm_w_cloud',
+                    'hist_soft_norm_w_hist',
+                ])
+                header.extend([f'hist_soft_pred_{i+1}' for i in range(7)])
+                header.extend([
+                    f'hist_soft_delta_vs_local_cloud_{i+1}' for i in range(7)
+                ])
                 writer.writerow(header)
 
                 for i in range(min_len):
@@ -3323,6 +3553,61 @@ class CartesianImpedanceController(Node):
 
                     if i < len(self.hist_db_gated_pred_history):
                         row.extend(self.hist_db_gated_pred_history[i])
+                    else:
+                        row.extend([0.0] * 7)
+
+                    hist_soft_valid = (
+                        int(self.hist_soft_valid_history[i])
+                        if i < len(self.hist_soft_valid_history)
+                        else int(self.hist_soft_valid)
+                    )
+                    hist_soft_nearest_distance = (
+                        float(self.hist_soft_nearest_distance_history[i])
+                        if i < len(self.hist_soft_nearest_distance_history)
+                        else float(self.hist_soft_nearest_distance)
+                    )
+                    hist_soft_raw_w_hist = (
+                        float(self.hist_soft_raw_w_hist_history[i])
+                        if i < len(self.hist_soft_raw_w_hist_history)
+                        else float(self.hist_soft_raw_w_hist)
+                    )
+                    hist_soft_norm_w_local = (
+                        float(self.hist_soft_norm_w_local_history[i])
+                        if i < len(self.hist_soft_norm_w_local_history)
+                        else float(self.hist_soft_norm_w_local)
+                    )
+                    hist_soft_norm_w_cloud = (
+                        float(self.hist_soft_norm_w_cloud_history[i])
+                        if i < len(self.hist_soft_norm_w_cloud_history)
+                        else float(self.hist_soft_norm_w_cloud)
+                    )
+                    hist_soft_norm_w_hist = (
+                        float(self.hist_soft_norm_w_hist_history[i])
+                        if i < len(self.hist_soft_norm_w_hist_history)
+                        else float(self.hist_soft_norm_w_hist)
+                    )
+                    row.extend([
+                        int(bool(self.gp_historical_soft_shadow_enabled)),
+                        hist_soft_valid,
+                        int(bool(self.gp_online_update_enabled)),
+                        self.gp_historical_soft_alpha,
+                        self.gp_historical_soft_distance_threshold,
+                        self.gp_historical_soft_online_scale,
+                        self.gp_historical_soft_non_online_scale,
+                        hist_soft_nearest_distance,
+                        hist_soft_raw_w_hist,
+                        hist_soft_norm_w_local,
+                        hist_soft_norm_w_cloud,
+                        hist_soft_norm_w_hist,
+                    ])
+
+                    if i < len(self.hist_soft_pred_history):
+                        row.extend(self.hist_soft_pred_history[i])
+                    else:
+                        row.extend([0.0] * 7)
+
+                    if i < len(self.hist_soft_delta_vs_local_cloud_history):
+                        row.extend(self.hist_soft_delta_vs_local_cloud_history[i])
                     else:
                         row.extend([0.0] * 7)
 
