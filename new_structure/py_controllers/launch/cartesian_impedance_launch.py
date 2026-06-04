@@ -25,6 +25,29 @@ def generate_launch_description():
     gp_compensation_source_parameter_name = 'gp_compensation_source'
     gp_compensation_scale_parameter_name = 'gp_compensation_scale'
     gp_compensation_clip_nm_parameter_name = 'gp_compensation_clip_nm'
+    gp_historical_db_enabled_parameter_name = 'gp_historical_db_enabled'
+    gp_historical_db_path_parameter_name = 'gp_historical_db_path'
+    gp_historical_db_k_parameter_name = 'gp_historical_db_k'
+    gp_historical_db_q_scale_parameter_name = 'gp_historical_db_q_scale'
+    gp_historical_db_dq_scale_parameter_name = 'gp_historical_db_dq_scale'
+    gp_historical_db_max_distance_parameter_name = 'gp_historical_db_max_distance'
+    gp_historical_db_disable_online_parameter_name = (
+        'gp_historical_db_disable_when_online_update'
+    )
+    gp_historical_db_fallback_source_parameter_name = 'gp_historical_db_fallback_source'
+    gp_historical_soft_shadow_enabled_parameter_name = (
+        'gp_historical_soft_shadow_enabled'
+    )
+    gp_historical_soft_alpha_parameter_name = 'gp_historical_soft_alpha'
+    gp_historical_soft_distance_threshold_parameter_name = (
+        'gp_historical_soft_distance_threshold'
+    )
+    gp_historical_soft_online_scale_parameter_name = (
+        'gp_historical_soft_online_scale'
+    )
+    gp_historical_soft_non_online_scale_parameter_name = (
+        'gp_historical_soft_non_online_scale'
+    )
     # Stage 3A trajectory 参数默认保持 planar_circle，只有显式传参才启用 z modulation。
     trajectory_mode_parameter_name = 'trajectory_mode'
     z_amplitude_parameter_name = 'z_amplitude'
@@ -46,6 +69,35 @@ def generate_launch_description():
     gp_compensation_source = LaunchConfiguration(gp_compensation_source_parameter_name)
     gp_compensation_scale = LaunchConfiguration(gp_compensation_scale_parameter_name)
     gp_compensation_clip_nm = LaunchConfiguration(gp_compensation_clip_nm_parameter_name)
+    gp_historical_db_enabled = LaunchConfiguration(gp_historical_db_enabled_parameter_name)
+    gp_historical_db_path = LaunchConfiguration(gp_historical_db_path_parameter_name)
+    gp_historical_db_k = LaunchConfiguration(gp_historical_db_k_parameter_name)
+    gp_historical_db_q_scale = LaunchConfiguration(gp_historical_db_q_scale_parameter_name)
+    gp_historical_db_dq_scale = LaunchConfiguration(gp_historical_db_dq_scale_parameter_name)
+    gp_historical_db_max_distance = LaunchConfiguration(
+        gp_historical_db_max_distance_parameter_name
+    )
+    gp_historical_db_disable_online = LaunchConfiguration(
+        gp_historical_db_disable_online_parameter_name
+    )
+    gp_historical_db_fallback_source = LaunchConfiguration(
+        gp_historical_db_fallback_source_parameter_name
+    )
+    gp_historical_soft_shadow_enabled = LaunchConfiguration(
+        gp_historical_soft_shadow_enabled_parameter_name
+    )
+    gp_historical_soft_alpha = LaunchConfiguration(
+        gp_historical_soft_alpha_parameter_name
+    )
+    gp_historical_soft_distance_threshold = LaunchConfiguration(
+        gp_historical_soft_distance_threshold_parameter_name
+    )
+    gp_historical_soft_online_scale = LaunchConfiguration(
+        gp_historical_soft_online_scale_parameter_name
+    )
+    gp_historical_soft_non_online_scale = LaunchConfiguration(
+        gp_historical_soft_non_online_scale_parameter_name
+    )
     trajectory_mode = LaunchConfiguration(trajectory_mode_parameter_name)
     z_amplitude = LaunchConfiguration(z_amplitude_parameter_name)
     z_frequency_multiplier = LaunchConfiguration(z_frequency_multiplier_parameter_name)
@@ -110,6 +162,82 @@ def generate_launch_description():
             gp_compensation_clip_nm_parameter_name,
             default_value='0.5',
             description='Per-joint GP compensation clip in Nm.'),
+        DeclareLaunchArgument(
+            gp_historical_db_enabled_parameter_name,
+            default_value='false',
+            description=(
+                'Enable persistent historical DB CSV shadow logging only when '
+                'explicitly requested for validation; no active torque compensation.'
+            )),
+        DeclareLaunchArgument(
+            gp_historical_db_path_parameter_name,
+            default_value='',
+            description=(
+                'Persistent historical DB .npz path for shadow logging only; '
+                'empty keeps the DB unavailable.'
+            )),
+        DeclareLaunchArgument(
+            gp_historical_db_k_parameter_name,
+            default_value='25',
+            description='Persistent historical DB shadow top-k size for validation.'),
+        DeclareLaunchArgument(
+            gp_historical_db_q_scale_parameter_name,
+            default_value='0.1',
+            description='Persistent historical DB joint-position distance scale.'),
+        DeclareLaunchArgument(
+            gp_historical_db_dq_scale_parameter_name,
+            default_value='0.1',
+            description='Persistent historical DB joint-velocity distance scale.'),
+        DeclareLaunchArgument(
+            gp_historical_db_max_distance_parameter_name,
+            default_value='1.0',
+            description='Persistent historical DB shadow nearest-distance hard gate.'),
+        DeclareLaunchArgument(
+            gp_historical_db_disable_online_parameter_name,
+            default_value='true',
+            description=(
+                'Keep persistent historical DB unavailable while GP online update is '
+                'enabled; shadow logging only, no active torque compensation.'
+            )),
+        DeclareLaunchArgument(
+            gp_historical_db_fallback_source_parameter_name,
+            default_value='cloud',
+            description='Shadow-only fallback source: none, local, cloud, or combined.'),
+        DeclareLaunchArgument(
+            gp_historical_soft_shadow_enabled_parameter_name,
+            default_value='false',
+            description=(
+                'Enable GOAL1 historical soft-weight CSV shadow logging only when '
+                'explicitly requested for validation; no active torque compensation.'
+            )),
+        DeclareLaunchArgument(
+            gp_historical_soft_alpha_parameter_name,
+            default_value='1.0',
+            description=(
+                'GOAL1 historical soft-shadow alpha for validation logging only; '
+                'no active torque compensation.'
+            )),
+        DeclareLaunchArgument(
+            gp_historical_soft_distance_threshold_parameter_name,
+            default_value='0.2',
+            description=(
+                'GOAL1 historical soft-shadow nearest-distance threshold for '
+                'validation logging only; no active torque compensation.'
+            )),
+        DeclareLaunchArgument(
+            gp_historical_soft_online_scale_parameter_name,
+            default_value='0.02',
+            description=(
+                'GOAL1 historical soft-shadow online-mode historical scale for '
+                'validation logging only; no active torque compensation.'
+            )),
+        DeclareLaunchArgument(
+            gp_historical_soft_non_online_scale_parameter_name,
+            default_value='1.0',
+            description=(
+                'GOAL1 historical soft-shadow non-online historical scale for '
+                'validation logging only; no active torque compensation.'
+            )),
         # Stage 3A launch defaults 保持 Stage 1 / Stage 2A 的平面圆轨迹行为。
         DeclareLaunchArgument(
             trajectory_mode_parameter_name,
@@ -171,6 +299,45 @@ def generate_launch_description():
                 gp_compensation_source_parameter_name: gp_compensation_source,
                 gp_compensation_scale_parameter_name: gp_compensation_scale,
                 gp_compensation_clip_nm_parameter_name: gp_compensation_clip_nm,
+                gp_historical_db_enabled_parameter_name: ParameterValue(
+                    gp_historical_db_enabled,
+                    value_type=bool),
+                gp_historical_db_path_parameter_name: ParameterValue(
+                    gp_historical_db_path,
+                    value_type=str),
+                gp_historical_db_k_parameter_name: ParameterValue(
+                    gp_historical_db_k,
+                    value_type=int),
+                gp_historical_db_q_scale_parameter_name: ParameterValue(
+                    gp_historical_db_q_scale,
+                    value_type=float),
+                gp_historical_db_dq_scale_parameter_name: ParameterValue(
+                    gp_historical_db_dq_scale,
+                    value_type=float),
+                gp_historical_db_max_distance_parameter_name: ParameterValue(
+                    gp_historical_db_max_distance,
+                    value_type=float),
+                gp_historical_db_disable_online_parameter_name: ParameterValue(
+                    gp_historical_db_disable_online,
+                    value_type=bool),
+                gp_historical_db_fallback_source_parameter_name: ParameterValue(
+                    gp_historical_db_fallback_source,
+                    value_type=str),
+                gp_historical_soft_shadow_enabled_parameter_name: ParameterValue(
+                    gp_historical_soft_shadow_enabled,
+                    value_type=bool),
+                gp_historical_soft_alpha_parameter_name: ParameterValue(
+                    gp_historical_soft_alpha,
+                    value_type=float),
+                gp_historical_soft_distance_threshold_parameter_name: ParameterValue(
+                    gp_historical_soft_distance_threshold,
+                    value_type=float),
+                gp_historical_soft_online_scale_parameter_name: ParameterValue(
+                    gp_historical_soft_online_scale,
+                    value_type=float),
+                gp_historical_soft_non_online_scale_parameter_name: ParameterValue(
+                    gp_historical_soft_non_online_scale,
+                    value_type=float),
             }]
         ),
         Node(
