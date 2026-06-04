@@ -287,6 +287,23 @@ class CartesianImpedanceController(Node):
         self.gp_scaled_history = []
         self.gp_applied_history = []
         self.gp_clip_active_history = []
+        self.gp_shadow_historical_available_history = []
+        self.gp_shadow_local_raw_history = []
+        self.gp_shadow_cloud_raw_history = []
+        self.gp_shadow_hist_raw_history = []
+        self.gp_shadow_combined_paper_raw_history = []
+        self.gp_shadow_var_local_history = []
+        self.gp_shadow_var_cloud_history = []
+        self.gp_shadow_var_hist_history = []
+        self.gp_shadow_weight_local_history = []
+        self.gp_shadow_weight_cloud_history = []
+        self.gp_shadow_weight_hist_history = []
+        self.gp_shadow_precision_local_history = []
+        self.gp_shadow_precision_cloud_history = []
+        self.gp_shadow_precision_hist_history = []
+        self.gp_shadow_paper_scaled_history = []
+        self.gp_shadow_paper_clip_proxy_applied_history = []
+        self.gp_shadow_paper_clip_proxy_active_history = []
         # set signal handler
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
@@ -306,6 +323,8 @@ class CartesianImpedanceController(Node):
         self._gp_scaled = np.zeros(7, dtype=float)
         self._gp_applied = np.zeros(7, dtype=float)
         self._gp_clip_active = np.zeros(7, dtype=int)
+        self.gp_shadow_paper_formula_available = True
+        self._gp_shadow_variance_warned = False
 
         # Stage 1: frozen GP / compensation 实验开关。默认保持原 online update 和原 model 路径。
         # compensation 默认关闭，避免 GP prediction 在未显式开启时影响最终 tau。
@@ -316,6 +335,11 @@ class CartesianImpedanceController(Node):
         self.declare_parameter("gp_compensation_source", "local")
         self.declare_parameter("gp_compensation_scale", 0.1)
         self.declare_parameter("gp_compensation_clip_nm", 0.5)
+        self.declare_parameter("gp_shadow_paper_fusion_logging_enabled", False)
+        self.declare_parameter("gp_historical_shadow_enabled", False)
+        self.declare_parameter("gp_historical_source_mode", "none")
+        self.declare_parameter("gp_shadow_variance_eps", 1e-9)
+        self.declare_parameter("gp_shadow_hist_fallback_variance", 1e6)
 
         self.gp_prediction_enabled = self._get_bool_parameter("gp_prediction_enabled")
         self.gp_online_update_enabled = self._get_bool_parameter("gp_online_update_enabled")
@@ -324,6 +348,19 @@ class CartesianImpedanceController(Node):
         self.gp_compensation_source = str(self.get_parameter("gp_compensation_source").value).strip().lower()
         self.gp_compensation_scale = float(self.get_parameter("gp_compensation_scale").value)
         self.gp_compensation_clip_nm = float(self.get_parameter("gp_compensation_clip_nm").value)
+        self.gp_shadow_paper_fusion_logging_enabled = self._get_bool_parameter(
+            "gp_shadow_paper_fusion_logging_enabled"
+        )
+        self.gp_historical_shadow_enabled = self._get_bool_parameter("gp_historical_shadow_enabled")
+        self.gp_historical_source_mode = str(
+            self.get_parameter("gp_historical_source_mode").value
+        ).strip().lower()
+        self.gp_shadow_variance_eps = self._get_positive_float_parameter(
+            "gp_shadow_variance_eps", 1e-9
+        )
+        self.gp_shadow_hist_fallback_variance = self._get_positive_float_parameter(
+            "gp_shadow_hist_fallback_variance", 1e6
+        )
         self._gp_compensation_logged = False
 
         # clip 只接受非负幅值；负数配置按绝对值处理，避免反向区间。
@@ -341,6 +378,16 @@ class CartesianImpedanceController(Node):
                 "falling back to 'local'"
             )
             self.gp_compensation_source = "local"
+
+        # Phase 1 shadow logging 暂不接入 historical retrieval；不能用 online_update 冒充 historical。
+        valid_gp_historical_source_modes = ("none",)
+        if self.gp_historical_source_mode not in valid_gp_historical_source_modes:
+            self.get_logger().warn(
+                f"[GP Shadow] Invalid gp_historical_source_mode='{self.gp_historical_source_mode}', "
+                "falling back to 'none'"
+            )
+            self.gp_historical_source_mode = "none"
+        self.gp_historical_source_mode_code = 0
 
         if not self.gp_prediction_enabled and self.gp_compensation_enabled:
             self.get_logger().warn(
@@ -365,6 +412,16 @@ class CartesianImpedanceController(Node):
             f"gp_compensation_scale={self.gp_compensation_scale}, "
             f"gp_compensation_clip_nm={self.gp_compensation_clip_nm}"
         )
+        self.get_logger().info(
+            "[GP Shadow] Paper fusion logging controls: "
+            f"gp_shadow_paper_fusion_logging_enabled={self.gp_shadow_paper_fusion_logging_enabled}, "
+            f"gp_historical_shadow_enabled={self.gp_historical_shadow_enabled}, "
+            f"gp_historical_source_mode='{self.gp_historical_source_mode}', "
+            f"gp_shadow_variance_eps={self.gp_shadow_variance_eps}, "
+            f"gp_shadow_hist_fallback_variance={self.gp_shadow_hist_fallback_variance}"
+        )
+
+        self._reset_gp_shadow_state()
 
         self.gp_stride = 1      # 每 10 个 state callback 做一次 GP（你可以调）
         self.gp_counter = 0
@@ -753,6 +810,7 @@ class CartesianImpedanceController(Node):
             w_l = prec_l / (prec_l + prec_c)
             self.y_hat_combined = w_l * self.y_hat_local + (1.0 - w_l) * self.y_hat_cloud
 
+        self._update_gp_shadow_logging_state()
         self._tau_nominal = tau.copy()
         tau = self._apply_gp_compensation(tau)
         self._tau_final = tau.copy()
@@ -1274,6 +1332,7 @@ class CartesianImpedanceController(Node):
 
             # tau = tau - self.y_hat_local
             # 默认 compensation 关闭时返回原始 tau；开启后才按原注释方向补偿。
+            self._update_gp_shadow_logging_state()
             self._tau_nominal = tau.copy()
             tau = self._apply_gp_compensation(tau)
             self._tau_final = tau.copy()
@@ -1291,6 +1350,31 @@ class CartesianImpedanceController(Node):
                 self.gp_scaled_history.append(self._gp_scaled.tolist())
                 self.gp_applied_history.append(self._gp_applied.tolist())
                 self.gp_clip_active_history.append(self._gp_clip_active.tolist())
+                self.gp_shadow_historical_available_history.append(
+                    int(self.gp_shadow_historical_available)
+                )
+                self.gp_shadow_local_raw_history.append(self.gp_shadow_local_raw.tolist())
+                self.gp_shadow_cloud_raw_history.append(self.gp_shadow_cloud_raw.tolist())
+                self.gp_shadow_hist_raw_history.append(self.gp_shadow_hist_raw.tolist())
+                self.gp_shadow_combined_paper_raw_history.append(
+                    self.gp_shadow_combined_paper_raw.tolist()
+                )
+                self.gp_shadow_var_local_history.append(self.gp_shadow_var_local.tolist())
+                self.gp_shadow_var_cloud_history.append(self.gp_shadow_var_cloud.tolist())
+                self.gp_shadow_var_hist_history.append(self.gp_shadow_var_hist.tolist())
+                self.gp_shadow_weight_local_history.append(self.gp_shadow_weight_local.tolist())
+                self.gp_shadow_weight_cloud_history.append(self.gp_shadow_weight_cloud.tolist())
+                self.gp_shadow_weight_hist_history.append(self.gp_shadow_weight_hist.tolist())
+                self.gp_shadow_precision_local_history.append(self.gp_shadow_precision_local.tolist())
+                self.gp_shadow_precision_cloud_history.append(self.gp_shadow_precision_cloud.tolist())
+                self.gp_shadow_precision_hist_history.append(self.gp_shadow_precision_hist.tolist())
+                self.gp_shadow_paper_scaled_history.append(self.gp_shadow_paper_scaled.tolist())
+                self.gp_shadow_paper_clip_proxy_applied_history.append(
+                    self.gp_shadow_paper_clip_proxy_applied.tolist()
+                )
+                self.gp_shadow_paper_clip_proxy_active_history.append(
+                    self.gp_shadow_paper_clip_proxy_active.tolist()
+                )
                 self.time_history.append(t_elapsed)
                 self.x_history.append(x.tolist())
                 self.x_des_history.append(self.x_des.tolist())
@@ -1753,6 +1837,209 @@ class CartesianImpedanceController(Node):
 
         return best_state, best_dist
 
+    def _as_finite_7d(self, value, fill_value=0.0):
+        try:
+            arr = np.asarray(value, dtype=float)
+            if arr.shape != (7,):
+                raise ValueError
+            return np.where(np.isfinite(arr), arr, fill_value)
+        except (TypeError, ValueError):
+            return np.ones(7, dtype=float) * fill_value
+
+    def _reset_gp_shadow_state(self):
+        zero = np.zeros(7, dtype=float)
+        zero_i = np.zeros(7, dtype=int)
+        self.gp_shadow_historical_available = 0
+        self.gp_shadow_local_raw = zero.copy()
+        self.gp_shadow_cloud_raw = zero.copy()
+        self.gp_shadow_hist_raw = zero.copy()
+        self.gp_shadow_combined_paper_raw = zero.copy()
+        self.gp_shadow_var_local = zero.copy()
+        self.gp_shadow_var_cloud = zero.copy()
+        self.gp_shadow_var_hist = zero.copy()
+        self.gp_shadow_weight_local = zero.copy()
+        self.gp_shadow_weight_cloud = zero.copy()
+        self.gp_shadow_weight_hist = zero.copy()
+        self.gp_shadow_precision_local = zero.copy()
+        self.gp_shadow_precision_cloud = zero.copy()
+        self.gp_shadow_precision_hist = zero.copy()
+        self.gp_shadow_paper_scaled = zero.copy()
+        self.gp_shadow_paper_clip_proxy_applied = zero.copy()
+        self.gp_shadow_paper_clip_proxy_active = zero_i.copy()
+
+    def _sanitize_shadow_variance(self, value, fallback_value):
+        fallback_value = max(float(fallback_value), float(self.gp_shadow_variance_eps))
+        try:
+            arr = np.asarray(value, dtype=float)
+            if arr.shape != (7,):
+                raise ValueError
+            invalid = (~np.isfinite(arr)) | (arr <= 0.0)
+        except (TypeError, ValueError):
+            arr = np.ones(7, dtype=float) * fallback_value
+            invalid = np.ones(7, dtype=bool)
+
+        if np.any(invalid):
+            if not self._gp_shadow_variance_warned:
+                self.get_logger().warn(
+                    "[GP Shadow] Non-finite or non-positive variance detected; using fallback variance."
+                )
+                self._gp_shadow_variance_warned = True
+            arr = arr.copy()
+            arr[invalid] = fallback_value
+
+        return np.maximum(arr, self.gp_shadow_variance_eps)
+
+    def _get_historical_shadow_candidate(self):
+        fallback_var = np.ones(7, dtype=float) * self.gp_shadow_hist_fallback_variance
+
+        # Phase 1 没有可用的 past prediction pool；online_update 不能当 historical。
+        if not self.gp_historical_shadow_enabled:
+            return np.zeros(7, dtype=float), fallback_var, 0
+
+        if self.gp_historical_source_mode == "none":
+            return np.zeros(7, dtype=float), fallback_var, 0
+
+        return np.zeros(7, dtype=float), fallback_var, 0
+
+    def _compute_inverse_variance_weights(
+        self,
+        var_local,
+        var_cloud,
+        var_hist,
+        historical_available
+    ):
+        v_l = self._sanitize_shadow_variance(
+            var_local, self.gp_shadow_hist_fallback_variance
+        )
+        v_c = self._sanitize_shadow_variance(
+            var_cloud, self.gp_shadow_hist_fallback_variance
+        )
+        v_h = self._sanitize_shadow_variance(
+            var_hist, self.gp_shadow_hist_fallback_variance
+        )
+
+        eps = float(self.gp_shadow_variance_eps)
+        prec_l = 1.0 / np.maximum(v_l, eps)
+        prec_c = 1.0 / np.maximum(v_c, eps)
+        if historical_available:
+            prec_h = 1.0 / np.maximum(v_h, eps)
+        else:
+            prec_h = np.zeros(7, dtype=float)
+
+        denom = prec_l + prec_c + prec_h
+        valid = np.isfinite(denom) & (denom > 0.0)
+        w_l = np.divide(prec_l, denom, out=np.ones(7, dtype=float) * 0.5, where=valid)
+        w_c = np.divide(prec_c, denom, out=np.ones(7, dtype=float) * 0.5, where=valid)
+        w_h = np.divide(prec_h, denom, out=np.zeros(7, dtype=float), where=valid)
+
+        if np.any(~valid):
+            if historical_available:
+                w_l[~valid] = 1.0 / 3.0
+                w_c[~valid] = 1.0 / 3.0
+                w_h[~valid] = 1.0 / 3.0
+            else:
+                w_l[~valid] = 0.5
+                w_c[~valid] = 0.5
+                w_h[~valid] = 0.0
+
+        return w_l, w_c, w_h, prec_l, prec_c, prec_h, v_l, v_c, v_h
+
+    def _compute_paper_tri_temporal_shadow_fusion(
+        self,
+        y_hat_local,
+        var_local,
+        y_hat_cloud,
+        var_cloud,
+        y_hat_historical_shadow,
+        var_historical_shadow,
+        historical_available
+    ):
+        y_l = self._as_finite_7d(y_hat_local, 0.0)
+        y_c = self._as_finite_7d(y_hat_cloud, 0.0)
+        y_h = self._as_finite_7d(y_hat_historical_shadow, 0.0)
+
+        (
+            w_l,
+            w_c,
+            w_h,
+            prec_l,
+            prec_c,
+            prec_h,
+            v_l,
+            v_c,
+            v_h,
+        ) = self._compute_inverse_variance_weights(
+            var_local, var_cloud, var_historical_shadow, historical_available
+        )
+
+        y_fuse = w_l * y_l + w_c * y_c + w_h * y_h
+        y_fuse = self._as_finite_7d(y_fuse, 0.0)
+
+        return {
+            "y_local": y_l,
+            "y_cloud": y_c,
+            "y_hist": y_h,
+            "y_fuse": y_fuse,
+            "var_local": v_l,
+            "var_cloud": v_c,
+            "var_hist": v_h,
+            "weight_local": w_l,
+            "weight_cloud": w_c,
+            "weight_hist": w_h,
+            "precision_local": prec_l,
+            "precision_cloud": prec_c,
+            "precision_hist": prec_h,
+        }
+
+    def _update_gp_shadow_logging_state(self):
+        self._reset_gp_shadow_state()
+
+        if (
+            not self.gp_shadow_paper_fusion_logging_enabled
+            or not self.gp_prediction_enabled
+        ):
+            return
+
+        y_hist, var_hist, historical_available = self._get_historical_shadow_candidate()
+        shadow = self._compute_paper_tri_temporal_shadow_fusion(
+            self.y_hat_local,
+            self.var_local,
+            self.y_hat_cloud,
+            self.var_cloud,
+            y_hist,
+            var_hist,
+            historical_available,
+        )
+
+        self.gp_shadow_historical_available = int(historical_available)
+        self.gp_shadow_local_raw = shadow["y_local"]
+        self.gp_shadow_cloud_raw = shadow["y_cloud"]
+        self.gp_shadow_hist_raw = shadow["y_hist"]
+        self.gp_shadow_combined_paper_raw = shadow["y_fuse"]
+        self.gp_shadow_var_local = shadow["var_local"]
+        self.gp_shadow_var_cloud = shadow["var_cloud"]
+        self.gp_shadow_var_hist = shadow["var_hist"]
+        self.gp_shadow_weight_local = shadow["weight_local"]
+        self.gp_shadow_weight_cloud = shadow["weight_cloud"]
+        self.gp_shadow_weight_hist = shadow["weight_hist"]
+        self.gp_shadow_precision_local = shadow["precision_local"]
+        self.gp_shadow_precision_cloud = shadow["precision_cloud"]
+        self.gp_shadow_precision_hist = shadow["precision_hist"]
+        self.gp_shadow_paper_scaled = (
+            self.gp_compensation_scale * self.gp_shadow_combined_paper_raw
+        )
+        self.gp_shadow_paper_clip_proxy_applied = np.clip(
+            self.gp_shadow_paper_scaled,
+            -self.gp_compensation_clip_nm,
+            self.gp_compensation_clip_nm,
+        )
+        self.gp_shadow_paper_clip_proxy_active = (
+            np.abs(
+                self.gp_shadow_paper_scaled
+                - self.gp_shadow_paper_clip_proxy_applied
+            ) > 1e-12
+        ).astype(int)
+
     def _apply_gp_compensation(self, tau):
         # 默认不改变最终 tau，只有显式开启 gp_compensation_enabled 才进入 torque command。
         if not self.gp_prediction_enabled or not self.gp_compensation_enabled:
@@ -1935,6 +2222,23 @@ class CartesianImpedanceController(Node):
                 self.gp_scaled_history,
                 self.gp_applied_history,
                 self.gp_clip_active_history,
+                self.gp_shadow_historical_available_history,
+                self.gp_shadow_local_raw_history,
+                self.gp_shadow_cloud_raw_history,
+                self.gp_shadow_hist_raw_history,
+                self.gp_shadow_combined_paper_raw_history,
+                self.gp_shadow_var_local_history,
+                self.gp_shadow_var_cloud_history,
+                self.gp_shadow_var_hist_history,
+                self.gp_shadow_weight_local_history,
+                self.gp_shadow_weight_cloud_history,
+                self.gp_shadow_weight_hist_history,
+                self.gp_shadow_precision_local_history,
+                self.gp_shadow_precision_cloud_history,
+                self.gp_shadow_precision_hist_history,
+                self.gp_shadow_paper_scaled_history,
+                self.gp_shadow_paper_clip_proxy_applied_history,
+                self.gp_shadow_paper_clip_proxy_active_history,
                 self.pred_time_history,
                 self.q_pred_history,
                 self.dq_pred_history,
@@ -1987,6 +2291,31 @@ class CartesianImpedanceController(Node):
                 header.extend([f'gp_scaled_{i+1}' for i in range(7)])
                 header.extend([f'gp_applied_{i+1}' for i in range(7)])
                 header.extend([f'gp_clip_active_{i+1}' for i in range(7)])
+                header.extend([
+                    'gp_shadow_paper_fusion_logging_enabled',
+                    'gp_historical_shadow_enabled',
+                    'gp_historical_source_mode_code',
+                    'gp_shadow_paper_formula_available',
+                    'gp_shadow_historical_available',
+                    'gp_shadow_variance_eps',
+                    'gp_shadow_hist_fallback_variance',
+                ])
+                header.extend([f'gp_shadow_local_raw_{i+1}' for i in range(7)])
+                header.extend([f'gp_shadow_cloud_raw_{i+1}' for i in range(7)])
+                header.extend([f'gp_shadow_hist_raw_{i+1}' for i in range(7)])
+                header.extend([f'gp_shadow_combined_paper_raw_{i+1}' for i in range(7)])
+                header.extend([f'gp_shadow_var_local_{i+1}' for i in range(7)])
+                header.extend([f'gp_shadow_var_cloud_{i+1}' for i in range(7)])
+                header.extend([f'gp_shadow_var_hist_{i+1}' for i in range(7)])
+                header.extend([f'gp_shadow_weight_local_{i+1}' for i in range(7)])
+                header.extend([f'gp_shadow_weight_cloud_{i+1}' for i in range(7)])
+                header.extend([f'gp_shadow_weight_hist_{i+1}' for i in range(7)])
+                header.extend([f'gp_shadow_precision_local_{i+1}' for i in range(7)])
+                header.extend([f'gp_shadow_precision_cloud_{i+1}' for i in range(7)])
+                header.extend([f'gp_shadow_precision_hist_{i+1}' for i in range(7)])
+                header.extend([f'gp_shadow_paper_scaled_{i+1}' for i in range(7)])
+                header.extend([f'gp_shadow_paper_clip_proxy_applied_{i+1}' for i in range(7)])
+                header.extend([f'gp_shadow_paper_clip_proxy_active_{i+1}' for i in range(7)])
                 writer.writerow(header)
 
                 for i in range(min_len):
@@ -2118,6 +2447,105 @@ class CartesianImpedanceController(Node):
 
                     if i < len(self.gp_clip_active_history):
                         row.extend([int(v) for v in self.gp_clip_active_history[i]])
+                    else:
+                        row.extend([0] * 7)
+
+                    if i < len(self.gp_shadow_historical_available_history):
+                        historical_available = int(
+                            self.gp_shadow_historical_available_history[i]
+                        )
+                    else:
+                        historical_available = int(self.gp_shadow_historical_available)
+
+                    row.extend([
+                        int(bool(self.gp_shadow_paper_fusion_logging_enabled)),
+                        int(bool(self.gp_historical_shadow_enabled)),
+                        int(self.gp_historical_source_mode_code),
+                        int(bool(self.gp_shadow_paper_formula_available)),
+                        historical_available,
+                        self.gp_shadow_variance_eps,
+                        self.gp_shadow_hist_fallback_variance,
+                    ])
+
+                    if i < len(self.gp_shadow_local_raw_history):
+                        row.extend(self.gp_shadow_local_raw_history[i])
+                    else:
+                        row.extend([0.0] * 7)
+
+                    if i < len(self.gp_shadow_cloud_raw_history):
+                        row.extend(self.gp_shadow_cloud_raw_history[i])
+                    else:
+                        row.extend([0.0] * 7)
+
+                    if i < len(self.gp_shadow_hist_raw_history):
+                        row.extend(self.gp_shadow_hist_raw_history[i])
+                    else:
+                        row.extend([0.0] * 7)
+
+                    if i < len(self.gp_shadow_combined_paper_raw_history):
+                        row.extend(self.gp_shadow_combined_paper_raw_history[i])
+                    else:
+                        row.extend([0.0] * 7)
+
+                    if i < len(self.gp_shadow_var_local_history):
+                        row.extend(self.gp_shadow_var_local_history[i])
+                    else:
+                        row.extend([0.0] * 7)
+
+                    if i < len(self.gp_shadow_var_cloud_history):
+                        row.extend(self.gp_shadow_var_cloud_history[i])
+                    else:
+                        row.extend([0.0] * 7)
+
+                    if i < len(self.gp_shadow_var_hist_history):
+                        row.extend(self.gp_shadow_var_hist_history[i])
+                    else:
+                        row.extend([0.0] * 7)
+
+                    if i < len(self.gp_shadow_weight_local_history):
+                        row.extend(self.gp_shadow_weight_local_history[i])
+                    else:
+                        row.extend([0.0] * 7)
+
+                    if i < len(self.gp_shadow_weight_cloud_history):
+                        row.extend(self.gp_shadow_weight_cloud_history[i])
+                    else:
+                        row.extend([0.0] * 7)
+
+                    if i < len(self.gp_shadow_weight_hist_history):
+                        row.extend(self.gp_shadow_weight_hist_history[i])
+                    else:
+                        row.extend([0.0] * 7)
+
+                    if i < len(self.gp_shadow_precision_local_history):
+                        row.extend(self.gp_shadow_precision_local_history[i])
+                    else:
+                        row.extend([0.0] * 7)
+
+                    if i < len(self.gp_shadow_precision_cloud_history):
+                        row.extend(self.gp_shadow_precision_cloud_history[i])
+                    else:
+                        row.extend([0.0] * 7)
+
+                    if i < len(self.gp_shadow_precision_hist_history):
+                        row.extend(self.gp_shadow_precision_hist_history[i])
+                    else:
+                        row.extend([0.0] * 7)
+
+                    if i < len(self.gp_shadow_paper_scaled_history):
+                        row.extend(self.gp_shadow_paper_scaled_history[i])
+                    else:
+                        row.extend([0.0] * 7)
+
+                    if i < len(self.gp_shadow_paper_clip_proxy_applied_history):
+                        row.extend(self.gp_shadow_paper_clip_proxy_applied_history[i])
+                    else:
+                        row.extend([0.0] * 7)
+
+                    if i < len(self.gp_shadow_paper_clip_proxy_active_history):
+                        row.extend([
+                            int(v) for v in self.gp_shadow_paper_clip_proxy_active_history[i]
+                        ])
                     else:
                         row.extend([0] * 7)
 
