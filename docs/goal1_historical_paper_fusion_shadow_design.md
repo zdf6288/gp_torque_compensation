@@ -58,3 +58,11 @@ CSV 中的 `gp_shadow_paper_scaled_*`、`gp_shadow_paper_clip_proxy_applied_*` �
 `gp_compensation_source:=combined` 仍保持 Phase 0 的 local/cloud variance fusion torque behavior。paper/historical fusion 只记录 shadow columns，不进入真实 torque path。
 
 在 offline/fake/sanity review 之前，不应将 paper/historical fusion 接入真实机器人 torque。
+
+## Explicit Safety Wording
+
+Current implementation is shadow/logging-only. `historical` and `paper_tri_temporal` fusion must not enter `tau_final`, and `gp_shadow_paper_clip_proxy_applied_*` is only a hypothetical clip proxy.
+
+For intended experiments, the safety clip bound remains `gp_compensation_clip_nm=0.5`. No no-clip mode should be introduced, and no clip increase should be used for historical/paper fusion validation.
+
+No real-robot run should be performed before offline/fake/sanity validation. `online_update` is not treated as historical.
