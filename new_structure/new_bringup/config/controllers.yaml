@@ -19,4 +19,7 @@ cpp_relayer:
   ros__parameters:
     arm_id: panda
     command_timeout_sec: 0.2
-    require_fresh_command_on_activate: true
+    # 真机启动时 Python controller 可能尚未发布第一条 /effort_command。
+    # false 允许 cpp_relayer 激活后使用 zero fallback 等待 fresh command，避免 activation deadlock。
+    # command_timeout_sec=0.2 仍保留 stale command zeroing；这里不启用 GP/historical active compensation。
+    require_fresh_command_on_activate: false
