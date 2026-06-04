@@ -2,6 +2,7 @@
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
@@ -15,6 +16,7 @@ def generate_launch_description():
     use_fake_hardware_parameter_name = 'use_fake_hardware'
     fake_sensor_commands_parameter_name = 'fake_sensor_commands'
     use_rviz_parameter_name = 'use_rviz'
+    spawn_gp_server_parameter_name = 'spawn_gp_server'
     reference_mode_parameter_name = 'reference_mode'
     joint_space_command_topic_parameter_name = 'joint_space_command_topic'
     # Stage 1: frozen GP / compensation experiment 参数，默认值保持安全。
@@ -60,6 +62,7 @@ def generate_launch_description():
     use_fake_hardware = LaunchConfiguration(use_fake_hardware_parameter_name)
     fake_sensor_commands = LaunchConfiguration(fake_sensor_commands_parameter_name)
     use_rviz = LaunchConfiguration(use_rviz_parameter_name)
+    spawn_gp_server = LaunchConfiguration(spawn_gp_server_parameter_name)
     reference_mode = LaunchConfiguration(reference_mode_parameter_name)
     joint_space_command_topic = LaunchConfiguration(joint_space_command_topic_parameter_name)
     gp_prediction_enabled = LaunchConfiguration(gp_prediction_enabled_parameter_name)
@@ -112,6 +115,13 @@ def generate_launch_description():
             use_rviz_parameter_name,
             default_value='false',
             description='Visualize the robot in Rviz'),
+        DeclareLaunchArgument(
+            spawn_gp_server_parameter_name,
+            default_value='false',
+            description=(
+                'Start standalone gp_server only when explicitly requested; '
+                'default false for GOAL1 real shadow validation.'
+            )),
         DeclareLaunchArgument(
             use_fake_hardware_parameter_name,
             default_value='false',
@@ -282,6 +292,7 @@ def generate_launch_description():
             executable='gp_server',          # 和 setup.py 里 entry_points 名字一致
             name='gp_server',
             output='screen',
+            condition=IfCondition(spawn_gp_server),
         ),
 
         Node(
