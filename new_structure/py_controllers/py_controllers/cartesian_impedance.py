@@ -304,6 +304,10 @@ class CartesianImpedanceController(Node):
         self.gp_shadow_paper_scaled_history = []
         self.gp_shadow_paper_clip_proxy_applied_history = []
         self.gp_shadow_paper_clip_proxy_active_history = []
+        self.gp_shadow_hist_pool_size_history = []
+        self.gp_shadow_hist_k_used_history = []
+        self.gp_shadow_hist_nearest_distance_history = []
+        self.gp_shadow_hist_mean_distance_topk_history = []
         # set signal handler
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
@@ -340,6 +344,12 @@ class CartesianImpedanceController(Node):
         self.declare_parameter("gp_historical_source_mode", "none")
         self.declare_parameter("gp_shadow_variance_eps", 1e-9)
         self.declare_parameter("gp_shadow_hist_fallback_variance", 1e6)
+        self.declare_parameter("gp_historical_shadow_max_points", 2000)
+        self.declare_parameter("gp_historical_shadow_min_points", 10)
+        self.declare_parameter("gp_historical_shadow_k", 5)
+        self.declare_parameter("gp_historical_shadow_max_distance", 1e6)
+        self.declare_parameter("gp_historical_shadow_variance_floor", 1e-8)
+        self.declare_parameter("gp_historical_shadow_distance_eps", 1e-9)
 
         self.gp_prediction_enabled = self._get_bool_parameter("gp_prediction_enabled")
         self.gp_online_update_enabled = self._get_bool_parameter("gp_online_update_enabled")
@@ -361,6 +371,24 @@ class CartesianImpedanceController(Node):
         self.gp_shadow_hist_fallback_variance = self._get_positive_float_parameter(
             "gp_shadow_hist_fallback_variance", 1e6
         )
+        self.gp_historical_shadow_max_points = self._get_bounded_int_parameter(
+            "gp_historical_shadow_max_points", 2000, 1, 100000
+        )
+        self.gp_historical_shadow_min_points = self._get_bounded_int_parameter(
+            "gp_historical_shadow_min_points", 10, 1, 100000
+        )
+        self.gp_historical_shadow_k = self._get_bounded_int_parameter(
+            "gp_historical_shadow_k", 5, 1, 100000
+        )
+        self.gp_historical_shadow_max_distance = self._get_positive_float_parameter(
+            "gp_historical_shadow_max_distance", 1e6
+        )
+        self.gp_historical_shadow_variance_floor = self._get_positive_float_parameter(
+            "gp_historical_shadow_variance_floor", 1e-8
+        )
+        self.gp_historical_shadow_distance_eps = self._get_positive_float_parameter(
+            "gp_historical_shadow_distance_eps", 1e-9
+        )
         self._gp_compensation_logged = False
 
         # clip 只接受非负幅值；负数配置按绝对值处理，避免反向区间。
@@ -379,15 +407,38 @@ class CartesianImpedanceController(Node):
             )
             self.gp_compensation_source = "local"
 
-        # Phase 1 shadow logging 暂不接入 historical retrieval；不能用 online_update 冒充 historical。
-        valid_gp_historical_source_modes = ("none",)
+        # historical 只允许 shadow source；不能用 online_update 冒充 historical。
+        valid_gp_historical_source_modes = ("none", "local_prediction_pool")
         if self.gp_historical_source_mode not in valid_gp_historical_source_modes:
             self.get_logger().warn(
                 f"[GP Shadow] Invalid gp_historical_source_mode='{self.gp_historical_source_mode}', "
                 "falling back to 'none'"
             )
             self.gp_historical_source_mode = "none"
-        self.gp_historical_source_mode_code = 0
+        self.gp_historical_source_mode_code = (
+            1 if self.gp_historical_source_mode == "local_prediction_pool" else 0
+        )
+
+        if self.gp_historical_shadow_min_points > self.gp_historical_shadow_max_points:
+            self.get_logger().warn(
+                "[GP Shadow] gp_historical_shadow_min_points exceeds max_points; "
+                "using max_points"
+            )
+            self.gp_historical_shadow_min_points = self.gp_historical_shadow_max_points
+        if self.gp_historical_shadow_k > self.gp_historical_shadow_max_points:
+            self.get_logger().warn(
+                "[GP Shadow] gp_historical_shadow_k exceeds max_points; using max_points"
+            )
+            self.gp_historical_shadow_k = self.gp_historical_shadow_max_points
+
+        # Runtime historical shadow pool: 保存 past local GP prediction，不保存 residual。
+        self.gp_hist_x_shadow = deque(maxlen=self.gp_historical_shadow_max_points)
+        self.gp_hist_mu_shadow = deque(maxlen=self.gp_historical_shadow_max_points)
+        self.gp_hist_var_shadow = deque(maxlen=self.gp_historical_shadow_max_points)
+        self.gp_hist_t_shadow = deque(maxlen=self.gp_historical_shadow_max_points)
+        self._gp_local_feature_shadow = np.zeros(14, dtype=np.float32)
+        self._gp_local_prediction_sequence_shadow = 0
+        self._gp_hist_last_appended_sequence_shadow = 0
 
         if not self.gp_prediction_enabled and self.gp_compensation_enabled:
             self.get_logger().warn(
@@ -419,6 +470,18 @@ class CartesianImpedanceController(Node):
             f"gp_historical_source_mode='{self.gp_historical_source_mode}', "
             f"gp_shadow_variance_eps={self.gp_shadow_variance_eps}, "
             f"gp_shadow_hist_fallback_variance={self.gp_shadow_hist_fallback_variance}"
+        )
+        self.get_logger().info(
+            "[GP Shadow] Historical source controls: "
+            f"enabled={self.gp_historical_shadow_enabled}, "
+            f"mode='{self.gp_historical_source_mode}', "
+            f"max_points={self.gp_historical_shadow_max_points}, "
+            f"min_points={self.gp_historical_shadow_min_points}, "
+            f"k={self.gp_historical_shadow_k}, "
+            f"max_distance={self.gp_historical_shadow_max_distance}, "
+            f"variance_floor={self.gp_historical_shadow_variance_floor}, "
+            f"distance_eps={self.gp_historical_shadow_distance_eps}; "
+            "shadow-only and does not enter tau_final"
         )
 
         self._reset_gp_shadow_state()
@@ -632,6 +695,28 @@ class CartesianImpedanceController(Node):
             )
             return float(default_value)
 
+    def _get_bounded_int_parameter(self, name, default_value, min_value, max_value):
+        try:
+            raw_value = self.get_parameter(name).value
+            if isinstance(raw_value, bool):
+                raise ValueError
+            numeric_value = float(raw_value)
+            value = int(numeric_value)
+            if (
+                not np.isfinite(numeric_value)
+                or numeric_value != value
+                or value < min_value
+                or value > max_value
+            ):
+                raise ValueError
+            return value
+        except (TypeError, ValueError, OverflowError):
+            self.get_logger().warn(
+                f"Parameter '{name}' must be an integer in [{min_value}, {max_value}]; "
+                f"using default {default_value}"
+            )
+            return int(default_value)
+
     def dls_dyn_pinv(self, J, M, lam):
         """
         Dynamically consistent DLS pseudoinverse:
@@ -790,6 +875,15 @@ class CartesianImpedanceController(Node):
             )
             self.y_hat_local = y_hat_local
             self.var_local = var_local
+            if (
+                self.gp_shadow_paper_fusion_logging_enabled
+                and self.gp_historical_shadow_enabled
+                and self.gp_historical_source_mode == "local_prediction_pool"
+            ):
+                self._gp_local_feature_shadow = self._build_gp_shadow_feature(
+                    q, self.dq_des_joint
+                )
+                self._gp_local_prediction_sequence_shadow += 1
 
             y_hat_cloud, var_cloud = self._gp_predict_and_update(
                 q,
@@ -810,7 +904,7 @@ class CartesianImpedanceController(Node):
             w_l = prec_l / (prec_l + prec_c)
             self.y_hat_combined = w_l * self.y_hat_local + (1.0 - w_l) * self.y_hat_cloud
 
-        self._update_gp_shadow_logging_state()
+        self._update_gp_shadow_logging_state(q, self.dq_des_joint)
         self._tau_nominal = tau.copy()
         tau = self._apply_gp_compensation(tau)
         self._tau_final = tau.copy()
@@ -1228,6 +1322,15 @@ class CartesianImpedanceController(Node):
                 )
                 self.y_hat_local = y_hat_local
                 self.var_local = var_local
+                if (
+                    self.gp_shadow_paper_fusion_logging_enabled
+                    and self.gp_historical_shadow_enabled
+                    and self.gp_historical_source_mode == "local_prediction_pool"
+                ):
+                    self._gp_local_feature_shadow = self._build_gp_shadow_feature(
+                        self.q, dq
+                    )
+                    self._gp_local_prediction_sequence_shadow += 1
 
                 # Td = float(self.future_delay)
                 # delay_steps = max(1, int(self.delay_steps))
@@ -1332,7 +1435,7 @@ class CartesianImpedanceController(Node):
 
             # tau = tau - self.y_hat_local
             # 默认 compensation 关闭时返回原始 tau；开启后才按原注释方向补偿。
-            self._update_gp_shadow_logging_state()
+            self._update_gp_shadow_logging_state(self.q, dq)
             self._tau_nominal = tau.copy()
             tau = self._apply_gp_compensation(tau)
             self._tau_final = tau.copy()
@@ -1374,6 +1477,18 @@ class CartesianImpedanceController(Node):
                 )
                 self.gp_shadow_paper_clip_proxy_active_history.append(
                     self.gp_shadow_paper_clip_proxy_active.tolist()
+                )
+                self.gp_shadow_hist_pool_size_history.append(
+                    int(self.gp_shadow_hist_pool_size)
+                )
+                self.gp_shadow_hist_k_used_history.append(
+                    int(self.gp_shadow_hist_k_used)
+                )
+                self.gp_shadow_hist_nearest_distance_history.append(
+                    float(self.gp_shadow_hist_nearest_distance)
+                )
+                self.gp_shadow_hist_mean_distance_topk_history.append(
+                    float(self.gp_shadow_hist_mean_distance_topk)
                 )
                 self.time_history.append(t_elapsed)
                 self.x_history.append(x.tolist())
@@ -1837,6 +1952,10 @@ class CartesianImpedanceController(Node):
 
         return best_state, best_dist
 
+    def _build_gp_shadow_feature(self, q, dq):
+        """Build the same 14D [q, dq] feature used by the active GP predictor."""
+        return np.concatenate([q, dq]).astype(np.float32)
+
     def _as_finite_7d(self, value, fill_value=0.0):
         try:
             arr = np.asarray(value, dtype=float)
@@ -1866,6 +1985,10 @@ class CartesianImpedanceController(Node):
         self.gp_shadow_paper_scaled = zero.copy()
         self.gp_shadow_paper_clip_proxy_applied = zero.copy()
         self.gp_shadow_paper_clip_proxy_active = zero_i.copy()
+        self.gp_shadow_hist_pool_size = 0
+        self.gp_shadow_hist_k_used = 0
+        self.gp_shadow_hist_nearest_distance = 0.0
+        self.gp_shadow_hist_mean_distance_topk = 0.0
 
     def _sanitize_shadow_variance(self, value, fallback_value):
         fallback_value = max(float(fallback_value), float(self.gp_shadow_variance_eps))
@@ -1889,17 +2012,147 @@ class CartesianImpedanceController(Node):
 
         return np.maximum(arr, self.gp_shadow_variance_eps)
 
-    def _get_historical_shadow_candidate(self):
-        fallback_var = np.ones(7, dtype=float) * self.gp_shadow_hist_fallback_variance
+    def _new_historical_shadow_diagnostics(self):
+        return {
+            "pool_size": len(self.gp_hist_x_shadow),
+            "k_used": 0,
+            "nearest_distance": 0.0,
+            "mean_distance_topk": 0.0,
+        }
 
-        # Phase 1 没有可用的 past prediction pool；online_update 不能当 historical。
+    def _append_historical_shadow_candidate(self, x, y_hat, var, t):
+        if (
+            not self.gp_shadow_paper_fusion_logging_enabled
+            or not self.gp_historical_shadow_enabled
+            or self.gp_historical_source_mode != "local_prediction_pool"
+            or not self.gp_prediction_enabled
+            or not self.gp_ready
+            or not self.use_gp
+        ):
+            return
+
+        try:
+            sequence = int(t)
+            x_arr = np.asarray(x, dtype=np.float32)
+            mu_arr = np.asarray(y_hat, dtype=float)
+            var_arr = np.asarray(var, dtype=float)
+        except (TypeError, ValueError, OverflowError):
+            return
+
+        if sequence <= self._gp_hist_last_appended_sequence_shadow:
+            return
+        if x_arr.shape != (14,) or mu_arr.shape != (7,) or var_arr.shape != (7,):
+            return
+        if (
+            not np.all(np.isfinite(x_arr))
+            or not np.all(np.isfinite(mu_arr))
+            or not np.all(np.isfinite(var_arr))
+            or np.any(var_arr <= 0.0)
+        ):
+            return
+
+        self.gp_hist_x_shadow.append(x_arr.copy())
+        self.gp_hist_mu_shadow.append(mu_arr.copy())
+        self.gp_hist_var_shadow.append(var_arr.copy())
+        self.gp_hist_t_shadow.append(sequence)
+        self._gp_hist_last_appended_sequence_shadow = sequence
+
+    def _query_historical_shadow_pool(self, x_query):
+        fallback_var = np.ones(7, dtype=float) * self.gp_shadow_hist_fallback_variance
+        diagnostics = self._new_historical_shadow_diagnostics()
+        pool_size = diagnostics["pool_size"]
+
+        try:
+            x_arr = np.asarray(x_query, dtype=np.float32)
+        except (TypeError, ValueError):
+            return np.zeros(7, dtype=float), fallback_var, 0, diagnostics
+
+        if x_arr.shape != (14,) or not np.all(np.isfinite(x_arr)) or pool_size == 0:
+            return np.zeros(7, dtype=float), fallback_var, 0, diagnostics
+        if (
+            len(self.gp_hist_mu_shadow) != pool_size
+            or len(self.gp_hist_var_shadow) != pool_size
+            or len(self.gp_hist_t_shadow) != pool_size
+        ):
+            return np.zeros(7, dtype=float), fallback_var, 0, diagnostics
+
+        try:
+            hist_x = np.stack(self.gp_hist_x_shadow, axis=0).astype(np.float32)
+            hist_mu = np.stack(self.gp_hist_mu_shadow, axis=0).astype(float)
+            hist_var = np.stack(self.gp_hist_var_shadow, axis=0).astype(float)
+        except (TypeError, ValueError):
+            return np.zeros(7, dtype=float), fallback_var, 0, diagnostics
+
+        if (
+            hist_x.shape != (pool_size, 14)
+            or hist_mu.shape != (pool_size, 7)
+            or hist_var.shape != (pool_size, 7)
+            or not np.all(np.isfinite(hist_x))
+            or not np.all(np.isfinite(hist_mu))
+            or not np.all(np.isfinite(hist_var))
+        ):
+            return np.zeros(7, dtype=float), fallback_var, 0, diagnostics
+
+        distances = np.linalg.norm(hist_x - x_arr.reshape(1, -1), axis=1)
+        if not np.all(np.isfinite(distances)):
+            return np.zeros(7, dtype=float), fallback_var, 0, diagnostics
+
+        k_candidate = min(self.gp_historical_shadow_k, pool_size)
+        nearest_indices = np.argsort(distances)[:k_candidate]
+        nearest_distances = distances[nearest_indices]
+        diagnostics["nearest_distance"] = float(nearest_distances[0])
+        diagnostics["mean_distance_topk"] = float(np.mean(nearest_distances))
+
+        if (
+            pool_size < self.gp_historical_shadow_min_points
+            or diagnostics["nearest_distance"] > self.gp_historical_shadow_max_distance
+        ):
+            return np.zeros(7, dtype=float), fallback_var, 0, diagnostics
+
+        selected_mu = hist_mu[nearest_indices]
+        selected_var = np.maximum(
+            hist_var[nearest_indices],
+            self.gp_historical_shadow_variance_floor,
+        )
+        distance_weight = 1.0 / np.maximum(
+            nearest_distances,
+            self.gp_historical_shadow_distance_eps,
+        )
+        precision_distance_weight = distance_weight[:, None] / selected_var
+        weight_sum = np.sum(precision_distance_weight, axis=0)
+        if not np.all(np.isfinite(weight_sum)) or np.any(weight_sum <= 0.0):
+            return np.zeros(7, dtype=float), fallback_var, 0, diagnostics
+
+        normalized_weight = precision_distance_weight / weight_sum
+        y_hat_hist = np.sum(normalized_weight * selected_mu, axis=0)
+        var_hist = np.sum(normalized_weight * selected_var, axis=0)
+        if (
+            y_hat_hist.shape != (7,)
+            or var_hist.shape != (7,)
+            or not np.all(np.isfinite(y_hat_hist))
+            or not np.all(np.isfinite(var_hist))
+        ):
+            return np.zeros(7, dtype=float), fallback_var, 0, diagnostics
+
+        diagnostics["k_used"] = k_candidate
+        return y_hat_hist, np.maximum(
+            var_hist, self.gp_historical_shadow_variance_floor
+        ), 1, diagnostics
+
+    def _get_historical_shadow_candidate(self, x_query):
+        fallback_var = np.ones(7, dtype=float) * self.gp_shadow_hist_fallback_variance
+        diagnostics = self._new_historical_shadow_diagnostics()
+
         if not self.gp_historical_shadow_enabled:
-            return np.zeros(7, dtype=float), fallback_var, 0
+            return np.zeros(7, dtype=float), fallback_var, 0, diagnostics
 
         if self.gp_historical_source_mode == "none":
-            return np.zeros(7, dtype=float), fallback_var, 0
+            return np.zeros(7, dtype=float), fallback_var, 0, diagnostics
 
-        return np.zeros(7, dtype=float), fallback_var, 0
+        if self.gp_historical_source_mode == "local_prediction_pool":
+            return self._query_historical_shadow_pool(x_query)
+
+        return np.zeros(7, dtype=float), fallback_var, 0, diagnostics
 
     def _compute_inverse_variance_weights(
         self,
@@ -1991,7 +2244,7 @@ class CartesianImpedanceController(Node):
             "precision_hist": prec_h,
         }
 
-    def _update_gp_shadow_logging_state(self):
+    def _update_gp_shadow_logging_state(self, q, dq):
         self._reset_gp_shadow_state()
 
         if (
@@ -2000,7 +2253,18 @@ class CartesianImpedanceController(Node):
         ):
             return
 
-        y_hist, var_hist, historical_available = self._get_historical_shadow_candidate()
+        x_query = None
+        if (
+            self.gp_historical_shadow_enabled
+            and self.gp_historical_source_mode == "local_prediction_pool"
+        ):
+            x_query = self._build_gp_shadow_feature(q, dq)
+        (
+            y_hist,
+            var_hist,
+            historical_available,
+            diagnostics,
+        ) = self._get_historical_shadow_candidate(x_query)
         shadow = self._compute_paper_tri_temporal_shadow_fusion(
             self.y_hat_local,
             self.var_local,
@@ -2039,6 +2303,22 @@ class CartesianImpedanceController(Node):
                 - self.gp_shadow_paper_clip_proxy_applied
             ) > 1e-12
         ).astype(int)
+        self.gp_shadow_hist_pool_size = int(diagnostics["pool_size"])
+        self.gp_shadow_hist_k_used = int(diagnostics["k_used"])
+        self.gp_shadow_hist_nearest_distance = float(
+            diagnostics["nearest_distance"]
+        )
+        self.gp_shadow_hist_mean_distance_topk = float(
+            diagnostics["mean_distance_topk"]
+        )
+
+        # 必须先 query 旧池，再 append 当前 local prediction，避免检索到当前样本自身。
+        self._append_historical_shadow_candidate(
+            self._gp_local_feature_shadow,
+            self.y_hat_local,
+            self.var_local,
+            self._gp_local_prediction_sequence_shadow,
+        )
 
     def _apply_gp_compensation(self, tau):
         # 默认不改变最终 tau，只有显式开启 gp_compensation_enabled 才进入 torque command。
@@ -2107,7 +2387,7 @@ class CartesianImpedanceController(Node):
         # x_full = np.concatenate([q, dq_des_joint, ddq_des_joint]).astype(np.float32)
 
         # 如果你训练使用的是 q + dq → 14 维，请改成：
-        x_full = np.concatenate([q, dq_des_joint]).astype(np.float32)
+        x_full = self._build_gp_shadow_feature(q, dq_des_joint)
 
         # ==================================================
         # 2) 每个关节都用同一 x_full 预测
@@ -2239,6 +2519,10 @@ class CartesianImpedanceController(Node):
                 self.gp_shadow_paper_scaled_history,
                 self.gp_shadow_paper_clip_proxy_applied_history,
                 self.gp_shadow_paper_clip_proxy_active_history,
+                self.gp_shadow_hist_pool_size_history,
+                self.gp_shadow_hist_k_used_history,
+                self.gp_shadow_hist_nearest_distance_history,
+                self.gp_shadow_hist_mean_distance_topk_history,
                 self.pred_time_history,
                 self.q_pred_history,
                 self.dq_pred_history,
@@ -2316,6 +2600,12 @@ class CartesianImpedanceController(Node):
                 header.extend([f'gp_shadow_paper_scaled_{i+1}' for i in range(7)])
                 header.extend([f'gp_shadow_paper_clip_proxy_applied_{i+1}' for i in range(7)])
                 header.extend([f'gp_shadow_paper_clip_proxy_active_{i+1}' for i in range(7)])
+                header.extend([
+                    'gp_shadow_hist_pool_size',
+                    'gp_shadow_hist_k_used',
+                    'gp_shadow_hist_nearest_distance',
+                    'gp_shadow_hist_mean_distance_topk',
+                ])
                 writer.writerow(header)
 
                 for i in range(min_len):
@@ -2548,6 +2838,41 @@ class CartesianImpedanceController(Node):
                         ])
                     else:
                         row.extend([0] * 7)
+
+                    if i < len(self.gp_shadow_hist_pool_size_history):
+                        hist_pool_size = int(self.gp_shadow_hist_pool_size_history[i])
+                    else:
+                        hist_pool_size = int(self.gp_shadow_hist_pool_size)
+
+                    if i < len(self.gp_shadow_hist_k_used_history):
+                        hist_k_used = int(self.gp_shadow_hist_k_used_history[i])
+                    else:
+                        hist_k_used = int(self.gp_shadow_hist_k_used)
+
+                    if i < len(self.gp_shadow_hist_nearest_distance_history):
+                        hist_nearest_distance = float(
+                            self.gp_shadow_hist_nearest_distance_history[i]
+                        )
+                    else:
+                        hist_nearest_distance = float(
+                            self.gp_shadow_hist_nearest_distance
+                        )
+
+                    if i < len(self.gp_shadow_hist_mean_distance_topk_history):
+                        hist_mean_distance_topk = float(
+                            self.gp_shadow_hist_mean_distance_topk_history[i]
+                        )
+                    else:
+                        hist_mean_distance_topk = float(
+                            self.gp_shadow_hist_mean_distance_topk
+                        )
+
+                    row.extend([
+                        hist_pool_size,
+                        hist_k_used,
+                        hist_nearest_distance,
+                        hist_mean_distance_topk,
+                    ])
 
                     if len(row) != len(header):
                         self.get_logger().warning(

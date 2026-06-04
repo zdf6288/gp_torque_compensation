@@ -81,6 +81,13 @@ OPTIONAL_PRECISION_PREFIXES = [
     "gp_shadow_precision_hist",
 ]
 
+OPTIONAL_HISTORICAL_DIAGNOSTIC_COLUMNS = [
+    "gp_shadow_hist_pool_size",
+    "gp_shadow_hist_k_used",
+    "gp_shadow_hist_nearest_distance",
+    "gp_shadow_hist_mean_distance_topk",
+]
+
 SUMMARY_FIELDS = [
     "csv_path",
     "run_name",
@@ -97,6 +104,7 @@ SUMMARY_FIELDS = [
     "missing_phase0_columns",
     "missing_phase1_columns",
     "missing_optional_precision_columns",
+    "missing_optional_historical_diagnostic_columns",
     "nonfinite_counts_by_column",
     "unique_gp_compensation_source_code",
     "unique_gp_compensation_enabled",
@@ -134,6 +142,15 @@ SUMMARY_FIELDS = [
     "max_abs_tau_vs_shadow_proxy_error",
     "shadow_proxy_equals_gp_applied_count",
     "shadow_proxy_equals_gp_applied_ratio",
+    "historical_diagnostics_numeric_ok",
+    "historical_available_row_count",
+    "historical_diagnostics_nonfinite_count",
+    "historical_diagnostics_negative_pool_size_count",
+    "historical_diagnostics_noninteger_pool_size_count",
+    "historical_diagnostics_negative_k_used_count",
+    "historical_diagnostics_noninteger_k_used_count",
+    "historical_diagnostics_negative_distance_count",
+    "historical_available_with_zero_k_count",
     "warnings",
     "failures",
     "notes",
@@ -217,6 +234,10 @@ def phase1_required_columns() -> list[str]:
 
 def optional_precision_columns() -> list[str]:
     return joint_columns(OPTIONAL_PRECISION_PREFIXES)
+
+
+def optional_historical_diagnostic_columns() -> list[str]:
+    return list(OPTIONAL_HISTORICAL_DIAGNOSTIC_COLUMNS)
 
 
 def find_csv_files(root: Path) -> list[InputCsv]:
@@ -390,13 +411,21 @@ def check_required_columns(columns: list[str]) -> dict[str, Any]:
     phase0_missing = [column for column in phase0_required_columns() if column not in column_set]
     phase1_missing = [column for column in phase1_required_columns() if column not in column_set]
     optional_missing = [column for column in optional_precision_columns() if column not in column_set]
+    historical_diagnostic_missing = [
+        column for column in optional_historical_diagnostic_columns() if column not in column_set
+    ]
     phase1_present_count = len(phase1_required_columns()) - len(phase1_missing)
     optional_present = [column for column in optional_precision_columns() if column in column_set]
+    historical_diagnostic_present = [
+        column for column in optional_historical_diagnostic_columns() if column in column_set
+    ]
     return {
         "phase0_missing": phase0_missing,
         "phase1_missing": phase1_missing,
         "optional_missing": optional_missing,
         "optional_present": optional_present,
+        "historical_diagnostic_missing": historical_diagnostic_missing,
+        "historical_diagnostic_present": historical_diagnostic_present,
         "phase0_schema_ok": not phase0_missing,
         "phase1_shadow_schema_ok": not phase1_missing,
         "phase1_present_count": phase1_present_count,
@@ -728,6 +757,85 @@ def check_phase1_shadow_relations(rows: list[dict[str, str]]) -> dict[str, Any]:
     return metrics
 
 
+def check_optional_historical_diagnostics(
+    rows: list[dict[str, str]],
+    present_columns: list[str],
+) -> dict[str, Any]:
+    present = set(present_columns)
+    metrics: dict[str, Any] = {
+        "historical_diagnostics_numeric_ok": True,
+        "historical_available_row_count": 0,
+        "historical_diagnostics_nonfinite_count": 0,
+        "historical_diagnostics_negative_pool_size_count": 0,
+        "historical_diagnostics_noninteger_pool_size_count": 0,
+        "historical_diagnostics_negative_k_used_count": 0,
+        "historical_diagnostics_noninteger_k_used_count": 0,
+        "historical_diagnostics_negative_distance_count": 0,
+        "historical_available_with_zero_k_count": 0,
+        "warnings": [],
+        "failures": [],
+    }
+
+    for row in rows:
+        historical_available = boolish_is_one(
+            parse_float(row.get("gp_shadow_historical_available"))
+        )
+        if historical_available:
+            metrics["historical_available_row_count"] += 1
+
+        pool_size = math.nan
+        if "gp_shadow_hist_pool_size" in present:
+            pool_size = parse_float(row.get("gp_shadow_hist_pool_size"))
+            if not finite(pool_size):
+                metrics["historical_diagnostics_nonfinite_count"] += 1
+            elif pool_size < 0.0:
+                metrics["historical_diagnostics_negative_pool_size_count"] += 1
+            elif abs(pool_size - round(pool_size)) > TOLERANCE:
+                metrics["historical_diagnostics_noninteger_pool_size_count"] += 1
+
+        k_used = math.nan
+        if "gp_shadow_hist_k_used" in present:
+            k_used = parse_float(row.get("gp_shadow_hist_k_used"))
+            if not finite(k_used):
+                metrics["historical_diagnostics_nonfinite_count"] += 1
+            elif k_used < 0.0:
+                metrics["historical_diagnostics_negative_k_used_count"] += 1
+            elif abs(k_used - round(k_used)) > TOLERANCE:
+                metrics["historical_diagnostics_noninteger_k_used_count"] += 1
+
+            if historical_available and finite(k_used) and k_used <= 0.0:
+                metrics["historical_available_with_zero_k_count"] += 1
+
+        for column in (
+            "gp_shadow_hist_nearest_distance",
+            "gp_shadow_hist_mean_distance_topk",
+        ):
+            if column not in present:
+                continue
+            value = parse_float(row.get(column))
+            if not finite(value):
+                metrics["historical_diagnostics_nonfinite_count"] += 1
+            elif value < 0.0:
+                metrics["historical_diagnostics_negative_distance_count"] += 1
+
+    failure_counts = [
+        "historical_diagnostics_nonfinite_count",
+        "historical_diagnostics_negative_pool_size_count",
+        "historical_diagnostics_noninteger_pool_size_count",
+        "historical_diagnostics_negative_k_used_count",
+        "historical_diagnostics_noninteger_k_used_count",
+        "historical_diagnostics_negative_distance_count",
+        "historical_available_with_zero_k_count",
+    ]
+    for key in failure_counts:
+        if metrics[key]:
+            metrics["failures"].append(f"{key}: {metrics[key]}")
+
+    if metrics["failures"]:
+        metrics["historical_diagnostics_numeric_ok"] = False
+    return metrics
+
+
 def base_summary(loaded: LoadedCsv) -> dict[str, Any]:
     return {
         "csv_path": loaded.input_csv.label,
@@ -752,6 +860,9 @@ def check_loaded_csv(loaded: LoadedCsv, strict: bool) -> dict[str, Any]:
             "missing_phase0_columns": column_checks["phase0_missing"],
             "missing_phase1_columns": column_checks["phase1_missing"],
             "missing_optional_precision_columns": column_checks["optional_missing"],
+            "missing_optional_historical_diagnostic_columns": column_checks[
+                "historical_diagnostic_missing"
+            ],
         }
     )
 
@@ -773,12 +884,24 @@ def check_loaded_csv(loaded: LoadedCsv, strict: bool) -> dict[str, Any]:
     if optional_present and column_checks["optional_missing"]:
         summary["warnings"].append("optional precision columns are partially present; present columns will be validated")
 
+    historical_diagnostic_present = column_checks["historical_diagnostic_present"]
+    if column_checks["historical_diagnostic_missing"]:
+        if historical_diagnostic_present:
+            summary["warnings"].append(
+                "optional historical diagnostic columns are partially present; present columns will be validated"
+            )
+        else:
+            summary["warnings"].append(
+                "missing optional historical diagnostic columns; compatible with pre-historical-source archive CSV"
+            )
+
     numeric_columns = []
     if column_checks["phase0_schema_ok"]:
         numeric_columns.extend(phase0_required_columns())
     if column_checks["phase1_shadow_schema_ok"]:
         numeric_columns.extend(phase1_required_columns())
     numeric_columns.extend(optional_present)
+    numeric_columns.extend(historical_diagnostic_present)
     finite_ok, nonfinite_counts = finite_check(loaded.rows, numeric_columns)
     summary["finite_ok"] = finite_ok
     summary["nonfinite_counts_by_column"] = nonfinite_counts
@@ -851,6 +974,46 @@ def check_loaded_csv(loaded: LoadedCsv, strict: bool) -> dict[str, Any]:
         summary["notes"].extend(phase1["notes"])
     else:
         summary["warnings"].append("Phase 1 shadow numeric checks skipped")
+
+    summary["historical_diagnostics_numeric_ok"] = False
+    if historical_diagnostic_present:
+        historical_diagnostics = check_optional_historical_diagnostics(
+            loaded.rows,
+            historical_diagnostic_present,
+        )
+        summary.update(
+            {
+                "historical_diagnostics_numeric_ok": historical_diagnostics[
+                    "historical_diagnostics_numeric_ok"
+                ],
+                "historical_available_row_count": historical_diagnostics[
+                    "historical_available_row_count"
+                ],
+                "historical_diagnostics_nonfinite_count": historical_diagnostics[
+                    "historical_diagnostics_nonfinite_count"
+                ],
+                "historical_diagnostics_negative_pool_size_count": historical_diagnostics[
+                    "historical_diagnostics_negative_pool_size_count"
+                ],
+                "historical_diagnostics_noninteger_pool_size_count": historical_diagnostics[
+                    "historical_diagnostics_noninteger_pool_size_count"
+                ],
+                "historical_diagnostics_negative_k_used_count": historical_diagnostics[
+                    "historical_diagnostics_negative_k_used_count"
+                ],
+                "historical_diagnostics_noninteger_k_used_count": historical_diagnostics[
+                    "historical_diagnostics_noninteger_k_used_count"
+                ],
+                "historical_diagnostics_negative_distance_count": historical_diagnostics[
+                    "historical_diagnostics_negative_distance_count"
+                ],
+                "historical_available_with_zero_k_count": historical_diagnostics[
+                    "historical_available_with_zero_k_count"
+                ],
+            }
+        )
+        summary["warnings"].extend(historical_diagnostics["warnings"])
+        summary["failures"].extend(historical_diagnostics["failures"])
 
     if summary["failures"]:
         summary["overall_status"] = "FAIL"
