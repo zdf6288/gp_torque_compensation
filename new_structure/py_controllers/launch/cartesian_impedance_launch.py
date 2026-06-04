@@ -23,6 +23,7 @@ def generate_launch_description():
     gp_compensation_source_parameter_name = 'gp_compensation_source'
     gp_compensation_scale_parameter_name = 'gp_compensation_scale'
     gp_compensation_clip_nm_parameter_name = 'gp_compensation_clip_nm'
+    delay_steps_parameter_name = 'delay_steps'
     goal1_orientation_command_enabled_parameter_name = 'goal1_orientation_command_enabled'
     goal1_orientation_max_abs_rad_parameter_name = 'goal1_orientation_max_abs_rad'
     goal1_q7_nullspace_enabled_parameter_name = 'goal1_q7_nullspace_enabled'
@@ -80,6 +81,7 @@ def generate_launch_description():
     gp_compensation_source = LaunchConfiguration(gp_compensation_source_parameter_name)
     gp_compensation_scale = LaunchConfiguration(gp_compensation_scale_parameter_name)
     gp_compensation_clip_nm = LaunchConfiguration(gp_compensation_clip_nm_parameter_name)
+    delay_steps = LaunchConfiguration(delay_steps_parameter_name)
     goal1_orientation_command_enabled = LaunchConfiguration(goal1_orientation_command_enabled_parameter_name)
     goal1_orientation_max_abs_rad = LaunchConfiguration(goal1_orientation_max_abs_rad_parameter_name)
     goal1_q7_nullspace_enabled = LaunchConfiguration(goal1_q7_nullspace_enabled_parameter_name)
@@ -174,6 +176,14 @@ def generate_launch_description():
             gp_compensation_clip_nm_parameter_name,
             default_value='0.5',
             description='Per-joint GP compensation clip in Nm.'),
+        DeclareLaunchArgument(
+            delay_steps_parameter_name,
+            default_value='2',
+            description=(
+                'Cloud-like control-step delay for GOAL1 big GP input timing/state selection; '
+                'not a GP model hyperparameter or real network latency; 0 uses latest buffered '
+                'state; default 2 preserves previous hardcoded behavior.'
+            )),
         DeclareLaunchArgument(
             goal1_orientation_command_enabled_parameter_name,
             default_value='false',
@@ -388,6 +398,7 @@ def generate_launch_description():
                 gp_compensation_source_parameter_name: gp_compensation_source,
                 gp_compensation_scale_parameter_name: gp_compensation_scale,
                 gp_compensation_clip_nm_parameter_name: gp_compensation_clip_nm,
+                delay_steps_parameter_name: ParameterValue(delay_steps, value_type=int),
                 goal1_orientation_command_enabled_parameter_name: ParameterValue(
                     goal1_orientation_command_enabled, value_type=bool),
                 goal1_orientation_max_abs_rad_parameter_name: ParameterValue(

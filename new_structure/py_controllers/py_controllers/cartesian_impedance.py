@@ -184,8 +184,26 @@ class CartesianImpedanceController(Node):
         self.declare_parameter("ddq_lpf_hz", 15.0)
         self.ddq_lpf_hz = float(self.get_parameter("ddq_lpf_hz").value)
 
-        self.declare_parameter("delay_steps", 1)
-        self.delay_steps = int(self.get_parameter("delay_steps").value)
+        self.declare_parameter("delay_steps", 2)
+        raw_delay_steps = self.get_parameter("delay_steps").value
+        try:
+            self.delay_steps = int(raw_delay_steps)
+        except (TypeError, ValueError, OverflowError):
+            self.get_logger().warn(
+                f"[GOAL1] Invalid delay_steps={raw_delay_steps!r}; using default 2"
+            )
+            self.delay_steps = 2
+
+        if self.delay_steps < 0 or self.delay_steps > 100:
+            self.get_logger().warn(
+                f"[GOAL1] delay_steps={self.delay_steps} outside [0, 100]; using default 2"
+            )
+            self.delay_steps = 2
+
+        self.get_logger().info(
+            f"[GOAL1] Cloud-like delay_steps={self.delay_steps} callback(s); "
+            "0 means use latest/current buffered state."
+        )
 
         self.declare_parameter("cloud_rollout_n", 7)          # 采样点数
         self.declare_parameter("cloud_rollout_span", 0.001)    # 在 Td 附近 ±span/2 采样，单位秒
@@ -449,7 +467,6 @@ class CartesianImpedanceController(Node):
         self.future_delay = self.declare_parameter(
             'future_delay', 0.00 # 默认 60 ms
         ).value
-        self.delay_steps = 0
         self.state_delay_steps = 0   # 你想模拟的通信延迟：20个周期
         self.state_buffer = deque(maxlen=1000)  # 存2秒(1kHz)都够
         self.cloud_delay_steps = 100
@@ -1006,8 +1023,7 @@ class CartesianImpedanceController(Node):
                 self.var_local = var_local
 
                 # Td = float(self.future_delay)
-                # delay_steps = max(1, int(self.delay_steps))
-                delay_steps = 2
+                delay_steps = self.delay_steps
 
                 base_state = None
                 if len(self.state_buffer) > delay_steps:
