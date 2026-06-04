@@ -34,6 +34,19 @@ def generate_launch_description():
         'gp_historical_db_disable_when_online_update'
     )
     gp_historical_db_fallback_source_parameter_name = 'gp_historical_db_fallback_source'
+    gp_historical_soft_shadow_enabled_parameter_name = (
+        'gp_historical_soft_shadow_enabled'
+    )
+    gp_historical_soft_alpha_parameter_name = 'gp_historical_soft_alpha'
+    gp_historical_soft_distance_threshold_parameter_name = (
+        'gp_historical_soft_distance_threshold'
+    )
+    gp_historical_soft_online_scale_parameter_name = (
+        'gp_historical_soft_online_scale'
+    )
+    gp_historical_soft_non_online_scale_parameter_name = (
+        'gp_historical_soft_non_online_scale'
+    )
 
     mock_state_rate_hz = LaunchConfiguration(mock_rate_parameter_name)
     trajectory_mode = LaunchConfiguration(trajectory_mode_parameter_name)
@@ -64,6 +77,21 @@ def generate_launch_description():
     )
     gp_historical_db_fallback_source = LaunchConfiguration(
         gp_historical_db_fallback_source_parameter_name
+    )
+    gp_historical_soft_shadow_enabled = LaunchConfiguration(
+        gp_historical_soft_shadow_enabled_parameter_name
+    )
+    gp_historical_soft_alpha = LaunchConfiguration(
+        gp_historical_soft_alpha_parameter_name
+    )
+    gp_historical_soft_distance_threshold = LaunchConfiguration(
+        gp_historical_soft_distance_threshold_parameter_name
+    )
+    gp_historical_soft_online_scale = LaunchConfiguration(
+        gp_historical_soft_online_scale_parameter_name
+    )
+    gp_historical_soft_non_online_scale = LaunchConfiguration(
+        gp_historical_soft_non_online_scale_parameter_name
     )
 
     mock_state_node = Node(
@@ -169,6 +197,26 @@ def generate_launch_description():
             gp_historical_db_fallback_source_parameter_name: ParameterValue(
                 gp_historical_db_fallback_source,
                 value_type=str,
+            ),
+            gp_historical_soft_shadow_enabled_parameter_name: ParameterValue(
+                gp_historical_soft_shadow_enabled,
+                value_type=bool,
+            ),
+            gp_historical_soft_alpha_parameter_name: ParameterValue(
+                gp_historical_soft_alpha,
+                value_type=float,
+            ),
+            gp_historical_soft_distance_threshold_parameter_name: ParameterValue(
+                gp_historical_soft_distance_threshold,
+                value_type=float,
+            ),
+            gp_historical_soft_online_scale_parameter_name: ParameterValue(
+                gp_historical_soft_online_scale,
+                value_type=float,
+            ),
+            gp_historical_soft_non_online_scale_parameter_name: ParameterValue(
+                gp_historical_soft_non_online_scale,
+                value_type=float,
             ),
         }],
     )
@@ -293,6 +341,46 @@ def generate_launch_description():
             gp_historical_db_fallback_source_parameter_name,
             default_value='cloud',
             description='Shadow-only fallback source: none, local, cloud, or combined.',
+        ),
+        DeclareLaunchArgument(
+            gp_historical_soft_shadow_enabled_parameter_name,
+            default_value='false',
+            description=(
+                'Enable GOAL1 historical soft-weight CSV shadow logging only for '
+                'explicit fake/no-robot validation; no active torque compensation.'
+            ),
+        ),
+        DeclareLaunchArgument(
+            gp_historical_soft_alpha_parameter_name,
+            default_value='1.0',
+            description=(
+                'GOAL1 historical soft-shadow alpha for fake/no-robot validation '
+                'logging only; no active torque compensation.'
+            ),
+        ),
+        DeclareLaunchArgument(
+            gp_historical_soft_distance_threshold_parameter_name,
+            default_value='0.2',
+            description=(
+                'GOAL1 historical soft-shadow nearest-distance threshold for '
+                'fake/no-robot validation logging only; no active torque compensation.'
+            ),
+        ),
+        DeclareLaunchArgument(
+            gp_historical_soft_online_scale_parameter_name,
+            default_value='0.02',
+            description=(
+                'GOAL1 historical soft-shadow online-mode historical scale for '
+                'fake/no-robot validation logging only; no active torque compensation.'
+            ),
+        ),
+        DeclareLaunchArgument(
+            gp_historical_soft_non_online_scale_parameter_name,
+            default_value='1.0',
+            description=(
+                'GOAL1 historical soft-shadow non-online historical scale for '
+                'fake/no-robot validation logging only; no active torque compensation.'
+            ),
         ),
         mock_state_node,
         TimerAction(
