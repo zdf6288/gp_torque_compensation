@@ -308,6 +308,17 @@ class CartesianImpedanceController(Node):
         self.gp_shadow_hist_k_used_history = []
         self.gp_shadow_hist_nearest_distance_history = []
         self.gp_shadow_hist_mean_distance_topk_history = []
+        self.hist_db_loaded_history = []
+        self.hist_db_query_valid_history = []
+        self.hist_db_available_history = []
+        self.hist_db_online_disabled_history = []
+        self.hist_db_distance_pass_history = []
+        self.hist_db_k_used_history = []
+        self.hist_db_nearest_distance_history = []
+        self.hist_db_mean_topk_distance_history = []
+        self.hist_db_gated_source_code_history = []
+        self.hist_db_pred_history = []
+        self.hist_db_gated_pred_history = []
         # set signal handler
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
@@ -350,6 +361,14 @@ class CartesianImpedanceController(Node):
         self.declare_parameter("gp_historical_shadow_max_distance", 1e6)
         self.declare_parameter("gp_historical_shadow_variance_floor", 1e-8)
         self.declare_parameter("gp_historical_shadow_distance_eps", 1e-9)
+        self.declare_parameter("gp_historical_db_enabled", False)
+        self.declare_parameter("gp_historical_db_path", "")
+        self.declare_parameter("gp_historical_db_k", 25)
+        self.declare_parameter("gp_historical_db_q_scale", 0.1)
+        self.declare_parameter("gp_historical_db_dq_scale", 0.1)
+        self.declare_parameter("gp_historical_db_max_distance", 1.0)
+        self.declare_parameter("gp_historical_db_disable_when_online_update", True)
+        self.declare_parameter("gp_historical_db_fallback_source", "cloud")
 
         self.gp_prediction_enabled = self._get_bool_parameter("gp_prediction_enabled")
         self.gp_online_update_enabled = self._get_bool_parameter("gp_online_update_enabled")
@@ -389,6 +408,28 @@ class CartesianImpedanceController(Node):
         self.gp_historical_shadow_distance_eps = self._get_positive_float_parameter(
             "gp_historical_shadow_distance_eps", 1e-9
         )
+        self.gp_historical_db_enabled = self._get_bool_parameter("gp_historical_db_enabled")
+        self.gp_historical_db_path = str(
+            self.get_parameter("gp_historical_db_path").value
+        ).strip()
+        self.gp_historical_db_k = self._get_bounded_int_parameter(
+            "gp_historical_db_k", 25, 1, 1000000
+        )
+        self.gp_historical_db_q_scale = self._get_positive_float_parameter(
+            "gp_historical_db_q_scale", 0.1
+        )
+        self.gp_historical_db_dq_scale = self._get_positive_float_parameter(
+            "gp_historical_db_dq_scale", 0.1
+        )
+        self.gp_historical_db_max_distance = self._get_positive_float_parameter(
+            "gp_historical_db_max_distance", 1.0
+        )
+        self.gp_historical_db_disable_when_online_update = self._get_bool_parameter(
+            "gp_historical_db_disable_when_online_update"
+        )
+        self.gp_historical_db_fallback_source = str(
+            self.get_parameter("gp_historical_db_fallback_source").value
+        ).strip().lower()
         self._gp_compensation_logged = False
 
         # clip 只接受非负幅值；负数配置按绝对值处理，避免反向区间。
@@ -419,6 +460,20 @@ class CartesianImpedanceController(Node):
             1 if self.gp_historical_source_mode == "local_prediction_pool" else 0
         )
 
+        valid_gp_historical_db_fallback_sources = ("none", "local", "cloud", "combined")
+        if self.gp_historical_db_fallback_source not in valid_gp_historical_db_fallback_sources:
+            self.get_logger().warn(
+                "[GP Hist DB] Invalid gp_historical_db_fallback_source="
+                f"'{self.gp_historical_db_fallback_source}', falling back to 'cloud'"
+            )
+            self.gp_historical_db_fallback_source = "cloud"
+        self.gp_historical_db_fallback_source_code = {
+            "none": 0,
+            "local": 1,
+            "cloud": 2,
+            "combined": 3,
+        }[self.gp_historical_db_fallback_source]
+
         if self.gp_historical_shadow_min_points > self.gp_historical_shadow_max_points:
             self.get_logger().warn(
                 "[GP Shadow] gp_historical_shadow_min_points exceeds max_points; "
@@ -439,6 +494,19 @@ class CartesianImpedanceController(Node):
         self._gp_local_feature_shadow = np.zeros(14, dtype=np.float32)
         self._gp_local_prediction_sequence_shadow = 0
         self._gp_hist_last_appended_sequence_shadow = 0
+
+        # Persistent residual DB is a separate shadow-only source. It is never
+        # inserted into the runtime prediction-pool paper fusion.
+        self.gp_historical_db_loaded = False
+        self.gp_historical_db_row_count = 0
+        self.gp_historical_db_x_scaled = None
+        self.gp_historical_db_y_residual = None
+        self.gp_historical_db_feature_scale = np.array(
+            [self.gp_historical_db_q_scale] * 7
+            + [self.gp_historical_db_dq_scale] * 7,
+            dtype=float,
+        )
+        self._load_historical_residual_db()
 
         if not self.gp_prediction_enabled and self.gp_compensation_enabled:
             self.get_logger().warn(
@@ -483,8 +551,33 @@ class CartesianImpedanceController(Node):
             f"distance_eps={self.gp_historical_shadow_distance_eps}; "
             "shadow-only and does not enter tau_final"
         )
+        self.get_logger().info(
+            "[GP Hist DB] Persistent residual DB controls: "
+            f"enabled={self.gp_historical_db_enabled}, "
+            f"path='{self.gp_historical_db_path}', "
+            f"loaded={self.gp_historical_db_loaded}, "
+            f"rows={self.gp_historical_db_row_count}, "
+            f"k={self.gp_historical_db_k}, "
+            f"q_scale={self.gp_historical_db_q_scale}, "
+            f"dq_scale={self.gp_historical_db_dq_scale}, "
+            f"max_distance={self.gp_historical_db_max_distance}, "
+            "disable_when_online_update="
+            f"{self.gp_historical_db_disable_when_online_update}, "
+            f"fallback_source='{self.gp_historical_db_fallback_source}'; "
+            "shadow-only and does not enter tau_final"
+        )
+        if (
+            self.gp_historical_db_enabled
+            and self.gp_historical_db_disable_when_online_update
+            and self.gp_online_update_enabled
+        ):
+            self.get_logger().warn(
+                "[GP Hist DB] Online GP update is enabled; persistent DB queries "
+                "will be logged but the historical availability gate remains closed."
+            )
 
         self._reset_gp_shadow_state()
+        self._reset_historical_residual_db_shadow_state()
 
         self.gp_stride = 1      # 每 10 个 state callback 做一次 GP（你可以调）
         self.gp_counter = 0
@@ -862,6 +955,8 @@ class CartesianImpedanceController(Node):
             "tau_res": self.tau_residual_filtered.copy(),
         })
 
+        self._reset_historical_residual_db_shadow_state()
+
         # joint reference mode 使用 message 里的 dq_des 作为 GP feature 的第二段；
         # 这不改变现有 Cartesian 分支的 GP 调用语义。
         if self.use_gp and self.gp_prediction_enabled:
@@ -903,6 +998,7 @@ class CartesianImpedanceController(Node):
             prec_c = 1.0 / v_c
             w_l = prec_l / (prec_l + prec_c)
             self.y_hat_combined = w_l * self.y_hat_local + (1.0 - w_l) * self.y_hat_cloud
+            self._update_historical_residual_db_shadow_state(q, dq)
 
         self._update_gp_shadow_logging_state(q, self.dq_des_joint)
         self._tau_nominal = tau.copy()
@@ -1308,6 +1404,8 @@ class CartesianImpedanceController(Node):
             })
             # tau = tau
 
+            self._reset_historical_residual_db_shadow_state()
+
             # === 控制循环的最后：按节拍触发一次“GP 更新”（本地 + 云端） ===
             if self.gp_active and self.use_gp and self.gp_prediction_enabled:
                 self.gp_counter += 1
@@ -1432,6 +1530,7 @@ class CartesianImpedanceController(Node):
                 w_l = prec_l / (prec_l + prec_c)
 
                 self.y_hat_combined = w_l * self.y_hat_local + (1.0 - w_l) * self.y_hat_cloud
+                self._update_historical_residual_db_shadow_state(self.q, dq)
 
             # tau = tau - self.y_hat_local
             # 默认 compensation 关闭时返回原始 tau；开启后才按原注释方向补偿。
@@ -1490,6 +1589,25 @@ class CartesianImpedanceController(Node):
                 self.gp_shadow_hist_mean_distance_topk_history.append(
                     float(self.gp_shadow_hist_mean_distance_topk)
                 )
+                self.hist_db_loaded_history.append(int(self.hist_db_loaded))
+                self.hist_db_query_valid_history.append(int(self.hist_db_query_valid))
+                self.hist_db_available_history.append(int(self.hist_db_available))
+                self.hist_db_online_disabled_history.append(
+                    int(self.hist_db_online_disabled)
+                )
+                self.hist_db_distance_pass_history.append(int(self.hist_db_distance_pass))
+                self.hist_db_k_used_history.append(int(self.hist_db_k_used))
+                self.hist_db_nearest_distance_history.append(
+                    float(self.hist_db_nearest_distance)
+                )
+                self.hist_db_mean_topk_distance_history.append(
+                    float(self.hist_db_mean_topk_distance)
+                )
+                self.hist_db_gated_source_code_history.append(
+                    int(self.hist_db_gated_source_code)
+                )
+                self.hist_db_pred_history.append(self.hist_db_pred.tolist())
+                self.hist_db_gated_pred_history.append(self.hist_db_gated_pred.tolist())
                 self.time_history.append(t_elapsed)
                 self.x_history.append(x.tolist())
                 self.x_des_history.append(self.x_des.tolist())
@@ -1736,6 +1854,82 @@ class CartesianImpedanceController(Node):
         # 4. 直接退出程序
         os._exit(0)
 
+    def _load_historical_residual_db(self):
+        """Load a persistent residual DB once for shadow-only KNN queries."""
+        self.gp_historical_db_loaded = False
+        self.gp_historical_db_row_count = 0
+        self.gp_historical_db_x_scaled = None
+        self.gp_historical_db_y_residual = None
+
+        if not self.gp_historical_db_enabled:
+            self.get_logger().info("[GP Hist DB] Disabled; persistent DB will not be loaded.")
+            return
+
+        if not self.gp_historical_db_path:
+            self.get_logger().warn(
+                "[GP Hist DB] Enabled but gp_historical_db_path is empty; "
+                "persistent DB remains unavailable."
+            )
+            return
+
+        db_path = os.path.abspath(os.path.expanduser(self.gp_historical_db_path))
+        try:
+            if not os.path.isfile(db_path):
+                raise FileNotFoundError(db_path)
+
+            # Only numeric arrays are accessed. Object metadata arrays may exist
+            # in the archive, but they are intentionally not loaded.
+            with np.load(db_path, allow_pickle=False) as db:
+                missing = [name for name in ("X", "Y_residual") if name not in db.files]
+                if missing:
+                    raise ValueError(f"missing arrays: {missing}")
+                x = np.asarray(db["X"], dtype=float)
+                y_residual = np.asarray(db["Y_residual"], dtype=float)
+
+            if x.ndim != 2 or x.shape[1] != 14:
+                raise ValueError(f"X must have shape (N, 14), got {x.shape}")
+            if y_residual.ndim != 2 or y_residual.shape[1] != 7:
+                raise ValueError(
+                    f"Y_residual must have shape (N, 7), got {y_residual.shape}"
+                )
+            if x.shape[0] != y_residual.shape[0]:
+                raise ValueError(
+                    "X and Y_residual row counts differ: "
+                    f"{x.shape[0]} != {y_residual.shape[0]}"
+                )
+            if x.shape[0] <= 0:
+                raise ValueError("X and Y_residual must contain at least one row")
+            if not np.all(np.isfinite(x)) or not np.all(np.isfinite(y_residual)):
+                raise ValueError("X and Y_residual must contain only finite values")
+
+            x_scaled = np.ascontiguousarray(
+                x / self.gp_historical_db_feature_scale.reshape(1, -1),
+                dtype=float,
+            )
+            if not np.all(np.isfinite(x_scaled)):
+                raise ValueError("scaled X contains non-finite values")
+
+            self.gp_historical_db_x_scaled = x_scaled
+            self.gp_historical_db_y_residual = np.ascontiguousarray(
+                y_residual,
+                dtype=float,
+            )
+            self.gp_historical_db_row_count = int(x.shape[0])
+            self.gp_historical_db_loaded = True
+            self.get_logger().info(
+                "[GP Hist DB] Loaded persistent residual DB: "
+                f"path='{db_path}', rows={self.gp_historical_db_row_count}"
+            )
+        except Exception as e:
+            self.gp_historical_db_loaded = False
+            self.gp_historical_db_row_count = 0
+            self.gp_historical_db_x_scaled = None
+            self.gp_historical_db_y_residual = None
+            self.get_logger().error(
+                "[GP Hist DB] Failed to load persistent residual DB; "
+                f"continuing with DB unavailable: {e}"
+            )
+
     def _load_gp_models(self, dir_path="./new_structure/gp/gp_models"):
         """加载离线训练好的每关节GP，支持高维输入（14或21）""" 
 
@@ -1955,6 +2149,165 @@ class CartesianImpedanceController(Node):
     def _build_gp_shadow_feature(self, q, dq):
         """Build the same 14D [q, dq] feature used by the active GP predictor."""
         return np.concatenate([q, dq]).astype(np.float32)
+
+    def _get_historical_residual_db_fallback_candidate(self):
+        zero = np.zeros(7, dtype=float)
+        source = self.gp_historical_db_fallback_source
+        if source == "none":
+            return zero, 0
+
+        candidate = {
+            "local": self.y_hat_local,
+            "cloud": self.y_hat_cloud,
+            "combined": self.y_hat_combined,
+        }.get(source)
+        try:
+            candidate_arr = np.asarray(candidate, dtype=float)
+        except (TypeError, ValueError):
+            return zero, 0
+
+        if candidate_arr.shape != (7,) or not np.all(np.isfinite(candidate_arr)):
+            return zero, 0
+        return candidate_arr.copy(), self.gp_historical_db_fallback_source_code
+
+    def _new_historical_residual_db_shadow_result(self):
+        fallback_prediction, fallback_source_code = (
+            self._get_historical_residual_db_fallback_candidate()
+        )
+        return {
+            "loaded": int(bool(self.gp_historical_db_loaded)),
+            "query_valid": 0,
+            "available": 0,
+            "online_disabled": int(
+                bool(
+                    self.gp_historical_db_disable_when_online_update
+                    and self.gp_online_update_enabled
+                )
+            ),
+            "distance_pass": 0,
+            "k_used": 0,
+            "nearest_distance": 0.0,
+            "mean_topk_distance": 0.0,
+            "prediction": np.zeros(7, dtype=float),
+            "gated_prediction": fallback_prediction,
+            "gated_source_code": int(fallback_source_code),
+        }
+
+    def _query_historical_residual_db_shadow(self, q, dq):
+        """Query the persistent residual DB without affecting active torque."""
+        result = self._new_historical_residual_db_shadow_result()
+
+        try:
+            q_arr = np.asarray(q, dtype=float)
+            dq_arr = np.asarray(dq, dtype=float)
+        except (TypeError, ValueError):
+            return result
+        if (
+            q_arr.shape != (7,)
+            or dq_arr.shape != (7,)
+            or not np.all(np.isfinite(q_arr))
+            or not np.all(np.isfinite(dq_arr))
+        ):
+            return result
+
+        x_query = np.concatenate([q_arr, dq_arr])
+        x_query_scaled = np.ascontiguousarray(
+            x_query / self.gp_historical_db_feature_scale,
+            dtype=float,
+        )
+        if not np.all(np.isfinite(x_query_scaled)):
+            return result
+        result["query_valid"] = 1
+
+        if not self.gp_historical_db_enabled or not self.gp_historical_db_loaded:
+            return result
+        if (
+            self.gp_historical_db_x_scaled is None
+            or self.gp_historical_db_y_residual is None
+            or self.gp_historical_db_row_count <= 0
+        ):
+            return result
+
+        try:
+            with np.errstate(over="ignore", invalid="ignore"):
+                delta = self.gp_historical_db_x_scaled - x_query_scaled.reshape(1, -1)
+                distance_sq = np.einsum("ij,ij->i", delta, delta)
+            if (
+                distance_sq.shape != (self.gp_historical_db_row_count,)
+                or not np.all(np.isfinite(distance_sq))
+                or np.any(distance_sq < 0.0)
+            ):
+                return result
+
+            k_used = min(self.gp_historical_db_k, self.gp_historical_db_row_count)
+            nearest_indices = np.argpartition(distance_sq, kth=k_used - 1)[:k_used]
+            nearest_indices = nearest_indices[np.argsort(distance_sq[nearest_indices])]
+            nearest_distances = np.sqrt(distance_sq[nearest_indices])
+            prediction = np.mean(
+                self.gp_historical_db_y_residual[nearest_indices],
+                axis=0,
+            )
+        except (TypeError, ValueError, IndexError, FloatingPointError):
+            return result
+
+        result["k_used"] = int(k_used)
+        result["nearest_distance"] = float(nearest_distances[0])
+        result["mean_topk_distance"] = float(np.mean(nearest_distances))
+        result["distance_pass"] = int(
+            result["nearest_distance"] <= self.gp_historical_db_max_distance
+        )
+        if prediction.shape != (7,) or not np.all(np.isfinite(prediction)):
+            return result
+
+        result["prediction"] = prediction.copy()
+        result["available"] = int(
+            bool(
+                result["loaded"]
+                and result["query_valid"]
+                and result["distance_pass"]
+                and not result["online_disabled"]
+            )
+        )
+        if result["available"]:
+            result["gated_prediction"] = prediction.copy()
+            result["gated_source_code"] = 4
+        return result
+
+    def _reset_historical_residual_db_shadow_state(self):
+        zero = np.zeros(7, dtype=float)
+        self.hist_db_loaded = int(bool(self.gp_historical_db_loaded))
+        self.hist_db_query_valid = 0
+        self.hist_db_available = 0
+        self.hist_db_online_disabled = int(
+            bool(
+                self.gp_historical_db_disable_when_online_update
+                and self.gp_online_update_enabled
+            )
+        )
+        self.hist_db_distance_pass = 0
+        self.hist_db_k_used = 0
+        self.hist_db_nearest_distance = 0.0
+        self.hist_db_mean_topk_distance = 0.0
+        self.hist_db_pred = zero.copy()
+        self.hist_db_gated_pred = zero.copy()
+        self.hist_db_gated_source_code = 0
+
+    def _update_historical_residual_db_shadow_state(self, q, dq):
+        result = self._query_historical_residual_db_shadow(q, dq)
+        self.hist_db_loaded = int(result["loaded"])
+        self.hist_db_query_valid = int(result["query_valid"])
+        self.hist_db_available = int(result["available"])
+        self.hist_db_online_disabled = int(result["online_disabled"])
+        self.hist_db_distance_pass = int(result["distance_pass"])
+        self.hist_db_k_used = int(result["k_used"])
+        self.hist_db_nearest_distance = float(result["nearest_distance"])
+        self.hist_db_mean_topk_distance = float(result["mean_topk_distance"])
+        self.hist_db_pred = np.asarray(result["prediction"], dtype=float).copy()
+        self.hist_db_gated_pred = np.asarray(
+            result["gated_prediction"],
+            dtype=float,
+        ).copy()
+        self.hist_db_gated_source_code = int(result["gated_source_code"])
 
     def _as_finite_7d(self, value, fill_value=0.0):
         try:
@@ -2523,6 +2876,17 @@ class CartesianImpedanceController(Node):
                 self.gp_shadow_hist_k_used_history,
                 self.gp_shadow_hist_nearest_distance_history,
                 self.gp_shadow_hist_mean_distance_topk_history,
+                self.hist_db_loaded_history,
+                self.hist_db_query_valid_history,
+                self.hist_db_available_history,
+                self.hist_db_online_disabled_history,
+                self.hist_db_distance_pass_history,
+                self.hist_db_k_used_history,
+                self.hist_db_nearest_distance_history,
+                self.hist_db_mean_topk_distance_history,
+                self.hist_db_gated_source_code_history,
+                self.hist_db_pred_history,
+                self.hist_db_gated_pred_history,
                 self.pred_time_history,
                 self.q_pred_history,
                 self.dq_pred_history,
@@ -2606,6 +2970,23 @@ class CartesianImpedanceController(Node):
                     'gp_shadow_hist_nearest_distance',
                     'gp_shadow_hist_mean_distance_topk',
                 ])
+                header.extend([
+                    'hist_db_loaded',
+                    'hist_db_query_valid',
+                    'hist_db_available',
+                    'hist_db_online_disabled',
+                    'hist_db_distance_pass',
+                    'hist_db_k_used',
+                    'hist_db_nearest_distance',
+                    'hist_db_mean_topk_distance',
+                    'hist_db_q_scale',
+                    'hist_db_dq_scale',
+                    'hist_db_max_distance',
+                    'hist_db_fallback_source_code',
+                    'hist_db_gated_source_code',
+                ])
+                header.extend([f'hist_db_pred_{i+1}' for i in range(7)])
+                header.extend([f'hist_db_gated_pred_{i+1}' for i in range(7)])
                 writer.writerow(header)
 
                 for i in range(min_len):
@@ -2873,6 +3254,77 @@ class CartesianImpedanceController(Node):
                         hist_nearest_distance,
                         hist_mean_distance_topk,
                     ])
+
+                    hist_db_loaded = (
+                        int(self.hist_db_loaded_history[i])
+                        if i < len(self.hist_db_loaded_history)
+                        else int(self.hist_db_loaded)
+                    )
+                    hist_db_query_valid = (
+                        int(self.hist_db_query_valid_history[i])
+                        if i < len(self.hist_db_query_valid_history)
+                        else int(self.hist_db_query_valid)
+                    )
+                    hist_db_available = (
+                        int(self.hist_db_available_history[i])
+                        if i < len(self.hist_db_available_history)
+                        else int(self.hist_db_available)
+                    )
+                    hist_db_online_disabled = (
+                        int(self.hist_db_online_disabled_history[i])
+                        if i < len(self.hist_db_online_disabled_history)
+                        else int(self.hist_db_online_disabled)
+                    )
+                    hist_db_distance_pass = (
+                        int(self.hist_db_distance_pass_history[i])
+                        if i < len(self.hist_db_distance_pass_history)
+                        else int(self.hist_db_distance_pass)
+                    )
+                    hist_db_k_used = (
+                        int(self.hist_db_k_used_history[i])
+                        if i < len(self.hist_db_k_used_history)
+                        else int(self.hist_db_k_used)
+                    )
+                    hist_db_nearest_distance = (
+                        float(self.hist_db_nearest_distance_history[i])
+                        if i < len(self.hist_db_nearest_distance_history)
+                        else float(self.hist_db_nearest_distance)
+                    )
+                    hist_db_mean_topk_distance = (
+                        float(self.hist_db_mean_topk_distance_history[i])
+                        if i < len(self.hist_db_mean_topk_distance_history)
+                        else float(self.hist_db_mean_topk_distance)
+                    )
+                    hist_db_gated_source_code = (
+                        int(self.hist_db_gated_source_code_history[i])
+                        if i < len(self.hist_db_gated_source_code_history)
+                        else int(self.hist_db_gated_source_code)
+                    )
+                    row.extend([
+                        hist_db_loaded,
+                        hist_db_query_valid,
+                        hist_db_available,
+                        hist_db_online_disabled,
+                        hist_db_distance_pass,
+                        hist_db_k_used,
+                        hist_db_nearest_distance,
+                        hist_db_mean_topk_distance,
+                        self.gp_historical_db_q_scale,
+                        self.gp_historical_db_dq_scale,
+                        self.gp_historical_db_max_distance,
+                        self.gp_historical_db_fallback_source_code,
+                        hist_db_gated_source_code,
+                    ])
+
+                    if i < len(self.hist_db_pred_history):
+                        row.extend(self.hist_db_pred_history[i])
+                    else:
+                        row.extend([0.0] * 7)
+
+                    if i < len(self.hist_db_gated_pred_history):
+                        row.extend(self.hist_db_gated_pred_history[i])
+                    else:
+                        row.extend([0.0] * 7)
 
                     if len(row) != len(header):
                         self.get_logger().warning(

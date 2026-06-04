@@ -24,6 +24,16 @@ def generate_launch_description():
     gp_historical_source_mode_parameter_name = 'gp_historical_source_mode'
     gp_historical_min_points_parameter_name = 'gp_historical_shadow_min_points'
     gp_historical_k_parameter_name = 'gp_historical_shadow_k'
+    gp_historical_db_enabled_parameter_name = 'gp_historical_db_enabled'
+    gp_historical_db_path_parameter_name = 'gp_historical_db_path'
+    gp_historical_db_k_parameter_name = 'gp_historical_db_k'
+    gp_historical_db_q_scale_parameter_name = 'gp_historical_db_q_scale'
+    gp_historical_db_dq_scale_parameter_name = 'gp_historical_db_dq_scale'
+    gp_historical_db_max_distance_parameter_name = 'gp_historical_db_max_distance'
+    gp_historical_db_disable_online_parameter_name = (
+        'gp_historical_db_disable_when_online_update'
+    )
+    gp_historical_db_fallback_source_parameter_name = 'gp_historical_db_fallback_source'
 
     mock_state_rate_hz = LaunchConfiguration(mock_rate_parameter_name)
     trajectory_mode = LaunchConfiguration(trajectory_mode_parameter_name)
@@ -41,6 +51,20 @@ def generate_launch_description():
     gp_historical_source_mode = LaunchConfiguration(gp_historical_source_mode_parameter_name)
     gp_historical_min_points = LaunchConfiguration(gp_historical_min_points_parameter_name)
     gp_historical_k = LaunchConfiguration(gp_historical_k_parameter_name)
+    gp_historical_db_enabled = LaunchConfiguration(gp_historical_db_enabled_parameter_name)
+    gp_historical_db_path = LaunchConfiguration(gp_historical_db_path_parameter_name)
+    gp_historical_db_k = LaunchConfiguration(gp_historical_db_k_parameter_name)
+    gp_historical_db_q_scale = LaunchConfiguration(gp_historical_db_q_scale_parameter_name)
+    gp_historical_db_dq_scale = LaunchConfiguration(gp_historical_db_dq_scale_parameter_name)
+    gp_historical_db_max_distance = LaunchConfiguration(
+        gp_historical_db_max_distance_parameter_name
+    )
+    gp_historical_db_disable_online = LaunchConfiguration(
+        gp_historical_db_disable_online_parameter_name
+    )
+    gp_historical_db_fallback_source = LaunchConfiguration(
+        gp_historical_db_fallback_source_parameter_name
+    )
 
     mock_state_node = Node(
         package='py_controllers',
@@ -113,6 +137,38 @@ def generate_launch_description():
             gp_historical_k_parameter_name: ParameterValue(
                 gp_historical_k,
                 value_type=int,
+            ),
+            gp_historical_db_enabled_parameter_name: ParameterValue(
+                gp_historical_db_enabled,
+                value_type=bool,
+            ),
+            gp_historical_db_path_parameter_name: ParameterValue(
+                gp_historical_db_path,
+                value_type=str,
+            ),
+            gp_historical_db_k_parameter_name: ParameterValue(
+                gp_historical_db_k,
+                value_type=int,
+            ),
+            gp_historical_db_q_scale_parameter_name: ParameterValue(
+                gp_historical_db_q_scale,
+                value_type=float,
+            ),
+            gp_historical_db_dq_scale_parameter_name: ParameterValue(
+                gp_historical_db_dq_scale,
+                value_type=float,
+            ),
+            gp_historical_db_max_distance_parameter_name: ParameterValue(
+                gp_historical_db_max_distance,
+                value_type=float,
+            ),
+            gp_historical_db_disable_online_parameter_name: ParameterValue(
+                gp_historical_db_disable_online,
+                value_type=bool,
+            ),
+            gp_historical_db_fallback_source_parameter_name: ParameterValue(
+                gp_historical_db_fallback_source,
+                value_type=str,
             ),
         }],
     )
@@ -197,6 +253,46 @@ def generate_launch_description():
             gp_historical_k_parameter_name,
             default_value='5',
             description='Historical shadow top-k size for explicit fake validation.',
+        ),
+        DeclareLaunchArgument(
+            gp_historical_db_enabled_parameter_name,
+            default_value='false',
+            description='Enable persistent residual DB shadow query only for explicit fake validation.',
+        ),
+        DeclareLaunchArgument(
+            gp_historical_db_path_parameter_name,
+            default_value='',
+            description='Persistent residual DB .npz path; empty keeps the DB unavailable.',
+        ),
+        DeclareLaunchArgument(
+            gp_historical_db_k_parameter_name,
+            default_value='25',
+            description='Persistent residual DB shadow top-k size.',
+        ),
+        DeclareLaunchArgument(
+            gp_historical_db_q_scale_parameter_name,
+            default_value='0.1',
+            description='Persistent residual DB joint-position distance scale.',
+        ),
+        DeclareLaunchArgument(
+            gp_historical_db_dq_scale_parameter_name,
+            default_value='0.1',
+            description='Persistent residual DB joint-velocity distance scale.',
+        ),
+        DeclareLaunchArgument(
+            gp_historical_db_max_distance_parameter_name,
+            default_value='1.0',
+            description='Persistent residual DB shadow nearest-distance gate.',
+        ),
+        DeclareLaunchArgument(
+            gp_historical_db_disable_online_parameter_name,
+            default_value='true',
+            description='Keep persistent residual DB unavailable while GP online update is enabled.',
+        ),
+        DeclareLaunchArgument(
+            gp_historical_db_fallback_source_parameter_name,
+            default_value='cloud',
+            description='Shadow-only fallback source: none, local, cloud, or combined.',
         ),
         mock_state_node,
         TimerAction(
