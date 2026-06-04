@@ -324,10 +324,10 @@ class CartesianImpedanceController(Node):
         self.trajectory_mode = str(self.get_parameter("trajectory_mode").value).strip()
         self.data_output_dir = str(self.get_parameter("data_output_dir").value).strip() or "."
         self.control_frequency = float(self.get_parameter("control_frequency").value)
-        if self.control_frequency not in (25.0, 50.0):
+        if self.control_frequency not in (25.0, 50.0, 100.0):
             self.get_logger().error(
                 f"[GOAL2-B] Unsupported control_frequency={self.control_frequency}; "
-                "expected 25 or 50 Hz."
+                "expected 25, 50, or 100 Hz."
             )
             raise ValueError(f"Unsupported control_frequency: {self.control_frequency}")
 

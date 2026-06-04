@@ -27,9 +27,9 @@ class TrajectoryPublisher(Node):
         # GOAL2-B 中 control_frequency 是 complex tracking matrix 的真实实验变量。
         self.declare_parameter('control_frequency', 50.0)
         self.control_frequency = float(self.get_parameter('control_frequency').value)
-        if self.control_frequency not in (25.0, 50.0):
+        if self.control_frequency not in (25.0, 50.0, 100.0):
             self.get_logger().error(
-                f'Unsupported control_frequency={self.control_frequency}; expected 25 or 50 Hz.'
+                f'Unsupported control_frequency={self.control_frequency}; expected 25, 50, or 100 Hz.'
             )
             raise ValueError(f'Unsupported control_frequency: {self.control_frequency}')
 

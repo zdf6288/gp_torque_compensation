@@ -1,0 +1,4 @@
+# 保持 controllers.yaml 默认 50 Hz；launch 时按 control_frequency 覆盖。
+controller_manager:
+  ros__parameters:
+    update_rate: $(var control_frequency)

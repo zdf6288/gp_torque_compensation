@@ -160,7 +160,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             control_frequency_parameter_name,
             default_value='50',
-            choices=['25', '50'],
+            choices=['25', '50', '100'],
             description='GOAL2-B true controller, trajectory, and fake-state frequency in Hz.'),
         DeclareLaunchArgument(
             run_name_parameter_name,

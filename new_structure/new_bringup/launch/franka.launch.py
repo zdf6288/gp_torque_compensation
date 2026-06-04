@@ -22,7 +22,7 @@ from launch.conditions import IfCondition, UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import Command, FindExecutable, LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
-from launch_ros.parameter_descriptions import ParameterValue
+from launch_ros.parameter_descriptions import ParameterFile
 from launch_ros.substitutions import FindPackageShare
 
 
@@ -58,6 +58,16 @@ def generate_launch_description():
             'controllers.yaml',
         ]
     )
+    controller_manager_update_rate = ParameterFile(
+        PathJoinSubstitution(
+            [
+                FindPackageShare('new_bringup'),
+                'config',
+                'controller_manager_update_rate.yaml',
+            ]
+        ),
+        allow_substs=True,
+    )
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -84,7 +94,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             control_frequency_parameter_name,
             default_value='50',
-            choices=['25', '50'],
+            choices=['25', '50', '100'],
             description='GOAL2-B controller manager update rate in Hz.'),
         Node(
             package='robot_state_publisher',
@@ -104,11 +114,11 @@ def generate_launch_description():
         Node(
             package='controller_manager',
             executable='ros2_control_node',
-            # GOAL2-B 中 control_frequency 是真实实验变量，覆盖 controllers.yaml 的 update_rate。
             parameters=[
                 {'robot_description': robot_description},
                 franka_controllers,
-                {'update_rate': ParameterValue(control_frequency, value_type=int)},
+                # 节点专用参数文件覆盖 controllers.yaml 的 controller_manager.ros__parameters.update_rate。
+                controller_manager_update_rate,
             ],
             remappings=[('joint_states', 'franka/joint_states')],
             output={
