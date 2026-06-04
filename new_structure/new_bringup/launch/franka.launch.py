@@ -22,6 +22,7 @@ from launch.conditions import IfCondition, UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import Command, FindExecutable, LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
 
@@ -31,12 +32,14 @@ def generate_launch_description():
     use_fake_hardware_parameter_name = 'use_fake_hardware'
     fake_sensor_commands_parameter_name = 'fake_sensor_commands'
     use_rviz_parameter_name = 'use_rviz'
+    control_frequency_parameter_name = 'control_frequency'
 
     robot_ip = LaunchConfiguration(robot_ip_parameter_name)
     load_gripper = LaunchConfiguration(load_gripper_parameter_name)
     use_fake_hardware = LaunchConfiguration(use_fake_hardware_parameter_name)
     fake_sensor_commands = LaunchConfiguration(fake_sensor_commands_parameter_name)
     use_rviz = LaunchConfiguration(use_rviz_parameter_name)
+    control_frequency = LaunchConfiguration(control_frequency_parameter_name)
 
     franka_xacro_file = os.path.join(get_package_share_directory('franka_description'), 'robots',
                                      'panda_arm.urdf.xacro')
@@ -78,6 +81,11 @@ def generate_launch_description():
             default_value='true',
             description='Use Franka Gripper as an end-effector, otherwise, the robot is loaded '
                         'without an end-effector.'),
+        DeclareLaunchArgument(
+            control_frequency_parameter_name,
+            default_value='50',
+            choices=['25', '50'],
+            description='GOAL2-B controller manager update rate in Hz.'),
         Node(
             package='robot_state_publisher',
             executable='robot_state_publisher',
@@ -96,7 +104,12 @@ def generate_launch_description():
         Node(
             package='controller_manager',
             executable='ros2_control_node',
-            parameters=[{'robot_description': robot_description}, franka_controllers],
+            # GOAL2-B 中 control_frequency 是真实实验变量，覆盖 controllers.yaml 的 update_rate。
+            parameters=[
+                {'robot_description': robot_description},
+                franka_controllers,
+                {'update_rate': ParameterValue(control_frequency, value_type=int)},
+            ],
             remappings=[('joint_states', 'franka/joint_states')],
             output={
                 'stdout': 'screen',

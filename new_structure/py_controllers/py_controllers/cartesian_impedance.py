@@ -23,6 +23,10 @@ from collections import deque
 
 GOAL2D_TIMING_FIELDS = [
     "event",
+    "run_name",
+    "trajectory_mode",
+    "control_frequency",
+    "timing_output_dir",
     "callback_index",
     "ros_time_s",
     "callback_wall_ms",
@@ -44,6 +48,8 @@ GOAL2D_TIMING_FIELDS = [
     "gp_online_update_enabled",
     "gp_compensation_enabled",
     "gp_compensation_source",
+    "gp_compensation_scale",
+    "gp_compensation_clip_nm",
     "delay_steps",
     "local_gp_called",
     "cloud_like_gp_called",
@@ -265,6 +271,13 @@ class CartesianImpedanceController(Node):
         self.dq_history = []
         self.dq_des_joint_history = []   # desired joint velocity
         self.ddq_des_joint_history = []  # desired joint acceleration
+        self.tau_nominal_history = []
+        self.tau_final_history = []
+        self.gp_source_code_history = []
+        self.gp_selected_raw_history = []
+        self.gp_scaled_history = []
+        self.gp_applied_history = []
+        self.gp_clip_active_history = []
         # set signal handler
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
@@ -277,11 +290,17 @@ class CartesianImpedanceController(Node):
         self.ddq_des_joint = np.zeros(7)
         self.tau_residual = np.zeros(7)
         self.tau_memory = np.zeros(7)
+        self._tau_nominal = np.zeros(7, dtype=float)
+        self._tau_final = np.zeros(7, dtype=float)
+        self._gp_selected_raw = np.zeros(7, dtype=float)
+        self._gp_scaled = np.zeros(7, dtype=float)
+        self._gp_applied = np.zeros(7, dtype=float)
+        self._gp_clip_active = np.zeros(7, dtype=int)
+        self._gp_source_code = 0
 
-        # Stage 1: frozen GP / compensation 实验开关。默认保持原 online update 和原 model 路径。
-        # compensation 默认关闭，避免 GP prediction 在未显式开启时影响最终 tau。
+        # GOAL2-B frozen GP / compensation 实验开关。online update 和 compensation 默认关闭。
         self.declare_parameter("gp_prediction_enabled", True)
-        self.declare_parameter("gp_online_update_enabled", True)
+        self.declare_parameter("gp_online_update_enabled", False)
         self.declare_parameter("gp_model_dir", "./new_structure/gp/gp_models")
         self.declare_parameter("gp_compensation_enabled", False)
         self.declare_parameter("gp_compensation_source", "local")
@@ -296,6 +315,21 @@ class CartesianImpedanceController(Node):
         self.gp_compensation_scale = float(self.get_parameter("gp_compensation_scale").value)
         self.gp_compensation_clip_nm = float(self.get_parameter("gp_compensation_clip_nm").value)
         self._gp_compensation_logged = False
+
+        self.declare_parameter("run_name", "")
+        self.declare_parameter("trajectory_mode", "planar_circle")
+        self.declare_parameter("data_output_dir", ".")
+        self.declare_parameter("control_frequency", 50.0)
+        self.run_name = str(self.get_parameter("run_name").value).strip()
+        self.trajectory_mode = str(self.get_parameter("trajectory_mode").value).strip()
+        self.data_output_dir = str(self.get_parameter("data_output_dir").value).strip() or "."
+        self.control_frequency = float(self.get_parameter("control_frequency").value)
+        if self.control_frequency not in (25.0, 50.0):
+            self.get_logger().error(
+                f"[GOAL2-B] Unsupported control_frequency={self.control_frequency}; "
+                "expected 25 or 50 Hz."
+            )
+            raise ValueError(f"Unsupported control_frequency: {self.control_frequency}")
 
         # clip 只接受非负幅值；负数配置按绝对值处理，避免反向区间。
         if self.gp_compensation_clip_nm < 0.0:
@@ -334,7 +368,10 @@ class CartesianImpedanceController(Node):
             f"gp_compensation_enabled={self.gp_compensation_enabled}, "
             f"gp_compensation_source='{self.gp_compensation_source}', "
             f"gp_compensation_scale={self.gp_compensation_scale}, "
-            f"gp_compensation_clip_nm={self.gp_compensation_clip_nm}"
+            f"gp_compensation_clip_nm={self.gp_compensation_clip_nm}, "
+            f"control_frequency={self.control_frequency}, "
+            f"trajectory_mode='{self.trajectory_mode}', "
+            f"run_name='{self.run_name}'"
         )
 
         # GOAL2 D: controller timing instrumentation. 默认关闭，避免改变现有运行开销。
@@ -342,7 +379,6 @@ class CartesianImpedanceController(Node):
         self.declare_parameter("timing_log_stride", 1)
         self.declare_parameter("timing_output_dir", "outputs/goal2d_controller_timing")
         self.declare_parameter("deadline_ratio_warn_threshold", 0.8)
-        self.declare_parameter("controller_update_rate_label", 50.0)
 
         self.timing_logging_enabled = self._get_bool_parameter("timing_logging_enabled")
         self.timing_log_stride = max(1, int(self.get_parameter("timing_log_stride").value))
@@ -350,21 +386,13 @@ class CartesianImpedanceController(Node):
         self.deadline_ratio_warn_threshold = float(
             self.get_parameter("deadline_ratio_warn_threshold").value
         )
-        self.controller_update_rate_label = float(
-            self.get_parameter("controller_update_rate_label").value
-        )
-        if self.controller_update_rate_label <= 0.0:
-            self.get_logger().warn(
-                "[GOAL2 D] controller_update_rate_label must be > 0; using 50.0 Hz"
-            )
-            self.controller_update_rate_label = 50.0
         if self.deadline_ratio_warn_threshold < 0.0:
             self.get_logger().warn(
                 "[GOAL2 D] deadline_ratio_warn_threshold must be >= 0; using 0.8"
             )
             self.deadline_ratio_warn_threshold = 0.8
 
-        self.callback_deadline_ms = 1000.0 / self.controller_update_rate_label
+        self.callback_deadline_ms = 1000.0 / self.control_frequency
         self.timing_history = []
         self.timing_callback_index = 0
         self._last_callback_perf = None
@@ -376,7 +404,7 @@ class CartesianImpedanceController(Node):
                 "[GOAL2 D] Timing logging enabled: "
                 f"stride={self.timing_log_stride}, "
                 f"output_dir='{self.timing_output_dir}', "
-                f"controller_update_rate_label={self.controller_update_rate_label}, "
+                f"control_frequency={self.control_frequency}, "
                 f"deadline_ms={self.callback_deadline_ms:.3f}"
             )
         else:
@@ -455,6 +483,7 @@ class CartesianImpedanceController(Node):
         self._latest_y_hat = np.zeros(7, dtype=float)
         self._gp_warned = False  # 避免一直刷 warn
         self.y_hat_cloud = np.zeros(7)
+        self.y_hat_cloud_current = np.zeros(7)
         self.y_hat_cloud_history = []
 
         self.future_n_samples = 0         # 未来采样点个数
@@ -485,14 +514,14 @@ class CartesianImpedanceController(Node):
         self.tau_alpha = 0.1
         self.tau_beta  = 0.005
 
-        #simulated dalay
+        # simulated future trajectory request delay
         self.future_delay = self.declare_parameter(
             'future_delay', 0.00 # 默认 60 ms
         ).value
-        self.state_delay_steps = 0   # 你想模拟的通信延迟：20个周期
         self.state_buffer = deque(maxlen=1000)  # 存2秒(1kHz)都够
-        self.cloud_delay_steps = 100
-        self.y_hat_cloud_buffer = deque(maxlen=self.cloud_delay_steps)
+        # GOAL2-B cloud-like output takt delay buffer；最大支持 delay_steps=100。
+        # 这里延迟 prediction output，不把 delay_steps 当作 GP hyperparameter 或真实 network latency。
+        self.y_hat_cloud_buffer = deque(maxlen=101)
         
         #future prediction state comparison
         self.prev_q_pred = None
@@ -590,6 +619,10 @@ class CartesianImpedanceController(Node):
             timing_row = {field: "" for field in GOAL2D_TIMING_FIELDS}
             timing_row.update({
                 "event": "callback",
+                "run_name": self.run_name,
+                "trajectory_mode": self.trajectory_mode,
+                "control_frequency": self.control_frequency,
+                "timing_output_dir": self.timing_output_dir,
                 "callback_index": callback_index,
                 "callback_period_ms": callback_period_ms,
                 "callback_deadline_ms": self.callback_deadline_ms,
@@ -629,6 +662,8 @@ class CartesianImpedanceController(Node):
                 "gp_online_update_enabled": int(bool(self.gp_online_update_enabled)),
                 "gp_compensation_enabled": int(bool(self.gp_compensation_enabled)),
                 "gp_compensation_source": self.gp_compensation_source,
+                "gp_compensation_scale": self.gp_compensation_scale,
+                "gp_compensation_clip_nm": self.gp_compensation_clip_nm,
                 "delay_steps": self.delay_steps,
             })
             self.timing_history.append(timing_row)
@@ -656,6 +691,10 @@ class CartesianImpedanceController(Node):
             timing_row = {field: "" for field in GOAL2D_TIMING_FIELDS}
             timing_row.update({
                 "event": "csv_save",
+                "run_name": self.run_name,
+                "trajectory_mode": self.trajectory_mode,
+                "control_frequency": self.control_frequency,
+                "timing_output_dir": self.timing_output_dir,
                 "callback_deadline_ms": self.callback_deadline_ms,
                 "csv_save_ms": csv_save_ms,
                 "data_recording_enabled": int(bool(self.data_recording_enabled)),
@@ -663,6 +702,8 @@ class CartesianImpedanceController(Node):
                 "gp_online_update_enabled": int(bool(self.gp_online_update_enabled)),
                 "gp_compensation_enabled": int(bool(self.gp_compensation_enabled)),
                 "gp_compensation_source": self.gp_compensation_source,
+                "gp_compensation_scale": self.gp_compensation_scale,
+                "gp_compensation_clip_nm": self.gp_compensation_clip_nm,
                 "delay_steps": self.delay_steps,
             })
             self.timing_history.append(timing_row)
@@ -687,7 +728,13 @@ class CartesianImpedanceController(Node):
 
         try:
             os.makedirs(self.timing_output_dir, exist_ok=True)
-            filename = os.path.join(self.timing_output_dir, "goal2d_controller_timing.csv")
+            run_name_stem = Path(self.run_name).name if self.run_name else ""
+            filename_stem = (
+                f"{run_name_stem}_goal2d_controller_timing.csv"
+                if run_name_stem
+                else "goal2d_controller_timing.csv"
+            )
+            filename = os.path.join(self.timing_output_dir, filename_stem)
 
             with open(filename, 'w', newline='') as csvfile:
                 writer = csv.DictWriter(csvfile, fieldnames=GOAL2D_TIMING_FIELDS)
@@ -1171,96 +1218,21 @@ class CartesianImpedanceController(Node):
                 self.y_hat_local = y_hat_local
                 self.var_local = var_local
 
-                # Td = float(self.future_delay)
-                delay_steps = self.delay_steps
-
-                base_state = None
-                if len(self.state_buffer) > delay_steps:
-                    base_state = self.state_buffer[-(delay_steps + 1)]
-                elif len(self.state_buffer) > 0:
-                    base_state = self.state_buffer[0]
-
-                if base_state is not None:
-                    q_base = base_state["q"].copy()
-                    dq_base = base_state["dq"].copy()
-                    ddq_base = base_state["ddq_est"].copy()
-                    tau_base = base_state["tau_res"].copy()
-                else:
-                    q_base = q.copy()
-                    dq_base = dq.copy()
-                    ddq_base = ddq_est.copy()
-                    tau_base = self.tau_residual_filtered.copy()
-
-                # # ===== big GP 用基准帧先更新 =====
-                _, _ = self._gp_predict_and_update(
-                    q_base, dq_base, ddq_des_joint,
-                    tau_base,
+                # GOAL2-B delay_steps 是 cloud-like prediction output 的 controller-tick delay。
+                # local prediction 不经过此 buffer；这也不代表真实 network latency。
+                y_hat_cloud_current, var_cloud_current = self._gp_predict_and_update(
+                    q, dq_pred_next, ddq,
+                    self.tau_residual_filtered,
                     self.gp_models_big,
-                    # big GP 的主路径更新同样受 frozen GP 开关保护。
                     update=self.gp_online_update_enabled,
                     timing_label="cloud_like",
                     timing_row=timing_row
                 )
-
-                # ===== 在 Td 附近均匀采样多个 rollout 点 =====
-                self.cloud_rollout_n = 1
-                self.cloud_rollout_span = 0.001
-                Td_center = delay_steps * dt
-                Td_samples = self._sample_rollout_times_uniform(
-                    Td_center,
-                    self.cloud_rollout_n,
-                    self.cloud_rollout_span
+                self.y_hat_cloud_current = y_hat_cloud_current.copy()
+                self.y_hat_cloud, self.var_cloud = self._delay_cloud_like_output(
+                    y_hat_cloud_current,
+                    var_cloud_current
                 )
-
-                y_list = []
-                var_list = []
-                Td_list = []
-
-                # for Td_i in Td_samples:
-                #     q_roll  = q_base + dq_base * Td_i + 0.5 * ddq_base * (Td_i ** 2)
-                #     dq_roll = dq_base + ddq_base * Td_i
-                #     ddq_roll = ddq_base.copy()
-
-                #     # ===== 找历史中最近的点 =====
-                #     nearest_state, nearest_dist = self._find_nearest_history_state(
-                #         q_roll, dq_roll, ddq_roll, use_ddq=False
-                #     )
-
-                #     if nearest_state is not None:
-                #         q_nn = nearest_state["q"].copy()
-                #         dq_nn = nearest_state["dq"].copy()
-                #         ddq_nn = nearest_state["ddq_est"].copy()
-                #     else:
-                #         q_nn = q_roll.copy()
-                #         dq_nn = dq_roll.copy()
-                #         ddq_nn = ddq_roll.copy()
-
-                y_hat_i, var_i = self._gp_predict_and_update(
-                    q, dq_pred_next, ddq,
-                    tau_base,
-                    self.gp_models_big,
-                    update=False,
-                    timing_label="cloud_like",
-                    timing_row=timing_row
-                )
-                self.y_hat_cloud = y_hat_i.copy()
-                    # y_list.append(y_hat_i.copy())
-                    # var_list.append(var_i.copy())
-                    # Td_list.append(Td_i)
-
-                # ===== variance-weighted fusion =====
-                y_arr = np.asarray(y_list, dtype=float)      # (N, 7)
-                var_arr = np.asarray(var_list, dtype=float)  # (N, 7)
-
-                eps = 1e-8
-                prec_arr = 1.0 / np.maximum(var_arr, eps)    # (N, 7)
-                w_arr = prec_arr / np.sum(prec_arr, axis=0, keepdims=True)
-
-                y_hat_cloud = np.sum(y_arr * w_arr, axis=0)
-                var_cloud = 1.0 / np.maximum(np.sum(prec_arr, axis=0), eps)
-
-                # self.y_hat_cloud = y_hat_cloud.copy()
-                # self.var_cloud = var_cloud.copy()
                 
                 # ---------------------------------------------------------
                 # C) 每帧融合（不要只在 else 融合）
@@ -1279,7 +1251,9 @@ class CartesianImpedanceController(Node):
 
             # tau = tau - self.y_hat_local
             # 默认 compensation 关闭时返回原始 tau；开启后才按原注释方向补偿。
+            self._tau_nominal = tau.copy()
             tau = self._apply_gp_compensation(tau)
+            self._tau_final = tau.copy()
             # publish on topic /effort_command
             self.effort_msg.efforts = tau.tolist()
             self.effort_publisher.publish(self.effort_msg)
@@ -1288,6 +1262,13 @@ class CartesianImpedanceController(Node):
             if self.data_recording_enabled:
                 csv_append_start = time.perf_counter() if timing_row is not None else None
                 self.tau_history.append(tau.tolist())
+                self.tau_nominal_history.append(self._tau_nominal.tolist())
+                self.tau_final_history.append(self._tau_final.tolist())
+                self.gp_source_code_history.append(int(self._gp_source_code))
+                self.gp_selected_raw_history.append(self._gp_selected_raw.tolist())
+                self.gp_scaled_history.append(self._gp_scaled.tolist())
+                self.gp_applied_history.append(self._gp_applied.tolist())
+                self.gp_clip_active_history.append(self._gp_clip_active.tolist())
                 self.time_history.append(t_elapsed)
                 self.x_history.append(x.tolist())
                 self.x_des_history.append(self.x_des.tolist())
@@ -1768,26 +1749,53 @@ class CartesianImpedanceController(Node):
 
         return best_state, best_dist
 
+    def _delay_cloud_like_output(self, y_hat_current, var_current):
+        """Return the cloud-like prediction delayed by exactly delay_steps controller ticks."""
+        y_hat_current = np.asarray(y_hat_current, dtype=float).copy()
+        var_current = np.asarray(var_current, dtype=float).copy()
+        self.y_hat_cloud_buffer.append((y_hat_current, var_current))
+
+        if self.delay_steps == 0:
+            return y_hat_current, var_current
+
+        if len(self.y_hat_cloud_buffer) <= self.delay_steps:
+            return np.zeros(7, dtype=float), np.ones(7, dtype=float) * 1e6
+
+        y_hat_delayed, var_delayed = self.y_hat_cloud_buffer[-(self.delay_steps + 1)]
+        return y_hat_delayed.copy(), var_delayed.copy()
+
     def _apply_gp_compensation(self, tau):
         # 默认不改变最终 tau，只有显式开启 gp_compensation_enabled 才进入 torque command。
         if not self.gp_prediction_enabled or not self.gp_compensation_enabled:
+            self._gp_source_code = 0
+            self._gp_selected_raw = np.zeros(7, dtype=float)
+            self._gp_scaled = np.zeros(7, dtype=float)
+            self._gp_applied = np.zeros(7, dtype=float)
+            self._gp_clip_active = np.zeros(7, dtype=int)
             return tau
 
         # source 支持 local/cloud/combined；combined 使用两个 prediction 的保守平均。
         if self.gp_compensation_source == "cloud":
             compensation = self.y_hat_cloud
+            self._gp_source_code = 2
         elif self.gp_compensation_source == "combined":
             compensation = 0.5 * (self.y_hat_local + self.y_hat_cloud)
+            self._gp_source_code = 3
         else:
             compensation = self.y_hat_local
+            self._gp_source_code = 1
 
         # 先 scale 再 per-joint clip，避免 GP prediction 直接大幅影响 torque command。
-        scaled_compensation = self.gp_compensation_scale * np.asarray(compensation, dtype=float)
-        clipped_compensation = np.clip(
-            scaled_compensation,
+        self._gp_selected_raw = np.asarray(compensation, dtype=float).copy()
+        self._gp_scaled = self.gp_compensation_scale * self._gp_selected_raw
+        self._gp_applied = np.clip(
+            self._gp_scaled,
             -self.gp_compensation_clip_nm,
             self.gp_compensation_clip_nm
         )
+        self._gp_clip_active = (
+            np.abs(self._gp_scaled - self._gp_applied) > 1e-12
+        ).astype(int)
 
         if not self._gp_compensation_logged:
             self.get_logger().warn(
@@ -1799,7 +1807,7 @@ class CartesianImpedanceController(Node):
             self._gp_compensation_logged = True
 
         # 符号方向沿用原注释：tau = tau - compensation。
-        return tau - clipped_compensation
+        return tau - self._gp_applied
 
     def _gp_predict_and_update(
         self,
@@ -1977,7 +1985,15 @@ class CartesianImpedanceController(Node):
             return
 
         try:
-            filename = 'cartesian_impedance_controller_data.csv'
+            output_dir = Path(self.data_output_dir).expanduser()
+            output_dir.mkdir(parents=True, exist_ok=True)
+            run_name_stem = Path(self.run_name).name if self.run_name else ""
+            filename_stem = (
+                f"{run_name_stem}_cartesian_impedance_controller_data.csv"
+                if run_name_stem
+                else "cartesian_impedance_controller_data.csv"
+            )
+            filename = output_dir / filename_stem
 
             # 计算可用的最小长度，避免某些列表短导致越界
             series_list = [
@@ -2034,6 +2050,26 @@ class CartesianImpedanceController(Node):
                 header.extend([f'dq_future_actual_{i+1}' for i in range(7)])
                 header.extend([f'q_pred_err_{i+1}' for i in range(7)])
                 header.extend([f'dq_pred_err_{i+1}' for i in range(7)])
+                header.extend([
+                    'run_name',
+                    'trajectory_mode',
+                    'control_frequency',
+                    'delay_steps',
+                    'data_output_dir',
+                    'gp_prediction_enabled',
+                    'gp_online_update_enabled',
+                    'gp_compensation_enabled',
+                    'gp_compensation_source',
+                    'gp_compensation_source_code',
+                    'gp_compensation_scale',
+                    'gp_compensation_clip_nm',
+                ])
+                header.extend([f'tau_nominal_{i+1}' for i in range(7)])
+                header.extend([f'tau_final_{i+1}' for i in range(7)])
+                header.extend([f'gp_selected_raw_{i+1}' for i in range(7)])
+                header.extend([f'gp_scaled_{i+1}' for i in range(7)])
+                header.extend([f'gp_applied_{i+1}' for i in range(7)])
+                header.extend([f'gp_clip_active_{i+1}' for i in range(7)])
                 writer.writerow(header)
 
                 for i in range(min_len):
@@ -2123,6 +2159,62 @@ class CartesianImpedanceController(Node):
                         row.extend(self.dq_pred_err_history[i])
                     else:
                         row.extend([0.0] * 7)
+
+                    if i < len(self.gp_source_code_history):
+                        gp_source_code = int(self.gp_source_code_history[i])
+                    else:
+                        gp_source_code = int(self._gp_source_code)
+
+                    row.extend([
+                        self.run_name,
+                        self.trajectory_mode,
+                        self.control_frequency,
+                        self.delay_steps,
+                        self.data_output_dir,
+                        int(bool(self.gp_prediction_enabled)),
+                        int(bool(self.gp_online_update_enabled)),
+                        int(bool(self.gp_compensation_enabled)),
+                        self.gp_compensation_source,
+                        gp_source_code,
+                        self.gp_compensation_scale,
+                        self.gp_compensation_clip_nm,
+                    ])
+
+                    if i < len(self.tau_nominal_history):
+                        row.extend(self.tau_nominal_history[i])
+                    else:
+                        row.extend([0.0] * 7)
+
+                    if i < len(self.tau_final_history):
+                        row.extend(self.tau_final_history[i])
+                    else:
+                        row.extend([0.0] * 7)
+
+                    if i < len(self.gp_selected_raw_history):
+                        row.extend(self.gp_selected_raw_history[i])
+                    else:
+                        row.extend([0.0] * 7)
+
+                    if i < len(self.gp_scaled_history):
+                        row.extend(self.gp_scaled_history[i])
+                    else:
+                        row.extend([0.0] * 7)
+
+                    if i < len(self.gp_applied_history):
+                        row.extend(self.gp_applied_history[i])
+                    else:
+                        row.extend([0.0] * 7)
+
+                    if i < len(self.gp_clip_active_history):
+                        row.extend([int(v) for v in self.gp_clip_active_history[i]])
+                    else:
+                        row.extend([0] * 7)
+
+                    if len(row) != len(header):
+                        self.get_logger().warning(
+                            f"CSV row length mismatch at row {i}: "
+                            f"header={len(header)}, row={len(row)}"
+                        )
 
                     writer.writerow(row)
 

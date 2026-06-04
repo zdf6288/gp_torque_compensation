@@ -19,7 +19,9 @@ def generate_launch_description():
     spawn_cpp_relayer_parameter_name = 'spawn_cpp_relayer'
     spawn_gp_server_parameter_name = 'spawn_gp_server'
     spawn_fake_state_parameter_publisher_parameter_name = 'spawn_fake_state_parameter_publisher'
-    fake_state_parameter_publish_rate_hz_parameter_name = 'fake_state_parameter_publish_rate_hz'
+    control_frequency_parameter_name = 'control_frequency'
+    run_name_parameter_name = 'run_name'
+    data_output_dir_parameter_name = 'data_output_dir'
     # Stage 1: frozen GP / compensation experiment 参数，默认值保持安全。
     gp_prediction_enabled_parameter_name = 'gp_prediction_enabled'
     gp_online_update_enabled_parameter_name = 'gp_online_update_enabled'
@@ -35,13 +37,29 @@ def generate_launch_description():
     timing_log_stride_parameter_name = 'timing_log_stride'
     timing_output_dir_parameter_name = 'timing_output_dir'
     deadline_ratio_warn_threshold_parameter_name = 'deadline_ratio_warn_threshold'
-    controller_update_rate_label_parameter_name = 'controller_update_rate_label'
     # Stage 3A trajectory 参数默认保持 planar_circle，只有显式传参才启用 z modulation。
     trajectory_mode_parameter_name = 'trajectory_mode'
     z_amplitude_parameter_name = 'z_amplitude'
     z_frequency_multiplier_parameter_name = 'z_frequency_multiplier'
     circle_frequency_parameter_name = 'circle_frequency'
     transition_duration_parameter_name = 'transition_duration'
+    goal1_multisine_x_primary_amplitude_parameter_name = 'goal1_multisine_x_primary_amplitude'
+    goal1_multisine_x_secondary_amplitude_parameter_name = 'goal1_multisine_x_secondary_amplitude'
+    goal1_multisine_y_primary_amplitude_parameter_name = 'goal1_multisine_y_primary_amplitude'
+    goal1_multisine_y_secondary_amplitude_parameter_name = 'goal1_multisine_y_secondary_amplitude'
+    goal1_multisine_z_primary_amplitude_parameter_name = 'goal1_multisine_z_primary_amplitude'
+    goal1_multisine_z_secondary_amplitude_parameter_name = 'goal1_multisine_z_secondary_amplitude'
+    goal1_multisine_x_primary_frequency_multiplier_parameter_name = 'goal1_multisine_x_primary_frequency_multiplier'
+    goal1_multisine_x_secondary_frequency_multiplier_parameter_name = 'goal1_multisine_x_secondary_frequency_multiplier'
+    goal1_multisine_y_primary_frequency_multiplier_parameter_name = 'goal1_multisine_y_primary_frequency_multiplier'
+    goal1_multisine_y_secondary_frequency_multiplier_parameter_name = 'goal1_multisine_y_secondary_frequency_multiplier'
+    goal1_multisine_z_primary_frequency_multiplier_parameter_name = 'goal1_multisine_z_primary_frequency_multiplier'
+    goal1_multisine_z_secondary_frequency_multiplier_parameter_name = 'goal1_multisine_z_secondary_frequency_multiplier'
+    goal1_multisine_phi_x2_parameter_name = 'goal1_multisine_phi_x2'
+    goal1_multisine_phi_y1_parameter_name = 'goal1_multisine_phi_y1'
+    goal1_multisine_phi_y2_parameter_name = 'goal1_multisine_phi_y2'
+    goal1_multisine_phi_z1_parameter_name = 'goal1_multisine_phi_z1'
+    goal1_multisine_phi_z2_parameter_name = 'goal1_multisine_phi_z2'
 
     robot_ip = LaunchConfiguration(robot_ip_parameter_name)
     load_gripper = LaunchConfiguration(load_gripper_parameter_name)
@@ -52,8 +70,9 @@ def generate_launch_description():
     spawn_gp_server = LaunchConfiguration(spawn_gp_server_parameter_name)
     spawn_fake_state_parameter_publisher = LaunchConfiguration(
         spawn_fake_state_parameter_publisher_parameter_name)
-    fake_state_parameter_publish_rate_hz = LaunchConfiguration(
-        fake_state_parameter_publish_rate_hz_parameter_name)
+    control_frequency = LaunchConfiguration(control_frequency_parameter_name)
+    run_name = LaunchConfiguration(run_name_parameter_name)
+    data_output_dir = LaunchConfiguration(data_output_dir_parameter_name)
     gp_prediction_enabled = LaunchConfiguration(gp_prediction_enabled_parameter_name)
     gp_online_update_enabled = LaunchConfiguration(gp_online_update_enabled_parameter_name)
     gp_model_dir = LaunchConfiguration(gp_model_dir_parameter_name)
@@ -67,13 +86,40 @@ def generate_launch_description():
     timing_output_dir = LaunchConfiguration(timing_output_dir_parameter_name)
     deadline_ratio_warn_threshold = LaunchConfiguration(
         deadline_ratio_warn_threshold_parameter_name)
-    controller_update_rate_label = LaunchConfiguration(
-        controller_update_rate_label_parameter_name)
     trajectory_mode = LaunchConfiguration(trajectory_mode_parameter_name)
     z_amplitude = LaunchConfiguration(z_amplitude_parameter_name)
     z_frequency_multiplier = LaunchConfiguration(z_frequency_multiplier_parameter_name)
     circle_frequency = LaunchConfiguration(circle_frequency_parameter_name)
     transition_duration = LaunchConfiguration(transition_duration_parameter_name)
+    goal1_multisine_x_primary_amplitude = LaunchConfiguration(
+        goal1_multisine_x_primary_amplitude_parameter_name)
+    goal1_multisine_x_secondary_amplitude = LaunchConfiguration(
+        goal1_multisine_x_secondary_amplitude_parameter_name)
+    goal1_multisine_y_primary_amplitude = LaunchConfiguration(
+        goal1_multisine_y_primary_amplitude_parameter_name)
+    goal1_multisine_y_secondary_amplitude = LaunchConfiguration(
+        goal1_multisine_y_secondary_amplitude_parameter_name)
+    goal1_multisine_z_primary_amplitude = LaunchConfiguration(
+        goal1_multisine_z_primary_amplitude_parameter_name)
+    goal1_multisine_z_secondary_amplitude = LaunchConfiguration(
+        goal1_multisine_z_secondary_amplitude_parameter_name)
+    goal1_multisine_x_primary_frequency_multiplier = LaunchConfiguration(
+        goal1_multisine_x_primary_frequency_multiplier_parameter_name)
+    goal1_multisine_x_secondary_frequency_multiplier = LaunchConfiguration(
+        goal1_multisine_x_secondary_frequency_multiplier_parameter_name)
+    goal1_multisine_y_primary_frequency_multiplier = LaunchConfiguration(
+        goal1_multisine_y_primary_frequency_multiplier_parameter_name)
+    goal1_multisine_y_secondary_frequency_multiplier = LaunchConfiguration(
+        goal1_multisine_y_secondary_frequency_multiplier_parameter_name)
+    goal1_multisine_z_primary_frequency_multiplier = LaunchConfiguration(
+        goal1_multisine_z_primary_frequency_multiplier_parameter_name)
+    goal1_multisine_z_secondary_frequency_multiplier = LaunchConfiguration(
+        goal1_multisine_z_secondary_frequency_multiplier_parameter_name)
+    goal1_multisine_phi_x2 = LaunchConfiguration(goal1_multisine_phi_x2_parameter_name)
+    goal1_multisine_phi_y1 = LaunchConfiguration(goal1_multisine_phi_y1_parameter_name)
+    goal1_multisine_phi_y2 = LaunchConfiguration(goal1_multisine_phi_y2_parameter_name)
+    goal1_multisine_phi_z1 = LaunchConfiguration(goal1_multisine_phi_z1_parameter_name)
+    goal1_multisine_phi_z2 = LaunchConfiguration(goal1_multisine_phi_z2_parameter_name)
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -112,16 +158,25 @@ def generate_launch_description():
             description='Only for GOAL2 fake/sim smoke; publishes synthetic /state_parameter '
                         'when use_fake_hardware:=true.'),
         DeclareLaunchArgument(
-            fake_state_parameter_publish_rate_hz_parameter_name,
-            default_value='50.0',
-            description='Publish rate for GOAL2 fake/sim synthetic /state_parameter.'),
+            control_frequency_parameter_name,
+            default_value='50',
+            choices=['25', '50'],
+            description='GOAL2-B true controller, trajectory, and fake-state frequency in Hz.'),
+        DeclareLaunchArgument(
+            run_name_parameter_name,
+            default_value='',
+            description='Optional unique GOAL2-B run name written to CSV metadata and filename.'),
+        DeclareLaunchArgument(
+            data_output_dir_parameter_name,
+            default_value='.',
+            description='Directory for the controller data CSV.'),
         DeclareLaunchArgument(
             gp_prediction_enabled_parameter_name,
             default_value='true',
             description='Enable GP prediction path in the controller.'),
         DeclareLaunchArgument(
             gp_online_update_enabled_parameter_name,
-            default_value='true',
+            default_value='false',
             description='Enable online GP model updates in the controller.'),
         DeclareLaunchArgument(
             gp_model_dir_parameter_name,
@@ -163,15 +218,11 @@ def generate_launch_description():
             deadline_ratio_warn_threshold_parameter_name,
             default_value='0.8',
             description='Warn in timing summary when max callback deadline ratio reaches this threshold.'),
-        DeclareLaunchArgument(
-            controller_update_rate_label_parameter_name,
-            default_value='50.0',
-            description='Controller update-rate label in Hz for timing deadline calculations.'),
         # Stage 3A launch defaults 保持 Stage 1 / Stage 2A 的平面圆轨迹行为。
         DeclareLaunchArgument(
             trajectory_mode_parameter_name,
             default_value='planar_circle',
-            description='Trajectory mode: planar_circle or z_modulated_circle.'),
+            description='Trajectory mode: planar_circle, z_modulated_circle, or goal1_spatial_multisine.'),
         DeclareLaunchArgument(
             z_amplitude_parameter_name,
             default_value='0.0',
@@ -188,6 +239,75 @@ def generate_launch_description():
             transition_duration_parameter_name,
             default_value='3.0',
             description='Smooth transition duration before trajectory recording starts.'),
+        # GOAL2-B 只迁移 spatial multisine position 参数；不迁移 GOAL1 historical/orientation/q7。
+        DeclareLaunchArgument(
+            goal1_multisine_x_primary_amplitude_parameter_name,
+            default_value='0.040',
+            description='GOAL2-B spatial multisine x primary amplitude in meters.'),
+        DeclareLaunchArgument(
+            goal1_multisine_x_secondary_amplitude_parameter_name,
+            default_value='0.012',
+            description='GOAL2-B spatial multisine x secondary amplitude in meters.'),
+        DeclareLaunchArgument(
+            goal1_multisine_y_primary_amplitude_parameter_name,
+            default_value='0.035',
+            description='GOAL2-B spatial multisine y primary amplitude in meters.'),
+        DeclareLaunchArgument(
+            goal1_multisine_y_secondary_amplitude_parameter_name,
+            default_value='0.012',
+            description='GOAL2-B spatial multisine y secondary amplitude in meters.'),
+        DeclareLaunchArgument(
+            goal1_multisine_z_primary_amplitude_parameter_name,
+            default_value='0.030',
+            description='GOAL2-B spatial multisine z primary amplitude in meters.'),
+        DeclareLaunchArgument(
+            goal1_multisine_z_secondary_amplitude_parameter_name,
+            default_value='0.010',
+            description='GOAL2-B spatial multisine z secondary amplitude in meters.'),
+        DeclareLaunchArgument(
+            goal1_multisine_x_primary_frequency_multiplier_parameter_name,
+            default_value='1.0',
+            description='GOAL2-B spatial multisine x primary frequency multiplier.'),
+        DeclareLaunchArgument(
+            goal1_multisine_x_secondary_frequency_multiplier_parameter_name,
+            default_value='2.1',
+            description='GOAL2-B spatial multisine x secondary frequency multiplier.'),
+        DeclareLaunchArgument(
+            goal1_multisine_y_primary_frequency_multiplier_parameter_name,
+            default_value='1.3',
+            description='GOAL2-B spatial multisine y primary frequency multiplier.'),
+        DeclareLaunchArgument(
+            goal1_multisine_y_secondary_frequency_multiplier_parameter_name,
+            default_value='2.4',
+            description='GOAL2-B spatial multisine y secondary frequency multiplier.'),
+        DeclareLaunchArgument(
+            goal1_multisine_z_primary_frequency_multiplier_parameter_name,
+            default_value='0.7',
+            description='GOAL2-B spatial multisine z primary frequency multiplier.'),
+        DeclareLaunchArgument(
+            goal1_multisine_z_secondary_frequency_multiplier_parameter_name,
+            default_value='1.9',
+            description='GOAL2-B spatial multisine z secondary frequency multiplier.'),
+        DeclareLaunchArgument(
+            goal1_multisine_phi_x2_parameter_name,
+            default_value='0.7',
+            description='GOAL2-B spatial multisine x secondary phase in radians.'),
+        DeclareLaunchArgument(
+            goal1_multisine_phi_y1_parameter_name,
+            default_value='0.4',
+            description='GOAL2-B spatial multisine y primary phase in radians.'),
+        DeclareLaunchArgument(
+            goal1_multisine_phi_y2_parameter_name,
+            default_value='1.3',
+            description='GOAL2-B spatial multisine y secondary phase in radians.'),
+        DeclareLaunchArgument(
+            goal1_multisine_phi_z1_parameter_name,
+            default_value='0.2',
+            description='GOAL2-B spatial multisine z primary phase in radians.'),
+        DeclareLaunchArgument(
+            goal1_multisine_phi_z2_parameter_name,
+            default_value='1.1',
+            description='GOAL2-B spatial multisine z secondary phase in radians.'),
 
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource([PathJoinSubstitution(
@@ -196,7 +316,8 @@ def generate_launch_description():
                               load_gripper_parameter_name: load_gripper,
                               use_fake_hardware_parameter_name: use_fake_hardware,
                               fake_sensor_commands_parameter_name: fake_sensor_commands,
-                              use_rviz_parameter_name: use_rviz
+                              use_rviz_parameter_name: use_rviz,
+                              control_frequency_parameter_name: control_frequency
                               }.items(),
         ),
 
@@ -225,7 +346,7 @@ def generate_launch_description():
                 use_fake_hardware_parameter_name: ParameterValue(
                     use_fake_hardware, value_type=bool),
                 'publish_rate_hz': ParameterValue(
-                    fake_state_parameter_publish_rate_hz, value_type=float),
+                    control_frequency, value_type=float),
                 'arm_id': 'panda',
             }],
         ),
@@ -245,6 +366,11 @@ def generate_launch_description():
                 gp_compensation_clip_nm_parameter_name: gp_compensation_clip_nm,
                 delay_steps_parameter_name: ParameterValue(
                     delay_steps, value_type=int),
+                control_frequency_parameter_name: ParameterValue(
+                    control_frequency, value_type=float),
+                run_name_parameter_name: ParameterValue(run_name, value_type=str),
+                data_output_dir_parameter_name: ParameterValue(data_output_dir, value_type=str),
+                trajectory_mode_parameter_name: ParameterValue(trajectory_mode, value_type=str),
                 timing_logging_enabled_parameter_name: ParameterValue(
                     timing_logging_enabled, value_type=bool),
                 timing_log_stride_parameter_name: ParameterValue(
@@ -253,8 +379,6 @@ def generate_launch_description():
                     timing_output_dir, value_type=str),
                 deadline_ratio_warn_threshold_parameter_name: ParameterValue(
                     deadline_ratio_warn_threshold, value_type=float),
-                controller_update_rate_label_parameter_name: ParameterValue(
-                    controller_update_rate_label, value_type=float),
             }]
         ),
         Node(
@@ -263,6 +387,8 @@ def generate_launch_description():
             name='trajectory_publisher',
             output='screen',
             parameters=[{
+                control_frequency_parameter_name: ParameterValue(
+                    control_frequency, value_type=float),
                 trajectory_mode_parameter_name: ParameterValue(trajectory_mode, value_type=str),
                 z_amplitude_parameter_name: ParameterValue(z_amplitude, value_type=float),
                 z_frequency_multiplier_parameter_name: ParameterValue(
@@ -270,6 +396,40 @@ def generate_launch_description():
                 circle_frequency_parameter_name: ParameterValue(circle_frequency, value_type=float),
                 transition_duration_parameter_name: ParameterValue(
                     transition_duration, value_type=float),
+                goal1_multisine_x_primary_amplitude_parameter_name: ParameterValue(
+                    goal1_multisine_x_primary_amplitude, value_type=float),
+                goal1_multisine_x_secondary_amplitude_parameter_name: ParameterValue(
+                    goal1_multisine_x_secondary_amplitude, value_type=float),
+                goal1_multisine_y_primary_amplitude_parameter_name: ParameterValue(
+                    goal1_multisine_y_primary_amplitude, value_type=float),
+                goal1_multisine_y_secondary_amplitude_parameter_name: ParameterValue(
+                    goal1_multisine_y_secondary_amplitude, value_type=float),
+                goal1_multisine_z_primary_amplitude_parameter_name: ParameterValue(
+                    goal1_multisine_z_primary_amplitude, value_type=float),
+                goal1_multisine_z_secondary_amplitude_parameter_name: ParameterValue(
+                    goal1_multisine_z_secondary_amplitude, value_type=float),
+                goal1_multisine_x_primary_frequency_multiplier_parameter_name: ParameterValue(
+                    goal1_multisine_x_primary_frequency_multiplier, value_type=float),
+                goal1_multisine_x_secondary_frequency_multiplier_parameter_name: ParameterValue(
+                    goal1_multisine_x_secondary_frequency_multiplier, value_type=float),
+                goal1_multisine_y_primary_frequency_multiplier_parameter_name: ParameterValue(
+                    goal1_multisine_y_primary_frequency_multiplier, value_type=float),
+                goal1_multisine_y_secondary_frequency_multiplier_parameter_name: ParameterValue(
+                    goal1_multisine_y_secondary_frequency_multiplier, value_type=float),
+                goal1_multisine_z_primary_frequency_multiplier_parameter_name: ParameterValue(
+                    goal1_multisine_z_primary_frequency_multiplier, value_type=float),
+                goal1_multisine_z_secondary_frequency_multiplier_parameter_name: ParameterValue(
+                    goal1_multisine_z_secondary_frequency_multiplier, value_type=float),
+                goal1_multisine_phi_x2_parameter_name: ParameterValue(
+                    goal1_multisine_phi_x2, value_type=float),
+                goal1_multisine_phi_y1_parameter_name: ParameterValue(
+                    goal1_multisine_phi_y1, value_type=float),
+                goal1_multisine_phi_y2_parameter_name: ParameterValue(
+                    goal1_multisine_phi_y2, value_type=float),
+                goal1_multisine_phi_z1_parameter_name: ParameterValue(
+                    goal1_multisine_phi_z1, value_type=float),
+                goal1_multisine_phi_z2_parameter_name: ParameterValue(
+                    goal1_multisine_phi_z2, value_type=float),
             }]
         ),
         # Node(

@@ -21,6 +21,8 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_COLUMNS = [
+    "control_frequency",
+    "delay_steps",
     "callback_wall_ms",
     "callback_period_ms",
     "callback_deadline_ms",
@@ -33,10 +35,14 @@ EXPECTED_COLUMNS = [
     "future_request_ms",
     "csv_append_ms",
     "csv_save_ms",
+    "gp_compensation_scale",
+    "gp_compensation_clip_nm",
     "exception_flag",
 ]
 
 KEY_COLUMNS = [
+    "control_frequency",
+    "delay_steps",
     "callback_wall_ms",
     "callback_deadline_ms",
     "callback_deadline_ratio",
