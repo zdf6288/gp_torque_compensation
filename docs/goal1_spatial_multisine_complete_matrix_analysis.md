@@ -41,6 +41,7 @@
 - `gp_compensation_summary_scale1_only.csv`
 - `clip_summary.csv`
 - `clip_summary_scale1_only.csv`
+- `scale1_frozen_online_comparison.csv`
 - `analysis_summary.md`
 
 如果 `matplotlib` 可用且没有传入 `--no-plots`，还会生成：
@@ -56,6 +57,11 @@
 - `max_abs_gp_applied_by_run_scale1_only.png`
 - `clip_active_count_by_run_scale1_only.png`
 - `clip_active_count_by_joint_scale1_only.png`
+- `online_tracking_rmse_comparison_scale1_with_nogp_baseline.png`
+- `frozen_vs_online_tracking_rmse_scale1.png`
+- `frozen_vs_online_gp_applied_scale1.png`
+- `scale1_tracking_improvement_over_nogp.png`
+- `frozen_online_clip_active_count_scale1.png`
 
 ## Latest Generated Snapshot
 
@@ -79,6 +85,15 @@ Scale 1.0-only plots 用来隔离主视觉对比：
 - `online_tracking_rmse_comparison_scale1_only.png` 只包含 online local/cloud/combined scale 1.0。
 - `max_abs_gp_applied_by_run_scale1_only.png` 和 `clip_active_count_by_run_scale1_only.png` 只包含 scale 1.0 且 GP-on 的 frozen/online local/cloud/combined runs。
 - `clip_active_count_by_joint_scale1_only.png` 汇总 scale 1.0 runs 的 per-joint clip active count。
+
+新增的 scale 1.0 frozen/online comparison 输出用于更直接地阅读同一组数据：
+
+- `online_tracking_rmse_comparison_scale1_with_nogp_baseline.png` 将 online scale 1.0 runs 与 no-GP begin/end 放在同一张图中。
+- `frozen_vs_online_tracking_rmse_scale1.png`、`frozen_vs_online_gp_applied_scale1.png` 和 `frozen_online_clip_active_count_scale1.png` 分别对比 tracking RMSE、最大补偿幅值和 clip active count。
+- `scale1_tracking_improvement_over_nogp.png` 使用 no-GP begin/end 的 mean RMSE 作为 reference，正值表示 RMSE reduction。
+- `scale1_frozen_online_comparison.csv` 汇总 no-GP、frozen scale 1.0 和 online scale 1.0 relevant runs，包含 tracking、GP applied、clip count 和相对 no-GP mean 的 improvement。
+
+这些输出不改变解释边界：frozen matrix 仍是主要 controlled comparison。Online runs 的 RMSE 更低，但其 GP output 更接近 `clip=0.5 Nm`，因此只应作为 adaptive diagnostic / supplementary evidence，不应表述为 definitive better、more robust 或 full practical validation。
 
 ## Interpretation Boundary
 

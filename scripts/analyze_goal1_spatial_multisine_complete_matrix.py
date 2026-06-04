@@ -60,6 +60,7 @@ SUMMARY_FILES = [
     "gp_compensation_summary_scale1_only.csv",
     "clip_summary.csv",
     "clip_summary_scale1_only.csv",
+    "scale1_frozen_online_comparison.csv",
     "analysis_summary.md",
 ]
 
@@ -811,6 +812,81 @@ def write_scale1_csv_subsets(runs: list[dict[str, Any]], output_dir: Path) -> No
     write_csv(output_dir / "clip_summary_scale1_only.csv", CLIP_FIELDS, clip_rows_for_runs(scale1_runs))
 
 
+def scale1_comparison_runs(runs: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    selected: dict[str, dict[str, Any]] = {}
+    for run in runs:
+        source = run["source"]
+        if source == "none":
+            label = "no-GP end" if "repeat_end" in run["run_name"] else "no-GP begin"
+            selected.setdefault(label, run)
+        elif is_scale_one(run) and run["category"] == "frozen_main" and source in ("local", "cloud", "combined"):
+            selected.setdefault(f"frozen {source} s1", run)
+        elif is_scale_one(run) and run["category"] == "online_diagnostic" and source in ("local", "cloud", "combined"):
+            selected.setdefault(f"online {source} s1", run)
+    return selected
+
+
+def write_scale1_comparison_csv(runs: list[dict[str, Any]], output_dir: Path) -> None:
+    selected = scale1_comparison_runs(runs)
+    labels = [
+        "no-GP begin",
+        "no-GP end",
+        "frozen local s1",
+        "frozen cloud s1",
+        "frozen combined s1",
+        "online local s1",
+        "online cloud s1",
+        "online combined s1",
+    ]
+    nogp_rmse = [
+        selected[label]["tracking"].get("rmse_3d_mm")
+        for label in ("no-GP begin", "no-GP end")
+        if label in selected and selected[label]["tracking"]["tracking_available"]
+    ]
+    nogp_mean_rmse = sum(nogp_rmse) / len(nogp_rmse) if nogp_rmse else math.nan
+
+    rows = []
+    for label in labels:
+        run = selected.get(label)
+        if run is None:
+            continue
+        rmse_3d_mm = run["tracking"].get("rmse_3d_mm")
+        improvement = nogp_mean_rmse - rmse_3d_mm if math.isfinite(nogp_mean_rmse) and rmse_3d_mm is not None else math.nan
+        rows.append(
+            {
+                "run_label": label,
+                "matrix_type": "nogp" if run["source"] == "none" else ("online" if run["category"] == "online_diagnostic" else "frozen"),
+                "source": "noGP" if run["source"] == "none" else run["source"],
+                "scale": format_float(run["scale"]),
+                "online_update_enabled": run["online_update_enabled"],
+                "gp_compensation_enabled": run["compensation_enabled"],
+                "rmse_3d_mm": format_float(rmse_3d_mm),
+                "max_abs_gp_applied": format_float(run["max_abs_gp_applied"]),
+                "rms_gp_applied": format_float(run["rms_gp_applied"]),
+                "clip_active_count_total": run["total_clip_active_count"],
+                "rmse_improvement_vs_nogp_mean_mm": format_float(improvement),
+            }
+        )
+
+    write_csv(
+        output_dir / "scale1_frozen_online_comparison.csv",
+        [
+            "run_label",
+            "matrix_type",
+            "source",
+            "scale",
+            "online_update_enabled",
+            "gp_compensation_enabled",
+            "rmse_3d_mm",
+            "max_abs_gp_applied",
+            "rms_gp_applied",
+            "clip_active_count_total",
+            "rmse_improvement_vs_nogp_mean_mm",
+        ],
+        rows,
+    )
+
+
 def short_label(run: dict[str, Any]) -> str:
     category = "online" if run["category"] == "online_diagnostic" else "frozen"
     source = run["source"]
@@ -848,6 +924,36 @@ def plot_bar(plt: Any, labels: list[str], values: list[float], title: str, ylabe
     ax.set_title(title)
     ax.set_ylabel(ylabel)
     ax.grid(True, axis="y", alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(output_path)
+    plt.close(fig)
+
+
+def plot_grouped_bar(
+    plt: Any,
+    groups: list[str],
+    first_values: list[float],
+    second_values: list[float],
+    first_label: str,
+    second_label: str,
+    title: str,
+    ylabel: str,
+    output_path: Path,
+    reference_lines: list[tuple[float, str]] | None = None,
+) -> None:
+    fig, ax = plt.subplots(figsize=(8.0, 4.8))
+    x_values = list(range(len(groups)))
+    width = 0.36
+    ax.bar([value - width / 2 for value in x_values], first_values, width, label=first_label)
+    ax.bar([value + width / 2 for value in x_values], second_values, width, label=second_label)
+    for value, label in reference_lines or []:
+        ax.axhline(value, linestyle="--", linewidth=1.2, label=label)
+    ax.set_xticks(x_values)
+    ax.set_xticklabels(groups)
+    ax.set_title(title)
+    ax.set_ylabel(ylabel)
+    ax.grid(True, axis="y", alpha=0.3)
+    ax.legend()
     fig.tight_layout()
     fig.savefig(output_path)
     plt.close(fig)
@@ -946,6 +1052,83 @@ def write_scale1_plots(plt: Any, runs: list[dict[str, Any]], output_dir: Path) -
         "clip active samples",
         output_dir / "clip_active_count_by_joint_scale1_only.png",
     )
+
+    selected = scale1_comparison_runs(runs)
+    online_with_nogp_labels = ["no-GP begin", "online local s1", "online cloud s1", "online combined s1", "no-GP end"]
+    online_with_nogp = [selected[label] for label in online_with_nogp_labels if label in selected]
+    if online_with_nogp:
+        plot_bar(
+            plt,
+            [label for label in online_with_nogp_labels if label in selected],
+            [run["tracking"]["rmse_3d_mm"] for run in online_with_nogp],
+            "Online scale 1.0 tracking RMSE with no-GP baseline",
+            "3D tracking RMSE [mm]",
+            output_dir / "online_tracking_rmse_comparison_scale1_with_nogp_baseline.png",
+        )
+
+    sources = ["local", "cloud", "combined"]
+    frozen_labels = [f"frozen {source} s1" for source in sources]
+    online_labels = [f"online {source} s1" for source in sources]
+    if all(label in selected for label in frozen_labels + online_labels):
+        frozen_runs = [selected[label] for label in frozen_labels]
+        online_runs = [selected[label] for label in online_labels]
+        baseline_lines = [
+            (selected[label]["tracking"]["rmse_3d_mm"], label)
+            for label in ("no-GP begin", "no-GP end")
+            if label in selected
+        ]
+        plot_grouped_bar(
+            plt,
+            sources,
+            [run["tracking"]["rmse_3d_mm"] for run in frozen_runs],
+            [run["tracking"]["rmse_3d_mm"] for run in online_runs],
+            "frozen s1",
+            "online s1",
+            "Frozen vs online scale 1.0 tracking RMSE",
+            "3D tracking RMSE [mm]",
+            output_dir / "frozen_vs_online_tracking_rmse_scale1.png",
+            baseline_lines,
+        )
+        plot_grouped_bar(
+            plt,
+            sources,
+            [run["max_abs_gp_applied"] for run in frozen_runs],
+            [run["max_abs_gp_applied"] for run in online_runs],
+            "frozen",
+            "online",
+            "Frozen vs online scale 1.0 GP compensation magnitude",
+            "max |gp_applied| [Nm]",
+            output_dir / "frozen_vs_online_gp_applied_scale1.png",
+            [(0.5, "clip=0.5 Nm")],
+        )
+        plot_grouped_bar(
+            plt,
+            sources,
+            [run["total_clip_active_count"] for run in frozen_runs],
+            [run["total_clip_active_count"] for run in online_runs],
+            "frozen clip active count total",
+            "online clip active count total",
+            "Frozen vs online scale 1.0 clip activity",
+            "clip active count",
+            output_dir / "frozen_online_clip_active_count_scale1.png",
+        )
+
+        nogp_rmse = [
+            selected[label]["tracking"]["rmse_3d_mm"]
+            for label in ("no-GP begin", "no-GP end")
+            if label in selected
+        ]
+        if nogp_rmse:
+            nogp_mean_rmse = sum(nogp_rmse) / len(nogp_rmse)
+            comparison_labels = frozen_labels + online_labels
+            plot_bar(
+                plt,
+                [label.removesuffix(" s1") for label in comparison_labels],
+                [nogp_mean_rmse - selected[label]["tracking"]["rmse_3d_mm"] for label in comparison_labels],
+                "Scale 1.0 tracking improvement over no-GP mean",
+                "RMSE reduction vs no-GP mean [mm]",
+                output_dir / "scale1_tracking_improvement_over_nogp.png",
+            )
 
 
 def write_plots(runs: list[dict[str, Any]], output_dir: Path) -> None:
@@ -1059,6 +1242,7 @@ def write_analysis_summary(runs: list[dict[str, Any]], output_dir: Path, missing
     frozen_rows = [row for row in tracking_rows if row["category"] in ("frozen_main", "frozen_short")]
     online_rows = [row for row in tracking_rows if row["category"] == "online_diagnostic"]
     warning_runs = [run for run in runs if run["status"] != "ok" or run["warnings"]]
+    scale1_selected = scale1_comparison_runs(runs)
 
     lines = [
         "# GOAL1 Spatial Multisine Complete Matrix Analysis",
@@ -1084,6 +1268,11 @@ def write_analysis_summary(runs: list[dict[str, Any]], output_dir: Path, missing
                 "- `max_abs_gp_applied_by_run_scale1_only.png`",
                 "- `clip_active_count_by_run_scale1_only.png`",
                 "- `clip_active_count_by_joint_scale1_only.png`",
+                "- `online_tracking_rmse_comparison_scale1_with_nogp_baseline.png`",
+                "- `frozen_vs_online_tracking_rmse_scale1.png`",
+                "- `frozen_vs_online_gp_applied_scale1.png`",
+                "- `scale1_tracking_improvement_over_nogp.png`",
+                "- `frozen_online_clip_active_count_scale1.png`",
             ]
         )
 
@@ -1121,6 +1310,27 @@ def write_analysis_summary(runs: list[dict[str, Any]], output_dir: Path, missing
         ]
     )
     lines.extend(markdown_table(clip_rows, ["run", "category", "source", "scale", "max_abs_gp_applied", "clip_count", "per_joint"]))
+    lines.extend(
+        [
+            "",
+            "## Scale 1.0 frozen vs online comparison",
+            "",
+            "`scale1_frozen_online_comparison.csv` and the five dedicated comparison plots use the following matched run labels. The frozen runs remain the primary controlled comparison. Lower online RMSE is adaptive diagnostic evidence only, especially where online GP output is closer to `clip=0.5 Nm`.",
+            "",
+        ]
+    )
+    lines.extend(
+        markdown_table(
+            [
+                {
+                    "run_label": label,
+                    "actual_run_name": run["run_name"],
+                }
+                for label, run in scale1_selected.items()
+            ],
+            ["run_label", "actual_run_name"],
+        )
+    )
 
     lines.extend(
         [
@@ -1164,6 +1374,7 @@ def write_all_outputs(runs: list[dict[str, Any]], output_dir: Path, missing_expe
     write_gp_compensation_summary(runs, output_dir)
     write_clip_summary(runs, output_dir)
     write_scale1_csv_subsets(runs, output_dir)
+    write_scale1_comparison_csv(runs, output_dir)
     if not no_plots:
         write_plots(runs, output_dir)
     write_analysis_summary(runs, output_dir, missing_expected, not no_plots)
