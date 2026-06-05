@@ -24,7 +24,7 @@ Current base branch:
 
 - `ggwp`
 
-Current experiment branch:
+Default main implementation branch:
 
 - `frozen_gp_spatial_trajectory`
 
@@ -47,9 +47,39 @@ Before code changes, check:
 - `git status --short`
 - `git rev-parse --show-toplevel`
 
-If the branch is not `frozen_gp_spatial_trajectory`, stop and report. Do not switch branches unless the user explicitly confirms.
+Branch policy:
 
-If the working tree is not clean, report it before editing. Do not overwrite user changes.
+1. Codex must always print or report:
+   - `pwd`
+   - `git branch --show-current`
+   - `git status --short`
+2. Default main implementation branch remains `frozen_gp_spatial_trajectory`.
+3. Task-specific branches are allowed when the user explicitly states the task belongs there:
+   - `goal1_historical_shadow_source`
+   - `stage6_goal2_delay`
+   - any branch whose name clearly starts with or contains `goal1`, `goal2`, `historical`, `shadow`, `offline`, or `analysis`
+4. If the branch is not `frozen_gp_spatial_trajectory`, Codex should not automatically stop when:
+   - the user explicitly named the current branch or task,
+   - the task is offline-only, docs-only, or analysis-only,
+   - or the task clearly belongs to the current branch.
+5. Codex must still stop and ask/report when:
+   - the branch is unrelated to the task,
+   - the user did not authorize the branch,
+   - or the task touches controller, torque, launch, config, or real-robot safety and the branch is ambiguous.
+6. Do not switch branches unless the user explicitly confirms.
+
+Dirty workspace policy:
+
+1. If `git status --short` is dirty, Codex must list dirty files before editing.
+2. Codex may continue only when:
+   - the requested task explicitly allows modifying those dirty files,
+   - or the task is limited to a new file and Codex can avoid touching existing dirty files,
+   - or the task explicitly limits changes to specific files and Codex can avoid all unrelated dirty files.
+3. Codex must not overwrite, restore, stage, commit, or push unrelated dirty files.
+4. For offline-only scripts, docs, or reports, Codex may create or edit only the requested offline files even if unrelated dirty files exist, but must explicitly state:
+   - which dirty files were pre-existing,
+   - which files it actually modified,
+   - that it did not touch pre-existing dirty files.
 
 ## 3. Development Environment Model
 
@@ -319,6 +349,29 @@ Always follow these rules:
 12. Do not delete safety clamp, clip, rate limit, or abnormality-checking logic.
 13. Do not enable any safety-relevant behavior by default.
 
+High-risk changes require extra caution and a read-only self-review recommendation after implementation when they touch:
+
+- `new_structure/py_controllers/py_controllers/cartesian_impedance.py`
+- `_apply_gp_compensation`
+- `tau_final`
+- controller callback logic
+- `new_structure/new_bringup/config/controllers.yaml`
+- `franka.launch.py`
+- `new_structure/py_controllers/launch/cartesian_impedance_launch.py`
+- `trajectory_publisher.py`
+- `cpp_relayer`
+- real robot launch/config paths
+
+Codex must never:
+
+- enable active historical compensation by default
+- add `gp_compensation_source:=historical` as an active path without an explicit separate task
+- remove clip, finite checks, or safety gates
+- increase `gp_compensation_clip_nm` unless explicitly requested as a separate high-risk task
+- make historical or soft-fusion compensation enter `tau_final` unless explicitly requested in a separate high-risk task
+
+Offline-only scripts may read CSV, NPZ, logs, build DBs, evaluate support coverage, and generate reports. They must not import ROS, run real robot commands, send `/effort_command`, or launch robot/controller processes. Offline-only tasks must not modify controller, launch, or config files unless the user explicitly scopes those files in the task.
+
 ## 14. Commands That Must Not Be Run Automatically
 
 Do not run these unless the user explicitly asks and the path/context is verified:
@@ -344,7 +397,7 @@ Codex must:
 - Avoid automatic `push`.
 - Avoid automatic `commit` unless the user explicitly asks.
 - Ask for confirmation before switching branches.
-- Stop and report if not on `frozen_gp_spatial_trajectory`.
+- Follow the branch policy in Section 2 instead of assuming only `frozen_gp_spatial_trajectory` is valid.
 - Stop and report if the current path is under `/mnt/c/...GP-TORQUE-COMPENSATION...`.
 - Report a dirty working tree before editing.
 - Prefer minimal patches.
@@ -354,6 +407,17 @@ Codex must:
 - Avoid installing dependencies unless explicitly requested.
 - Avoid modifying `.bashrc` unless explicitly requested.
 - Avoid assuming the current shell environment is clean.
+
+For every task, Codex should report:
+
+1. `pwd`
+2. branch
+3. dirty status before editing
+4. whether files were modified
+5. modified file list
+6. validation commands run
+7. whether unrelated dirty files were left untouched
+8. whether `commit` or `push` was performed; default is no unless the user explicitly asks
 
 ## 16. Suggested Checks Before Each Task
 
@@ -384,4 +448,3 @@ When the user asks to generate a Codex prompt, Claude Code prompt, GitHub Copilo
 - Unless the user explicitly asks for explanation, prioritize one complete prompt that can be pasted into Codex at once.
 - To avoid copy splitting, avoid using triple-backtick code blocks inside the prompt content.
 - If commands or code need to be listed, use normal lists, indented text, or inline code.
-
