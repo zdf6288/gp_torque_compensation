@@ -319,7 +319,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             trajectory_mode_parameter_name,
             default_value='planar_circle',
-            description='Trajectory mode: planar_circle or z_modulated_circle.'),
+            description='Trajectory mode: planar_circle, z_modulated_circle, or goal1_spatial_multisine.'),
         DeclareLaunchArgument(
             z_amplitude_parameter_name,
             default_value='0.0',

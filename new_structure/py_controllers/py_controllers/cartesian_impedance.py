@@ -3178,8 +3178,8 @@ class CartesianImpedanceController(Node):
             compensation = self.y_hat_local
             self._gp_source_code = 1
 
-        # 先 scale 再 per-joint clip，避免 GP prediction 直接大幅影响 torque command。
-        self._gp_selected_raw = np.asarray(compensation, dtype=float).copy()
+        # 先清洗成 finite 7D，再 scale / clip，避免 non-finite 进入 torque command。
+        self._gp_selected_raw = self._as_finite_7d(compensation, 0.0).copy()
         self._gp_scaled = self.gp_compensation_scale * self._gp_selected_raw
         self._gp_applied = np.clip(
             self._gp_scaled,

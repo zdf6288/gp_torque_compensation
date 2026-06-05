@@ -45,6 +45,10 @@ Use fake hardware only, with conservative flags:
 - `timing_logging_enabled:=true`
 - expected 50 Hz first-pass `control_frequency`
 
+Optional trajectory mode:
+
+- Pass `trajectory_mode:=goal1_spatial_multisine` explicitly to use the integration branch GOAL2-style multisine trajectory for fake / no-robot checks or later real shadow-only validation.
+
 Check generated logs / CSVs for:
 
 - `hist_db_*` columns or messages when historical DB shadow logging is enabled.
