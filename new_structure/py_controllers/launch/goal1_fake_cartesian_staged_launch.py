@@ -9,6 +9,14 @@ from launch_ros.parameter_descriptions import ParameterValue
 
 def generate_launch_description():
     mock_rate_parameter_name = 'mock_state_rate_hz'
+    control_frequency_parameter_name = 'control_frequency'
+    delay_steps_parameter_name = 'delay_steps'
+    run_name_parameter_name = 'run_name'
+    data_output_dir_parameter_name = 'data_output_dir'
+    timing_logging_enabled_parameter_name = 'timing_logging_enabled'
+    timing_log_stride_parameter_name = 'timing_log_stride'
+    timing_output_dir_parameter_name = 'timing_output_dir'
+    deadline_ratio_warn_threshold_parameter_name = 'deadline_ratio_warn_threshold'
     trajectory_mode_parameter_name = 'trajectory_mode'
     circle_frequency_parameter_name = 'circle_frequency'
     z_amplitude_parameter_name = 'z_amplitude'
@@ -50,6 +58,16 @@ def generate_launch_description():
     )
 
     mock_state_rate_hz = LaunchConfiguration(mock_rate_parameter_name)
+    control_frequency = LaunchConfiguration(control_frequency_parameter_name)
+    delay_steps = LaunchConfiguration(delay_steps_parameter_name)
+    run_name = LaunchConfiguration(run_name_parameter_name)
+    data_output_dir = LaunchConfiguration(data_output_dir_parameter_name)
+    timing_logging_enabled = LaunchConfiguration(timing_logging_enabled_parameter_name)
+    timing_log_stride = LaunchConfiguration(timing_log_stride_parameter_name)
+    timing_output_dir = LaunchConfiguration(timing_output_dir_parameter_name)
+    deadline_ratio_warn_threshold = LaunchConfiguration(
+        deadline_ratio_warn_threshold_parameter_name
+    )
     trajectory_mode = LaunchConfiguration(trajectory_mode_parameter_name)
     circle_frequency = LaunchConfiguration(circle_frequency_parameter_name)
     z_amplitude = LaunchConfiguration(z_amplitude_parameter_name)
@@ -114,6 +132,10 @@ def generate_launch_description():
         name='trajectory_publisher',
         output='screen',
         parameters=[{
+            control_frequency_parameter_name: ParameterValue(
+                control_frequency,
+                value_type=float,
+            ),
             trajectory_mode_parameter_name: ParameterValue(trajectory_mode, value_type=str),
             z_amplitude_parameter_name: ParameterValue(z_amplitude, value_type=float),
             z_frequency_multiplier_parameter_name: ParameterValue(
@@ -137,6 +159,32 @@ def generate_launch_description():
             'start_x': 0.35,
             'start_y': 0.0,
             'start_z': 0.65,
+            control_frequency_parameter_name: ParameterValue(
+                control_frequency,
+                value_type=float,
+            ),
+            delay_steps_parameter_name: ParameterValue(
+                delay_steps,
+                value_type=int,
+            ),
+            run_name_parameter_name: ParameterValue(run_name, value_type=str),
+            data_output_dir_parameter_name: ParameterValue(data_output_dir, value_type=str),
+            timing_logging_enabled_parameter_name: ParameterValue(
+                timing_logging_enabled,
+                value_type=bool,
+            ),
+            timing_log_stride_parameter_name: ParameterValue(
+                timing_log_stride,
+                value_type=int,
+            ),
+            timing_output_dir_parameter_name: ParameterValue(
+                timing_output_dir,
+                value_type=str,
+            ),
+            deadline_ratio_warn_threshold_parameter_name: ParameterValue(
+                deadline_ratio_warn_threshold,
+                value_type=float,
+            ),
             gp_prediction_enabled_parameter_name: ParameterValue(
                 gp_prediction_enabled,
                 value_type=bool,
@@ -234,6 +282,46 @@ def generate_launch_description():
             mock_rate_parameter_name,
             default_value='50.0',
             description='Mock /state_parameter publish rate in Hz for offline/no-motion checks.',
+        ),
+        DeclareLaunchArgument(
+            control_frequency_parameter_name,
+            default_value='50',
+            description='Trajectory and controller metadata frequency in Hz for fake validation.',
+        ),
+        DeclareLaunchArgument(
+            delay_steps_parameter_name,
+            default_value='0',
+            description='Cloud-like control-step delay for fake validation.',
+        ),
+        DeclareLaunchArgument(
+            run_name_parameter_name,
+            default_value='',
+            description='Optional fake validation run name written to controller CSV metadata.',
+        ),
+        DeclareLaunchArgument(
+            data_output_dir_parameter_name,
+            default_value='.',
+            description='Directory for fake validation controller data CSV output.',
+        ),
+        DeclareLaunchArgument(
+            timing_logging_enabled_parameter_name,
+            default_value='false',
+            description='Enable fake validation controller timing CSV logging.',
+        ),
+        DeclareLaunchArgument(
+            timing_log_stride_parameter_name,
+            default_value='1',
+            description='Record one fake validation timing row every N callbacks.',
+        ),
+        DeclareLaunchArgument(
+            timing_output_dir_parameter_name,
+            default_value='outputs/goal12_controller_timing',
+            description='Directory for fake validation controller timing CSV output.',
+        ),
+        DeclareLaunchArgument(
+            deadline_ratio_warn_threshold_parameter_name,
+            default_value='0.8',
+            description='Warn when fake validation max callback deadline ratio reaches this threshold.',
         ),
         DeclareLaunchArgument(
             trajectory_mode_parameter_name,

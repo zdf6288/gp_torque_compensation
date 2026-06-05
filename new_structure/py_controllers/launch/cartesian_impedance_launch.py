@@ -17,6 +17,10 @@ def generate_launch_description():
     fake_sensor_commands_parameter_name = 'fake_sensor_commands'
     use_rviz_parameter_name = 'use_rviz'
     spawn_gp_server_parameter_name = 'spawn_gp_server'
+    spawn_fake_state_parameter_publisher_parameter_name = 'spawn_fake_state_parameter_publisher'
+    control_frequency_parameter_name = 'control_frequency'
+    run_name_parameter_name = 'run_name'
+    data_output_dir_parameter_name = 'data_output_dir'
     reference_mode_parameter_name = 'reference_mode'
     joint_space_command_topic_parameter_name = 'joint_space_command_topic'
     # Stage 1: frozen GP / compensation experiment 参数，默认值保持安全。
@@ -28,6 +32,11 @@ def generate_launch_description():
     gp_compensation_scale_parameter_name = 'gp_compensation_scale'
     gp_compensation_clip_nm_parameter_name = 'gp_compensation_clip_nm'
     gp_compensation_disable_joint7_parameter_name = 'gp_compensation_disable_joint7'
+    delay_steps_parameter_name = 'delay_steps'
+    timing_logging_enabled_parameter_name = 'timing_logging_enabled'
+    timing_log_stride_parameter_name = 'timing_log_stride'
+    timing_output_dir_parameter_name = 'timing_output_dir'
+    deadline_ratio_warn_threshold_parameter_name = 'deadline_ratio_warn_threshold'
     gp_historical_db_enabled_parameter_name = 'gp_historical_db_enabled'
     gp_historical_db_path_parameter_name = 'gp_historical_db_path'
     gp_historical_db_k_parameter_name = 'gp_historical_db_k'
@@ -64,6 +73,9 @@ def generate_launch_description():
     fake_sensor_commands = LaunchConfiguration(fake_sensor_commands_parameter_name)
     use_rviz = LaunchConfiguration(use_rviz_parameter_name)
     spawn_gp_server = LaunchConfiguration(spawn_gp_server_parameter_name)
+    control_frequency = LaunchConfiguration(control_frequency_parameter_name)
+    run_name = LaunchConfiguration(run_name_parameter_name)
+    data_output_dir = LaunchConfiguration(data_output_dir_parameter_name)
     reference_mode = LaunchConfiguration(reference_mode_parameter_name)
     joint_space_command_topic = LaunchConfiguration(joint_space_command_topic_parameter_name)
     gp_prediction_enabled = LaunchConfiguration(gp_prediction_enabled_parameter_name)
@@ -75,6 +87,13 @@ def generate_launch_description():
     gp_compensation_clip_nm = LaunchConfiguration(gp_compensation_clip_nm_parameter_name)
     gp_compensation_disable_joint7 = LaunchConfiguration(
         gp_compensation_disable_joint7_parameter_name
+    )
+    delay_steps = LaunchConfiguration(delay_steps_parameter_name)
+    timing_logging_enabled = LaunchConfiguration(timing_logging_enabled_parameter_name)
+    timing_log_stride = LaunchConfiguration(timing_log_stride_parameter_name)
+    timing_output_dir = LaunchConfiguration(timing_output_dir_parameter_name)
+    deadline_ratio_warn_threshold = LaunchConfiguration(
+        deadline_ratio_warn_threshold_parameter_name
     )
     gp_historical_db_enabled = LaunchConfiguration(gp_historical_db_enabled_parameter_name)
     gp_historical_db_path = LaunchConfiguration(gp_historical_db_path_parameter_name)
@@ -126,6 +145,26 @@ def generate_launch_description():
                 'Start standalone gp_server only when explicitly requested; '
                 'default false for GOAL1 real shadow validation.'
             )),
+        DeclareLaunchArgument(
+            spawn_fake_state_parameter_publisher_parameter_name,
+            default_value='false',
+            description=(
+                'Reserved for GOAL2 fake/sim smoke; current branch has no '
+                'goal2 fake state publisher executable, so this launch does '
+                'not start an extra node.'
+            )),
+        DeclareLaunchArgument(
+            control_frequency_parameter_name,
+            default_value='50',
+            description='Controller manager, trajectory, and controller frequency in Hz.'),
+        DeclareLaunchArgument(
+            run_name_parameter_name,
+            default_value='',
+            description='Optional run name written to controller CSV metadata and filename.'),
+        DeclareLaunchArgument(
+            data_output_dir_parameter_name,
+            default_value='.',
+            description='Directory for controller data CSV output.'),
         DeclareLaunchArgument(
             use_fake_hardware_parameter_name,
             default_value='false',
@@ -180,6 +219,26 @@ def generate_launch_description():
             gp_compensation_disable_joint7_parameter_name,
             default_value='false',
             description='Disable active GP applied torque on joint7 only when explicitly true.'),
+        DeclareLaunchArgument(
+            delay_steps_parameter_name,
+            default_value='0',
+            description='Cloud-like control-step delay; not real network cloud latency.'),
+        DeclareLaunchArgument(
+            timing_logging_enabled_parameter_name,
+            default_value='false',
+            description='Enable controller timing CSV logging.'),
+        DeclareLaunchArgument(
+            timing_log_stride_parameter_name,
+            default_value='1',
+            description='Record one controller timing row every N callbacks.'),
+        DeclareLaunchArgument(
+            timing_output_dir_parameter_name,
+            default_value='outputs/goal12_controller_timing',
+            description='Directory for controller timing CSV output.'),
+        DeclareLaunchArgument(
+            deadline_ratio_warn_threshold_parameter_name,
+            default_value='0.8',
+            description='Warn in timing summary when max callback deadline ratio reaches this threshold.'),
         DeclareLaunchArgument(
             gp_historical_db_enabled_parameter_name,
             default_value='false',
@@ -285,7 +344,8 @@ def generate_launch_description():
                               load_gripper_parameter_name: load_gripper,
                               use_fake_hardware_parameter_name: use_fake_hardware,
                               fake_sensor_commands_parameter_name: fake_sensor_commands,
-                              use_rviz_parameter_name: use_rviz
+                              use_rviz_parameter_name: use_rviz,
+                              control_frequency_parameter_name: control_frequency
                               }.items(),
         ),
 
@@ -319,6 +379,20 @@ def generate_launch_description():
                 gp_compensation_scale_parameter_name: gp_compensation_scale,
                 gp_compensation_clip_nm_parameter_name: gp_compensation_clip_nm,
                 gp_compensation_disable_joint7_parameter_name: gp_compensation_disable_joint7,
+                delay_steps_parameter_name: ParameterValue(
+                    delay_steps, value_type=int),
+                control_frequency_parameter_name: ParameterValue(
+                    control_frequency, value_type=float),
+                run_name_parameter_name: ParameterValue(run_name, value_type=str),
+                data_output_dir_parameter_name: ParameterValue(data_output_dir, value_type=str),
+                timing_logging_enabled_parameter_name: ParameterValue(
+                    timing_logging_enabled, value_type=bool),
+                timing_log_stride_parameter_name: ParameterValue(
+                    timing_log_stride, value_type=int),
+                timing_output_dir_parameter_name: ParameterValue(
+                    timing_output_dir, value_type=str),
+                deadline_ratio_warn_threshold_parameter_name: ParameterValue(
+                    deadline_ratio_warn_threshold, value_type=float),
                 gp_historical_db_enabled_parameter_name: ParameterValue(
                     gp_historical_db_enabled,
                     value_type=bool),
@@ -366,6 +440,8 @@ def generate_launch_description():
             name='trajectory_publisher',
             output='screen',
             parameters=[{
+                control_frequency_parameter_name: ParameterValue(
+                    control_frequency, value_type=float),
                 trajectory_mode_parameter_name: ParameterValue(trajectory_mode, value_type=str),
                 z_amplitude_parameter_name: ParameterValue(z_amplitude, value_type=float),
                 z_frequency_multiplier_parameter_name: ParameterValue(
