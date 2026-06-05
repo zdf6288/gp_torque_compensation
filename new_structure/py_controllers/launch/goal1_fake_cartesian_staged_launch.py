@@ -19,6 +19,7 @@ def generate_launch_description():
     gp_prediction_enabled_parameter_name = 'gp_prediction_enabled'
     gp_model_dir_parameter_name = 'gp_model_dir'
     gp_compensation_enabled_parameter_name = 'gp_compensation_enabled'
+    gp_compensation_disable_joint7_parameter_name = 'gp_compensation_disable_joint7'
     gp_shadow_logging_enabled_parameter_name = 'gp_shadow_paper_fusion_logging_enabled'
     gp_historical_shadow_enabled_parameter_name = 'gp_historical_shadow_enabled'
     gp_historical_source_mode_parameter_name = 'gp_historical_source_mode'
@@ -59,6 +60,9 @@ def generate_launch_description():
     gp_prediction_enabled = LaunchConfiguration(gp_prediction_enabled_parameter_name)
     gp_model_dir = LaunchConfiguration(gp_model_dir_parameter_name)
     gp_compensation_enabled = LaunchConfiguration(gp_compensation_enabled_parameter_name)
+    gp_compensation_disable_joint7 = LaunchConfiguration(
+        gp_compensation_disable_joint7_parameter_name
+    )
     gp_shadow_logging_enabled = LaunchConfiguration(gp_shadow_logging_enabled_parameter_name)
     gp_historical_shadow_enabled = LaunchConfiguration(gp_historical_shadow_enabled_parameter_name)
     gp_historical_source_mode = LaunchConfiguration(gp_historical_source_mode_parameter_name)
@@ -141,6 +145,10 @@ def generate_launch_description():
             gp_model_dir_parameter_name: ParameterValue(gp_model_dir, value_type=str),
             gp_compensation_enabled_parameter_name: ParameterValue(
                 gp_compensation_enabled,
+                value_type=bool,
+            ),
+            gp_compensation_disable_joint7_parameter_name: ParameterValue(
+                gp_compensation_disable_joint7,
                 value_type=bool,
             ),
             'gp_compensation_source': 'local',
@@ -276,6 +284,11 @@ def generate_launch_description():
             gp_compensation_enabled_parameter_name,
             default_value='false',
             description='Keep GP torque compensation disabled in fake/no-motion validation.',
+        ),
+        DeclareLaunchArgument(
+            gp_compensation_disable_joint7_parameter_name,
+            default_value='false',
+            description='Disable active GP applied torque on joint7 only when explicitly true.',
         ),
         DeclareLaunchArgument(
             gp_shadow_logging_enabled_parameter_name,

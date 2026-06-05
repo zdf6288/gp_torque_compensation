@@ -358,6 +358,7 @@ class CartesianImpedanceController(Node):
         self.declare_parameter("gp_compensation_source", "local")
         self.declare_parameter("gp_compensation_scale", 0.1)
         self.declare_parameter("gp_compensation_clip_nm", 0.5)
+        self.declare_parameter("gp_compensation_disable_joint7", False)
         self.declare_parameter("gp_shadow_paper_fusion_logging_enabled", False)
         self.declare_parameter("gp_historical_shadow_enabled", False)
         self.declare_parameter("gp_historical_source_mode", "none")
@@ -390,6 +391,9 @@ class CartesianImpedanceController(Node):
         self.gp_compensation_source = str(self.get_parameter("gp_compensation_source").value).strip().lower()
         self.gp_compensation_scale = float(self.get_parameter("gp_compensation_scale").value)
         self.gp_compensation_clip_nm = float(self.get_parameter("gp_compensation_clip_nm").value)
+        self.gp_compensation_disable_joint7 = self._get_bool_parameter(
+            "gp_compensation_disable_joint7"
+        )
         self.gp_shadow_paper_fusion_logging_enabled = self._get_bool_parameter(
             "gp_shadow_paper_fusion_logging_enabled"
         )
@@ -557,7 +561,8 @@ class CartesianImpedanceController(Node):
             f"gp_compensation_enabled={self.gp_compensation_enabled}, "
             f"gp_compensation_source='{self.gp_compensation_source}', "
             f"gp_compensation_scale={self.gp_compensation_scale}, "
-            f"gp_compensation_clip_nm={self.gp_compensation_clip_nm}"
+            f"gp_compensation_clip_nm={self.gp_compensation_clip_nm}, "
+            f"gp_compensation_disable_joint7={self.gp_compensation_disable_joint7}"
         )
         self.get_logger().info(
             "[GP Shadow] Paper fusion logging controls: "
@@ -2909,13 +2914,16 @@ class CartesianImpedanceController(Node):
         self._gp_clip_active = (
             np.abs(self._gp_scaled - self._gp_applied) > 1e-12
         ).astype(int)
+        if self.gp_compensation_disable_joint7:
+            self._gp_applied[6] = 0.0
 
         if not self._gp_compensation_logged:
             self.get_logger().warn(
                 "[GP] Compensation ENABLED: "
                 f"source='{self.gp_compensation_source}', "
                 f"scale={self.gp_compensation_scale}, "
-                f"clip_nm={self.gp_compensation_clip_nm}"
+                f"clip_nm={self.gp_compensation_clip_nm}, "
+                f"disable_joint7={self.gp_compensation_disable_joint7}"
             )
             self._gp_compensation_logged = True
 

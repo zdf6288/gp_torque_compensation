@@ -27,6 +27,7 @@ def generate_launch_description():
     gp_compensation_source_parameter_name = 'gp_compensation_source'
     gp_compensation_scale_parameter_name = 'gp_compensation_scale'
     gp_compensation_clip_nm_parameter_name = 'gp_compensation_clip_nm'
+    gp_compensation_disable_joint7_parameter_name = 'gp_compensation_disable_joint7'
     gp_historical_db_enabled_parameter_name = 'gp_historical_db_enabled'
     gp_historical_db_path_parameter_name = 'gp_historical_db_path'
     gp_historical_db_k_parameter_name = 'gp_historical_db_k'
@@ -72,6 +73,9 @@ def generate_launch_description():
     gp_compensation_source = LaunchConfiguration(gp_compensation_source_parameter_name)
     gp_compensation_scale = LaunchConfiguration(gp_compensation_scale_parameter_name)
     gp_compensation_clip_nm = LaunchConfiguration(gp_compensation_clip_nm_parameter_name)
+    gp_compensation_disable_joint7 = LaunchConfiguration(
+        gp_compensation_disable_joint7_parameter_name
+    )
     gp_historical_db_enabled = LaunchConfiguration(gp_historical_db_enabled_parameter_name)
     gp_historical_db_path = LaunchConfiguration(gp_historical_db_path_parameter_name)
     gp_historical_db_k = LaunchConfiguration(gp_historical_db_k_parameter_name)
@@ -172,6 +176,10 @@ def generate_launch_description():
             gp_compensation_clip_nm_parameter_name,
             default_value='0.5',
             description='Per-joint GP compensation clip in Nm.'),
+        DeclareLaunchArgument(
+            gp_compensation_disable_joint7_parameter_name,
+            default_value='false',
+            description='Disable active GP applied torque on joint7 only when explicitly true.'),
         DeclareLaunchArgument(
             gp_historical_db_enabled_parameter_name,
             default_value='false',
@@ -310,6 +318,7 @@ def generate_launch_description():
                 gp_compensation_source_parameter_name: gp_compensation_source,
                 gp_compensation_scale_parameter_name: gp_compensation_scale,
                 gp_compensation_clip_nm_parameter_name: gp_compensation_clip_nm,
+                gp_compensation_disable_joint7_parameter_name: gp_compensation_disable_joint7,
                 gp_historical_db_enabled_parameter_name: ParameterValue(
                     gp_historical_db_enabled,
                     value_type=bool),
