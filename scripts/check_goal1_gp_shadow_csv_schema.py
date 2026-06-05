@@ -86,6 +86,38 @@ OPTIONAL_HISTORICAL_DIAGNOSTIC_COLUMNS = [
     "gp_shadow_hist_k_used",
     "gp_shadow_hist_nearest_distance",
     "gp_shadow_hist_mean_distance_topk",
+    "hist_db_loaded",
+    "hist_db_query_valid",
+    "hist_db_available",
+    "hist_db_online_disabled",
+    "hist_db_distance_pass",
+    "hist_db_k_used",
+    "hist_db_nearest_distance",
+    "hist_db_mean_topk_distance",
+    "hist_db_q_scale",
+    "hist_db_dq_scale",
+    "hist_db_max_distance",
+    "hist_db_fallback_source_code",
+    "hist_db_gated_source_code",
+    "hist_soft_enabled",
+    "hist_soft_valid",
+    "hist_soft_online_mode",
+    "hist_soft_alpha",
+    "hist_soft_distance_threshold",
+    "hist_soft_online_scale",
+    "hist_soft_non_online_scale",
+    "hist_soft_nearest_distance",
+    "hist_soft_raw_w_hist",
+    "hist_soft_norm_w_local",
+    "hist_soft_norm_w_cloud",
+    "hist_soft_norm_w_hist",
+]
+
+OPTIONAL_HISTORICAL_DIAGNOSTIC_PREFIXES = [
+    "hist_db_pred",
+    "hist_db_gated_pred",
+    "hist_soft_pred",
+    "hist_soft_delta_vs_local_cloud",
 ]
 
 SUMMARY_FIELDS = [
@@ -237,7 +269,10 @@ def optional_precision_columns() -> list[str]:
 
 
 def optional_historical_diagnostic_columns() -> list[str]:
-    return list(OPTIONAL_HISTORICAL_DIAGNOSTIC_COLUMNS)
+    return (
+        list(OPTIONAL_HISTORICAL_DIAGNOSTIC_COLUMNS)
+        + joint_columns(OPTIONAL_HISTORICAL_DIAGNOSTIC_PREFIXES)
+    )
 
 
 def find_csv_files(root: Path) -> list[InputCsv]:
