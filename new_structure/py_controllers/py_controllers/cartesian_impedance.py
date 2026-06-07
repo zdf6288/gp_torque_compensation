@@ -418,6 +418,7 @@ class CartesianImpedanceController(Node):
         self.declare_parameter("gp_historical_db_q_scale", 0.1)
         self.declare_parameter("gp_historical_db_dq_scale", 0.1)
         self.declare_parameter("gp_historical_db_max_distance", 1.0)
+        self.declare_parameter("gp_historical_db_query_stride", 1)
         self.declare_parameter("gp_historical_db_disable_when_online_update", True)
         self.declare_parameter("gp_historical_db_fallback_source", "cloud")
         self.declare_parameter("gp_historical_soft_shadow_enabled", False)
@@ -489,6 +490,9 @@ class CartesianImpedanceController(Node):
         )
         self.gp_historical_db_max_distance = self._get_positive_float_parameter(
             "gp_historical_db_max_distance", 1.0
+        )
+        self.gp_historical_db_query_stride = self._get_bounded_int_parameter(
+            "gp_historical_db_query_stride", 1, 1, 1000000
         )
         self.gp_historical_db_disable_when_online_update = self._get_bool_parameter(
             "gp_historical_db_disable_when_online_update"
@@ -597,6 +601,9 @@ class CartesianImpedanceController(Node):
         self.gp_historical_db_row_count = 0
         self.gp_historical_db_x_scaled = None
         self.gp_historical_db_y_residual = None
+        # hist DB 查询节流状态；默认 stride=1 时每个 callback 查询，保持旧行为。
+        self._hist_db_query_counter = 0
+        self._hist_db_last_query_result = None
         self.gp_historical_db_feature_scale = np.array(
             [self.gp_historical_db_q_scale] * 7
             + [self.gp_historical_db_dq_scale] * 7,
@@ -2619,7 +2626,36 @@ class CartesianImpedanceController(Node):
         self._reset_historical_soft_shadow_state()
 
     def _update_historical_residual_db_shadow_state(self, q, dq):
-        result = self._query_historical_residual_db_shadow(q, dq)
+        # 为降低真机 callback 负载，可按 stride 降频查询 hist DB。
+        # 默认 gp_historical_db_query_stride=1 时，每周期查询，保持原始行为。
+        # stride>1 时，中间 callback 复用上一帧 gated prediction 和 gate 诊断。
+        try:
+            q_arr = np.asarray(q, dtype=float)
+            dq_arr = np.asarray(dq, dtype=float)
+            input_valid = (
+                q_arr.shape == (7,)
+                and dq_arr.shape == (7,)
+                and np.all(np.isfinite(q_arr))
+                and np.all(np.isfinite(dq_arr))
+            )
+        except Exception:
+            input_valid = False
+
+        query_stride = max(1, int(getattr(self, "gp_historical_db_query_stride", 1)))
+        should_query = (
+            query_stride <= 1
+            or self._hist_db_last_query_result is None
+            or not input_valid
+            or (self._hist_db_query_counter % query_stride == 0)
+        )
+
+        if should_query:
+            result = self._query_historical_residual_db_shadow(q, dq)
+            self._hist_db_last_query_result = dict(result)
+        else:
+            result = dict(self._hist_db_last_query_result)
+
+        self._hist_db_query_counter += 1
         self.hist_db_loaded = int(result["loaded"])
         self.hist_db_query_valid = int(result["query_valid"])
         self.hist_db_available = int(result["available"])

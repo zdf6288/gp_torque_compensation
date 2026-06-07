@@ -43,6 +43,7 @@ def generate_launch_description():
     gp_historical_db_q_scale_parameter_name = 'gp_historical_db_q_scale'
     gp_historical_db_dq_scale_parameter_name = 'gp_historical_db_dq_scale'
     gp_historical_db_max_distance_parameter_name = 'gp_historical_db_max_distance'
+    gp_historical_db_query_stride_parameter_name = 'gp_historical_db_query_stride'
     gp_historical_db_disable_online_parameter_name = (
         'gp_historical_db_disable_when_online_update'
     )
@@ -102,6 +103,9 @@ def generate_launch_description():
     gp_historical_db_dq_scale = LaunchConfiguration(gp_historical_db_dq_scale_parameter_name)
     gp_historical_db_max_distance = LaunchConfiguration(
         gp_historical_db_max_distance_parameter_name
+    )
+    gp_historical_db_query_stride = LaunchConfiguration(
+        gp_historical_db_query_stride_parameter_name
     )
     gp_historical_db_disable_online = LaunchConfiguration(
         gp_historical_db_disable_online_parameter_name
@@ -270,6 +274,15 @@ def generate_launch_description():
             default_value='1.0',
             description='Persistent historical DB nearest-distance hard gate.'),
         DeclareLaunchArgument(
+            gp_historical_db_query_stride_parameter_name,
+            default_value='1',
+            description=(
+                'Query stride for persistent historical DB KNN lookup. '
+                '1 preserves per-callback queries; larger values reuse the previous query result '
+                'between lookup callbacks to reduce load.'
+            ),
+        ),
+        DeclareLaunchArgument(
             gp_historical_db_disable_online_parameter_name,
             default_value='true',
             description=(
@@ -411,6 +424,9 @@ def generate_launch_description():
                 gp_historical_db_max_distance_parameter_name: ParameterValue(
                     gp_historical_db_max_distance,
                     value_type=float),
+                gp_historical_db_query_stride_parameter_name: ParameterValue(
+                    gp_historical_db_query_stride,
+                    value_type=int),
                 gp_historical_db_disable_online_parameter_name: ParameterValue(
                     gp_historical_db_disable_online,
                     value_type=bool),
