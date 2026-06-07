@@ -28,6 +28,8 @@ def generate_launch_description():
     gp_model_dir_parameter_name = 'gp_model_dir'
     gp_compensation_enabled_parameter_name = 'gp_compensation_enabled'
     gp_compensation_source_parameter_name = 'gp_compensation_source'
+    gp_compensation_scale_parameter_name = 'gp_compensation_scale'
+    gp_compensation_clip_nm_parameter_name = 'gp_compensation_clip_nm'
     gp_compensation_disable_joint7_parameter_name = 'gp_compensation_disable_joint7'
     gp_shadow_logging_enabled_parameter_name = 'gp_shadow_paper_fusion_logging_enabled'
     gp_historical_shadow_enabled_parameter_name = 'gp_historical_shadow_enabled'
@@ -80,6 +82,8 @@ def generate_launch_description():
     gp_model_dir = LaunchConfiguration(gp_model_dir_parameter_name)
     gp_compensation_enabled = LaunchConfiguration(gp_compensation_enabled_parameter_name)
     gp_compensation_source = LaunchConfiguration(gp_compensation_source_parameter_name)
+    gp_compensation_scale = LaunchConfiguration(gp_compensation_scale_parameter_name)
+    gp_compensation_clip_nm = LaunchConfiguration(gp_compensation_clip_nm_parameter_name)
     gp_compensation_disable_joint7 = LaunchConfiguration(
         gp_compensation_disable_joint7_parameter_name
     )
@@ -205,8 +209,14 @@ def generate_launch_description():
                 gp_compensation_source,
                 value_type=str,
             ),
-            'gp_compensation_scale': 0.1,
-            'gp_compensation_clip_nm': 0.5,
+            gp_compensation_scale_parameter_name: ParameterValue(
+                gp_compensation_scale,
+                value_type=float,
+            ),
+            gp_compensation_clip_nm_parameter_name: ParameterValue(
+                gp_compensation_clip_nm,
+                value_type=float,
+            ),
             gp_shadow_logging_enabled_parameter_name: ParameterValue(
                 gp_shadow_logging_enabled,
                 value_type=bool,
@@ -388,6 +398,16 @@ def generate_launch_description():
                 'GP compensation source for explicit fake/no-motion validation: '
                 'local, cloud, combined, or hist_db.'
             ),
+        ),
+        DeclareLaunchArgument(
+            gp_compensation_scale_parameter_name,
+            default_value='0.1',
+            description='Scale factor applied to active GP compensation torque.',
+        ),
+        DeclareLaunchArgument(
+            gp_compensation_clip_nm_parameter_name,
+            default_value='0.5',
+            description='Symmetric clip limit in Nm for active GP compensation torque.',
         ),
         DeclareLaunchArgument(
             gp_compensation_disable_joint7_parameter_name,
