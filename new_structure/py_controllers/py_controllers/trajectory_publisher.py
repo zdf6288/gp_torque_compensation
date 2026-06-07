@@ -211,7 +211,7 @@ class TrajectoryPublisher(Node):
 
         if future is None:
             # trajectory not ready
-            print(f"[TrajectoryPublisher] Future trajectory not ready for t_delay={t_delay:.3f}s")
+            # future trajectory 未 ready 可能高频发生；默认静默，避免真机运行时 stdout I/O 负载。
             response.x_des = [0.0]*6
             response.dx_des = [0.0]*6
             response.ddx_des = [0.0]*6

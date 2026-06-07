@@ -1555,7 +1555,7 @@ class CartesianImpedanceController(Node):
                 return
 
             if not self.task_command_received:
-                print("not received")
+                # 真机实时控制中避免高频终端输出；这里保持静默，防止增加通信/调度负载。
                 return  
 
             # cartesian impedance control (after joint position adjustment)   
@@ -1729,7 +1729,7 @@ class CartesianImpedanceController(Node):
 
                     dq_pred_next = dq_future_ref.copy()
                     q_pred_next = q.copy()
-                    print(dq_pred_next * dt)
+                    # 真机实时控制中禁止每周期打印预测步长，避免 stdout I/O 造成负载抖动。
                     # dq_pred_next = dq_des_joint
                     # q_pred_next = q.copy()
                     self.prev_q_pred = q_pred_next.copy()
@@ -3254,7 +3254,7 @@ class CartesianImpedanceController(Node):
             return np.zeros(7, dtype=float), np.ones(7, dtype=float) * 1e6
 
         if not self.gp_ready or not self.use_gp:
-            print("[GP] GP not ready or not enabled; skipping prediction")
+            # GP 未 ready/未启用时可能在 callback 内高频发生；默认静默，避免实时路径打印。
             return np.zeros(7, dtype=float), np.ones(7, dtype=float) * 1e6
 
         y_hat = np.zeros(7, dtype=float)
