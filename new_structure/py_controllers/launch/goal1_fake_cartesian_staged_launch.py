@@ -27,6 +27,7 @@ def generate_launch_description():
     gp_prediction_enabled_parameter_name = 'gp_prediction_enabled'
     gp_model_dir_parameter_name = 'gp_model_dir'
     gp_compensation_enabled_parameter_name = 'gp_compensation_enabled'
+    gp_compensation_source_parameter_name = 'gp_compensation_source'
     gp_compensation_disable_joint7_parameter_name = 'gp_compensation_disable_joint7'
     gp_shadow_logging_enabled_parameter_name = 'gp_shadow_paper_fusion_logging_enabled'
     gp_historical_shadow_enabled_parameter_name = 'gp_historical_shadow_enabled'
@@ -78,6 +79,7 @@ def generate_launch_description():
     gp_prediction_enabled = LaunchConfiguration(gp_prediction_enabled_parameter_name)
     gp_model_dir = LaunchConfiguration(gp_model_dir_parameter_name)
     gp_compensation_enabled = LaunchConfiguration(gp_compensation_enabled_parameter_name)
+    gp_compensation_source = LaunchConfiguration(gp_compensation_source_parameter_name)
     gp_compensation_disable_joint7 = LaunchConfiguration(
         gp_compensation_disable_joint7_parameter_name
     )
@@ -199,7 +201,10 @@ def generate_launch_description():
                 gp_compensation_disable_joint7,
                 value_type=bool,
             ),
-            'gp_compensation_source': 'local',
+            gp_compensation_source_parameter_name: ParameterValue(
+                gp_compensation_source,
+                value_type=str,
+            ),
             'gp_compensation_scale': 0.1,
             'gp_compensation_clip_nm': 0.5,
             gp_shadow_logging_enabled_parameter_name: ParameterValue(
@@ -377,6 +382,14 @@ def generate_launch_description():
             description='Keep GP torque compensation disabled in fake/no-motion validation.',
         ),
         DeclareLaunchArgument(
+            gp_compensation_source_parameter_name,
+            default_value='local',
+            description=(
+                'GP compensation source for explicit fake/no-motion validation: '
+                'local, cloud, combined, or hist_db.'
+            ),
+        ),
+        DeclareLaunchArgument(
             gp_compensation_disable_joint7_parameter_name,
             default_value='false',
             description='Disable active GP applied torque on joint7 only when explicitly true.',
@@ -409,7 +422,10 @@ def generate_launch_description():
         DeclareLaunchArgument(
             gp_historical_db_enabled_parameter_name,
             default_value='false',
-            description='Enable persistent residual DB shadow query only for explicit fake validation.',
+            description=(
+                'Enable persistent residual DB query only for explicit fake validation; '
+                'active torque uses it only with gp_compensation_source:=hist_db.'
+            ),
         ),
         DeclareLaunchArgument(
             gp_historical_db_path_parameter_name,
@@ -419,7 +435,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             gp_historical_db_k_parameter_name,
             default_value='25',
-            description='Persistent residual DB shadow top-k size.',
+            description='Persistent residual DB top-k size.',
         ),
         DeclareLaunchArgument(
             gp_historical_db_q_scale_parameter_name,
@@ -434,7 +450,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             gp_historical_db_max_distance_parameter_name,
             default_value='1.0',
-            description='Persistent residual DB shadow nearest-distance gate.',
+            description='Persistent residual DB nearest-distance gate.',
         ),
         DeclareLaunchArgument(
             gp_historical_db_disable_online_parameter_name,

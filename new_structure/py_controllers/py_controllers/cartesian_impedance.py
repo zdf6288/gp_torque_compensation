@@ -535,8 +535,8 @@ class CartesianImpedanceController(Node):
             )
             self.gp_compensation_clip_nm = abs(self.gp_compensation_clip_nm)
 
-        # compensation source 只允许 local/cloud/combined，非法值保守 fallback 到 local。
-        valid_gp_compensation_sources = ("local", "cloud", "combined")
+        # compensation source 只允许显式列出的安全链路，非法值保守 fallback 到 local。
+        valid_gp_compensation_sources = ("local", "cloud", "combined", "hist_db")
         if self.gp_compensation_source not in valid_gp_compensation_sources:
             self.get_logger().warn(
                 f"[GP] Invalid gp_compensation_source='{self.gp_compensation_source}', "
@@ -3167,13 +3167,33 @@ class CartesianImpedanceController(Node):
             self._gp_clip_active = np.zeros(7, dtype=int)
             return tau
 
-        # combined 当前是 local/cloud variance fusion candidate；paper/historical 先走 shadow logging。
+        # combined 当前是 local/cloud variance fusion candidate；hist_db 必须显式 opt-in。
         if self.gp_compensation_source == "cloud":
             compensation = self.y_hat_cloud
             self._gp_source_code = 2
         elif self.gp_compensation_source == "combined":
             compensation = self.y_hat_combined
             self._gp_source_code = 3
+        elif self.gp_compensation_source == "hist_db":
+            compensation = np.zeros(7, dtype=float)
+            self._gp_source_code = 4
+            try:
+                hist_db_gated_pred = np.asarray(self.hist_db_gated_pred, dtype=float)
+            except (TypeError, ValueError):
+                hist_db_gated_pred = None
+
+            if (
+                bool(self.gp_historical_db_loaded)
+                and int(self.hist_db_loaded) == 1
+                and int(self.hist_db_query_valid) == 1
+                and int(self.hist_db_available) == 1
+                and int(self.hist_db_distance_pass) == 1
+                and int(self.hist_db_gated_source_code) == 4
+                and hist_db_gated_pred is not None
+                and hist_db_gated_pred.shape == (7,)
+                and np.all(np.isfinite(hist_db_gated_pred))
+            ):
+                compensation = hist_db_gated_pred.copy()
         else:
             compensation = self.y_hat_local
             self._gp_source_code = 1

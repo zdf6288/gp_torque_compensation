@@ -206,7 +206,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             gp_compensation_source_parameter_name,
             default_value='local',
-            description='GP compensation source: local, cloud, or combined.'),
+            description='GP compensation source: local, cloud, combined, or hist_db.'),
         DeclareLaunchArgument(
             gp_compensation_scale_parameter_name,
             default_value='0.1',
@@ -243,20 +243,20 @@ def generate_launch_description():
             gp_historical_db_enabled_parameter_name,
             default_value='false',
             description=(
-                'Enable persistent historical DB CSV shadow logging only when '
-                'explicitly requested for validation; no active torque compensation.'
+                'Enable persistent historical DB CSV query only when explicitly '
+                'requested; active torque uses it only with gp_compensation_source:=hist_db.'
             )),
         DeclareLaunchArgument(
             gp_historical_db_path_parameter_name,
             default_value='',
             description=(
-                'Persistent historical DB .npz path for shadow logging only; '
+                'Persistent historical DB .npz path for shadow logging or explicit hist_db source; '
                 'empty keeps the DB unavailable.'
             )),
         DeclareLaunchArgument(
             gp_historical_db_k_parameter_name,
             default_value='25',
-            description='Persistent historical DB shadow top-k size for validation.'),
+            description='Persistent historical DB top-k size for validation.'),
         DeclareLaunchArgument(
             gp_historical_db_q_scale_parameter_name,
             default_value='0.1',
@@ -268,13 +268,13 @@ def generate_launch_description():
         DeclareLaunchArgument(
             gp_historical_db_max_distance_parameter_name,
             default_value='1.0',
-            description='Persistent historical DB shadow nearest-distance hard gate.'),
+            description='Persistent historical DB nearest-distance hard gate.'),
         DeclareLaunchArgument(
             gp_historical_db_disable_online_parameter_name,
             default_value='true',
             description=(
                 'Keep persistent historical DB unavailable while GP online update is '
-                'enabled; shadow logging only, no active torque compensation.'
+                'enabled; hist_db active source therefore uses zero fallback in that mode.'
             )),
         DeclareLaunchArgument(
             gp_historical_db_fallback_source_parameter_name,

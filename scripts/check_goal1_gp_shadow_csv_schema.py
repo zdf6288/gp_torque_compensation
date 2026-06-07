@@ -27,7 +27,7 @@ JOINTS = range(1, 8)
 TOLERANCE = 1e-9
 DEFAULT_OUTPUT_DIR = Path("outputs/goal1_gp_shadow_csv_schema_check")
 CSV_BASENAME = "cartesian_impedance_controller_data.csv"
-EXPECTED_SOURCE_CODES = {0, 1, 2, 3}
+EXPECTED_SOURCE_CODES = {0, 1, 2, 3, 4}
 EXPECTED_BOOL_CODES = {0, 1}
 
 
