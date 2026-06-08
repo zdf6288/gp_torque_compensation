@@ -361,6 +361,9 @@ class CartesianImpedanceController(Node):
         self.hist_db_gated_source_code_history = []
         self.hist_db_pred_history = []
         self.hist_db_gated_pred_history = []
+        self.hist_db_query_stride_history = []
+        self.hist_db_query_reused_history = []
+        self.hist_db_query_counter_history = []
         self.hist_soft_valid_history = []
         self.hist_soft_nearest_distance_history = []
         self.hist_soft_raw_w_hist_history = []
@@ -604,6 +607,8 @@ class CartesianImpedanceController(Node):
         # hist DB 查询节流状态；默认 stride=1 时每个 callback 查询，保持旧行为。
         self._hist_db_query_counter = 0
         self._hist_db_last_query_result = None
+        self.hist_db_query_reused = 0
+        self.hist_db_query_counter = 0
         self.gp_historical_db_feature_scale = np.array(
             [self.gp_historical_db_q_scale] * 7
             + [self.gp_historical_db_dq_scale] * 7,
@@ -1914,6 +1919,15 @@ class CartesianImpedanceController(Node):
                 )
                 self.hist_db_pred_history.append(self.hist_db_pred.tolist())
                 self.hist_db_gated_pred_history.append(self.hist_db_gated_pred.tolist())
+                self.hist_db_query_stride_history.append(
+                    int(getattr(self, "gp_historical_db_query_stride", 1))
+                )
+                self.hist_db_query_reused_history.append(
+                    int(getattr(self, "hist_db_query_reused", 0))
+                )
+                self.hist_db_query_counter_history.append(
+                    int(getattr(self, "hist_db_query_counter", 0))
+                )
                 self.hist_soft_valid_history.append(int(self.hist_soft_valid))
                 self.hist_soft_nearest_distance_history.append(
                     float(self.hist_soft_nearest_distance)
@@ -2649,6 +2663,8 @@ class CartesianImpedanceController(Node):
             or (self._hist_db_query_counter % query_stride == 0)
         )
 
+        self.hist_db_query_reused = int(not should_query)
+
         if should_query:
             result = self._query_historical_residual_db_shadow(q, dq)
             self._hist_db_last_query_result = dict(result)
@@ -2656,6 +2672,7 @@ class CartesianImpedanceController(Node):
             result = dict(self._hist_db_last_query_result)
 
         self._hist_db_query_counter += 1
+        self.hist_db_query_counter = int(self._hist_db_query_counter)
         self.hist_db_loaded = int(result["loaded"])
         self.hist_db_query_valid = int(result["query_valid"])
         self.hist_db_available = int(result["available"])
@@ -3594,6 +3611,11 @@ class CartesianImpedanceController(Node):
                 header.extend([f'hist_db_pred_{i+1}' for i in range(7)])
                 header.extend([f'hist_db_gated_pred_{i+1}' for i in range(7)])
                 header.extend([
+                    'hist_db_query_stride',
+                    'hist_db_query_reused',
+                    'hist_db_query_counter',
+                ])
+                header.extend([
                     'hist_soft_enabled',
                     'hist_soft_valid',
                     'hist_soft_online_mode',
@@ -3955,6 +3977,18 @@ class CartesianImpedanceController(Node):
                         row.extend(self.hist_db_gated_pred_history[i])
                     else:
                         row.extend([0.0] * 7)
+
+                    row.extend([
+                        self.hist_db_query_stride_history[i]
+                        if i < len(self.hist_db_query_stride_history)
+                        else int(getattr(self, "gp_historical_db_query_stride", 1)),
+                        self.hist_db_query_reused_history[i]
+                        if i < len(self.hist_db_query_reused_history)
+                        else 0,
+                        self.hist_db_query_counter_history[i]
+                        if i < len(self.hist_db_query_counter_history)
+                        else 0,
+                    ])
 
                     hist_soft_valid = (
                         int(self.hist_soft_valid_history[i])
