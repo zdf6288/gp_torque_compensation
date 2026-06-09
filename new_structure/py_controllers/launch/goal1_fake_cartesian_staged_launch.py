@@ -22,6 +22,12 @@ def generate_launch_description():
     z_amplitude_parameter_name = 'z_amplitude'
     z_frequency_multiplier_parameter_name = 'z_frequency_multiplier'
     transition_duration_parameter_name = 'transition_duration'
+    trajectory_start_distance_warn_m_parameter_name = 'trajectory_start_distance_warn_m'
+    trajectory_start_distance_refuse_m_parameter_name = 'trajectory_start_distance_refuse_m'
+    trajectory_start_distance_guard_enabled_parameter_name = (
+        'trajectory_start_distance_guard_enabled'
+    )
+    trajectory_max_cartesian_step_m_parameter_name = 'trajectory_max_cartesian_step_m'
     trajectory_start_delay_parameter_name = 'trajectory_start_delay_sec'
     cartesian_start_delay_parameter_name = 'cartesian_start_delay_sec'
     gp_prediction_enabled_parameter_name = 'gp_prediction_enabled'
@@ -76,6 +82,18 @@ def generate_launch_description():
     z_amplitude = LaunchConfiguration(z_amplitude_parameter_name)
     z_frequency_multiplier = LaunchConfiguration(z_frequency_multiplier_parameter_name)
     transition_duration = LaunchConfiguration(transition_duration_parameter_name)
+    trajectory_start_distance_warn_m = LaunchConfiguration(
+        trajectory_start_distance_warn_m_parameter_name
+    )
+    trajectory_start_distance_refuse_m = LaunchConfiguration(
+        trajectory_start_distance_refuse_m_parameter_name
+    )
+    trajectory_start_distance_guard_enabled = LaunchConfiguration(
+        trajectory_start_distance_guard_enabled_parameter_name
+    )
+    trajectory_max_cartesian_step_m = LaunchConfiguration(
+        trajectory_max_cartesian_step_m_parameter_name
+    )
     trajectory_start_delay_sec = LaunchConfiguration(trajectory_start_delay_parameter_name)
     cartesian_start_delay_sec = LaunchConfiguration(cartesian_start_delay_parameter_name)
     gp_prediction_enabled = LaunchConfiguration(gp_prediction_enabled_parameter_name)
@@ -151,6 +169,22 @@ def generate_launch_description():
             circle_frequency_parameter_name: ParameterValue(circle_frequency, value_type=float),
             transition_duration_parameter_name: ParameterValue(
                 transition_duration,
+                value_type=float,
+            ),
+            trajectory_start_distance_warn_m_parameter_name: ParameterValue(
+                trajectory_start_distance_warn_m,
+                value_type=float,
+            ),
+            trajectory_start_distance_refuse_m_parameter_name: ParameterValue(
+                trajectory_start_distance_refuse_m,
+                value_type=float,
+            ),
+            trajectory_start_distance_guard_enabled_parameter_name: ParameterValue(
+                trajectory_start_distance_guard_enabled,
+                value_type=bool,
+            ),
+            trajectory_max_cartesian_step_m_parameter_name: ParameterValue(
+                trajectory_max_cartesian_step_m,
                 value_type=float,
             ),
         }],
@@ -365,6 +399,26 @@ def generate_launch_description():
             transition_duration_parameter_name,
             default_value='3.0',
             description='Offline trajectory transition duration in seconds.',
+        ),
+        DeclareLaunchArgument(
+            trajectory_start_distance_warn_m_parameter_name,
+            default_value='0.03',
+            description='Warn if current EE pose is farther than this from trajectory start.',
+        ),
+        DeclareLaunchArgument(
+            trajectory_start_distance_refuse_m_parameter_name,
+            default_value='0.12',
+            description='Refuse trajectory start if current EE pose is farther than this.',
+        ),
+        DeclareLaunchArgument(
+            trajectory_start_distance_guard_enabled_parameter_name,
+            default_value='true',
+            description='Enable trajectory start distance warn/refuse guard.',
+        ),
+        DeclareLaunchArgument(
+            trajectory_max_cartesian_step_m_parameter_name,
+            default_value='0.0',
+            description='Optional transition-only Cartesian step clamp in meters; 0 disables.',
         ),
         DeclareLaunchArgument(
             trajectory_start_delay_parameter_name,

@@ -128,13 +128,34 @@ class TrajectoryPublisher(Node):
         self.robot_initial_received = False
         self.declare_parameter('transition_duration', 3.0)  # time to reach start point (s)
         self.declare_parameter('use_transition', True)      
+        self.declare_parameter('trajectory_start_distance_warn_m', 0.03)
+        self.declare_parameter('trajectory_start_distance_refuse_m', 0.12)
+        self.declare_parameter('trajectory_start_distance_guard_enabled', True)
+        self.declare_parameter('trajectory_max_cartesian_step_m', 0.0)
         self.transition_duration = self.get_parameter('transition_duration').value
         self.use_transition = self.get_parameter('use_transition').value
+        self.trajectory_start_distance_warn_m = float(
+            self.get_parameter('trajectory_start_distance_warn_m').value
+        )
+        self.trajectory_start_distance_refuse_m = float(
+            self.get_parameter('trajectory_start_distance_refuse_m').value
+        )
+        self.trajectory_start_distance_guard_enabled = bool(
+            self.get_parameter('trajectory_start_distance_guard_enabled').value
+        )
+        self.trajectory_max_cartesian_step_m = float(
+            self.get_parameter('trajectory_max_cartesian_step_m').value
+        )
         
         self.trajectory_enabled = False         # flag controlled by service
         
         self.start_time = self.get_clock().now()
         self.transition_start_time = None
+        self.transition_start_position = None
+        self.transition_target_position = None
+        self.last_transition_command_position = None
+        self.last_transition_command_time = None
+        self.transition_step_clamp_logged = False
         self.transition_complete = False        # flag indicating the completion of moving to the start point of trajectory
         
         # get start point of trajectory
@@ -177,6 +198,16 @@ class TrajectoryPublisher(Node):
         self.get_logger().info(f'Trajectory start point: ({self.trajectory_start_x:.3f}, {self.trajectory_start_y:.3f}, {self.trajectory_start_z:.3f})')
         if self.use_transition:
             self.get_logger().info(f'Transition duration: {self.transition_duration} s')
+        self.get_logger().info(
+            f'Trajectory start distance guard: enabled={self.trajectory_start_distance_guard_enabled}, '
+            f'warn={self.trajectory_start_distance_warn_m:.3f} m, '
+            f'refuse={self.trajectory_start_distance_refuse_m:.3f} m'
+        )
+        if self.trajectory_max_cartesian_step_m > 0.0:
+            self.get_logger().info(
+                f'Transition Cartesian step clamp enabled: '
+                f'{self.trajectory_max_cartesian_step_m:.4f} m per publish'
+            )
         self.get_logger().info('Waiting for joint position adjustment service call to enable trajectory...')
     
     def joint_position_callback(self, request, response):
@@ -191,6 +222,11 @@ class TrajectoryPublisher(Node):
             # reset timing for trajectory
             self.start_time = self.get_clock().now()
             self.transition_start_time = None
+            self.transition_start_position = None
+            self.transition_target_position = None
+            self.last_transition_command_position = None
+            self.last_transition_command_time = None
+            self.transition_step_clamp_logged = False
             self.transition_complete = False
             self.robot_initial_received = False
             
@@ -236,17 +272,128 @@ class TrajectoryPublisher(Node):
                 self.robot_initial_x = o_t_f[0, 3]
                 self.robot_initial_y = o_t_f[1, 3]
                 self.robot_initial_z = o_t_f[2, 3]
+                current_position = np.array(
+                    [self.robot_initial_x, self.robot_initial_y, self.robot_initial_z],
+                    dtype=float
+                )
+                target_position = np.array(
+                    [self.trajectory_start_x, self.trajectory_start_y, self.trajectory_start_z],
+                    dtype=float
+                )
+                distance_to_start = float(np.linalg.norm(target_position - current_position))
+                if self.transition_duration > 0.0:
+                    average_speed = distance_to_start / float(self.transition_duration)
+                else:
+                    average_speed = float('inf')
                 
                 self.robot_initial_received = True
                 self.get_logger().info(f'Robot initial position recorded: ({self.robot_initial_x:.3f}, {self.robot_initial_y:.3f}, {self.robot_initial_z:.3f})')
+                self.get_logger().info(
+                    f'[TrajectoryPublisher] Smooth transition start: '
+                    f'current=({current_position[0]:.4f}, {current_position[1]:.4f}, {current_position[2]:.4f}), '
+                    f'target=({target_position[0]:.4f}, {target_position[1]:.4f}, {target_position[2]:.4f}), '
+                    f'distance={distance_to_start:.4f} m, '
+                    f'transition_duration={float(self.transition_duration):.3f} s, '
+                    f'avg_speed={average_speed:.4f} m/s'
+                )
+
+                if self.trajectory_start_distance_guard_enabled:
+                    if distance_to_start > self.trajectory_start_distance_refuse_m:
+                        self.get_logger().error(
+                            f'[TrajectoryPublisher] Refusing trajectory start: '
+                            f'distance_to_start={distance_to_start:.4f} m exceeds '
+                            f'trajectory_start_distance_refuse_m='
+                            f'{self.trajectory_start_distance_refuse_m:.4f} m. '
+                            f'Trajectory motion remains disabled.'
+                        )
+                        self.trajectory_enabled = False
+                        self.robot_initial_received = False
+                        self.transition_start_time = None
+                        self.transition_start_position = None
+                        self.transition_target_position = None
+                        self.last_transition_command_position = None
+                        self.last_transition_command_time = None
+                        return
+
+                    if distance_to_start > self.trajectory_start_distance_warn_m:
+                        self.get_logger().warning(
+                            f'[TrajectoryPublisher] Large trajectory start distance: '
+                            f'distance_to_start={distance_to_start:.4f} m exceeds '
+                            f'trajectory_start_distance_warn_m='
+                            f'{self.trajectory_start_distance_warn_m:.4f} m.'
+                        )
                 
                 # start moving to the start point of trajectory after receiving initial position
                 if self.use_transition:
-                    self.transition_start_time = self.get_clock().now()
+                    # transition 必须从当前 measured EE pose 开始，避免第一拍 desired command 跳到轨迹起点导致速度约束触发。
+                    transition_start_now = self.get_clock().now()
+                    self.transition_start_position = current_position
+                    self.transition_target_position = target_position
+                    self.last_transition_command_position = current_position.copy()
+                    self.last_transition_command_time = transition_start_now
+                    self.transition_start_time = transition_start_now
                     self.get_logger().info('Starting transition to trajectory start point')
                 
             except Exception as e:
                 self.get_logger().error(f'Error extracting robot initial position: {str(e)}')
+
+    def _compute_transition_command(self, transition_elapsed):
+        """Return position, velocity, and acceleration for the smooth start transition."""
+        if self.transition_start_position is None or self.transition_target_position is None:
+            return None
+
+        duration = float(self.transition_duration)
+        if duration <= 0.0:
+            s = 1.0
+            ds_dt = 0.0
+            d2s_dt2 = 0.0
+        else:
+            t = transition_elapsed / duration
+            s = min(max(t, 0.0), 1.0)
+            ds_dt = (6.0 * s * (1.0 - s)) / duration
+            d2s_dt2 = (6.0 - 12.0 * s) / (duration**2)
+
+        alpha = s * s * (3.0 - 2.0 * s)
+        delta = self.transition_target_position - self.transition_start_position
+        position = self.transition_start_position + alpha * delta
+        velocity = ds_dt * delta
+        acceleration = d2s_dt2 * delta
+        return position, velocity, acceleration
+
+    def _apply_transition_step_clamp(self, position, velocity, acceleration, current_time):
+        """Clamp only the per-cycle Cartesian position step during transition when enabled."""
+        max_step = float(self.trajectory_max_cartesian_step_m)
+        if max_step <= 0.0 or self.last_transition_command_position is None:
+            return position, velocity, acceleration
+
+        step = position - self.last_transition_command_position
+        step_norm = float(np.linalg.norm(step))
+        if step_norm <= max_step or step_norm <= 0.0:
+            return position, velocity, acceleration
+
+        clamped_step = step * (max_step / step_norm)
+        clamped_position = self.last_transition_command_position + clamped_step
+
+        if self.last_transition_command_time is not None:
+            dt = (current_time - self.last_transition_command_time).nanoseconds / 1e9
+        else:
+            dt = 0.0
+
+        if dt > 0.0:
+            velocity = clamped_step / dt
+        else:
+            velocity = np.zeros(3)
+        acceleration = np.zeros(3)
+
+        if not self.transition_step_clamp_logged:
+            self.get_logger().warning(
+                f'[TrajectoryPublisher] Transition Cartesian step clamp active: '
+                f'requested_step={step_norm:.5f} m, '
+                f'clamped_to={max_step:.5f} m.'
+            )
+            self.transition_step_clamp_logged = True
+
+        return clamped_position, velocity, acceleration
 
     def _compute_task_space_trajectory(self, t):
         """计算 post-transition 轨迹；live 发布和 /future_task_space 共用，避免预测不一致。"""
@@ -341,40 +488,25 @@ class TrajectoryPublisher(Node):
                     # reset start time for selected trajectory
                     self.start_time = current_time
                     elapsed_time = 0.0
-                    
-                    # set initial position to trajectory start point
-                    x = self.trajectory_start_x
-                    y = self.trajectory_start_y
-                    z = self.trajectory_start_z
                 else:
-                    # generate smooth transition trajectory from adjusted robot position to start point
-                    # use 5th order polynomial for interpolation
-                    t = transition_elapsed / self.transition_duration
-                    s = 10*t**3 - 15*t**4 + 6*t**5
-                    
-                    # interpolation
-                    x = self.robot_initial_x + s * (self.trajectory_start_x - self.robot_initial_x)
-                    y = self.robot_initial_y + s * (self.trajectory_start_y - self.robot_initial_y)
-                    z = self.robot_initial_z + s * (self.trajectory_start_z - self.robot_initial_z)
+                    transition_command = self._compute_transition_command(transition_elapsed)
+                    if transition_command is None:
+                        return
+                    position, velocity, acceleration = transition_command
+                    position, velocity, acceleration = self._apply_transition_step_clamp(
+                        position, velocity, acceleration, current_time
+                    )
 
-                    ds_dt = (30*t**2 - 60*t**3 + 30*t**4) / self.transition_duration
-                    d2s_dt2 = (60*t - 180*t**2 + 120*t**3) / (self.transition_duration**2)
-                    
-                    dx = ds_dt * (self.trajectory_start_x - self.robot_initial_x)
-                    dy = ds_dt * (self.trajectory_start_y - self.robot_initial_y)
-                    dz = ds_dt * (self.trajectory_start_z - self.robot_initial_z)
-                    
-                    ddx = d2s_dt2 * (self.trajectory_start_x - self.robot_initial_x)
-                    ddy = d2s_dt2 * (self.trajectory_start_y - self.robot_initial_y)
-                    ddz = d2s_dt2 * (self.trajectory_start_z - self.robot_initial_z)
+                    x, y, z = position[:3]
+                    dx, dy, dz = velocity[:3]
+                    ddx, ddy, ddz = acceleration[:3]
             
             # selected trajectory after smooth transition
             if self.transition_complete or not self.use_transition:
-                if elapsed_time > 0.0:
-                    x_des, dx_des, ddx_des = self._compute_task_space_trajectory(elapsed_time)
-                    x, y, z = x_des[:3]
-                    dx, dy, dz = dx_des[:3]
-                    ddx, ddy, ddz = ddx_des[:3]
+                x_des, dx_des, ddx_des = self._compute_task_space_trajectory(elapsed_time)
+                x, y, z = x_des[:3]
+                dx, dy, dz = dx_des[:3]
+                ddx, ddy, ddz = ddx_des[:3]
             
             # publish on /task_space_command
             trajectory_msg = TaskSpaceCommand()
@@ -386,6 +518,12 @@ class TrajectoryPublisher(Node):
             trajectory_msg.ddx_des = [ddx, ddy, ddz, 0.0, 0.0, 0.0] # acceleration
             
             self.trajectory_publisher.publish(trajectory_msg)
+            if self.use_transition and not self.transition_complete:
+                self.last_transition_command_position = np.array([x, y, z], dtype=float)
+                self.last_transition_command_time = current_time
+            else:
+                self.last_transition_command_position = None
+                self.last_transition_command_time = None
             
             # publish data recording status
             data_recording_msg = Bool()
@@ -482,24 +620,14 @@ class TrajectoryPublisher(Node):
             transition_elapsed = (future_time - self.transition_start_time).nanoseconds / 1e9
 
             if 0.0 <= transition_elapsed < self.transition_duration:
-                # —— 还在 5 次多项式过渡阶段 —— #
-                t = transition_elapsed / self.transition_duration
-                s = 10*t**3 - 15*t**4 + 6*t**5
-
-                x = self.robot_initial_x + s * (self.trajectory_start_x - self.robot_initial_x)
-                y = self.robot_initial_y + s * (self.trajectory_start_y - self.robot_initial_y)
-                z = self.robot_initial_z + s * (self.trajectory_start_z - self.robot_initial_z)
-
-                ds_dt = (30*t**2 - 60*t**3 + 30*t**4) / self.transition_duration
-                d2s_dt2 = (60*t - 180*t**2 + 120*t**3) / (self.transition_duration**2)
-
-                dx = ds_dt * (self.trajectory_start_x - self.robot_initial_x)
-                dy = ds_dt * (self.trajectory_start_y - self.robot_initial_y)
-                dz = ds_dt * (self.trajectory_start_z - self.robot_initial_z)
-
-                ddx = d2s_dt2 * (self.trajectory_start_x - self.robot_initial_x)
-                ddy = d2s_dt2 * (self.trajectory_start_y - self.robot_initial_y)
-                ddz = d2s_dt2 * (self.trajectory_start_z - self.robot_initial_z)
+                # —— 还在 smoothstep 过渡阶段 —— #
+                transition_command = self._compute_transition_command(transition_elapsed)
+                if transition_command is None:
+                    return None
+                position, velocity, acceleration = transition_command
+                x, y, z = position[:3]
+                dx, dy, dz = velocity[:3]
+                ddx, ddy, ddz = acceleration[:3]
 
             else:
                 # —— 已经过渡完，进入圆轨迹 —— #
