@@ -25,6 +25,8 @@ def generate_launch_description():
     joint_space_command_topic_parameter_name = 'joint_space_command_topic'
     # Stage 1: frozen GP / compensation experiment 参数，默认值保持安全。
     gp_prediction_enabled_parameter_name = 'gp_prediction_enabled'
+    gp_prediction_stride_parameter_name = 'gp_prediction_stride'
+    future_trajectory_request_stride_parameter_name = 'future_trajectory_request_stride'
     gp_online_update_enabled_parameter_name = 'gp_online_update_enabled'
     gp_model_dir_parameter_name = 'gp_model_dir'
     gp_compensation_enabled_parameter_name = 'gp_compensation_enabled'
@@ -106,6 +108,8 @@ def generate_launch_description():
     reference_mode = LaunchConfiguration(reference_mode_parameter_name)
     joint_space_command_topic = LaunchConfiguration(joint_space_command_topic_parameter_name)
     gp_prediction_enabled = LaunchConfiguration(gp_prediction_enabled_parameter_name)
+    gp_prediction_stride = LaunchConfiguration(gp_prediction_stride_parameter_name)
+    future_trajectory_request_stride = LaunchConfiguration(future_trajectory_request_stride_parameter_name)
     gp_online_update_enabled = LaunchConfiguration(gp_online_update_enabled_parameter_name)
     gp_model_dir = LaunchConfiguration(gp_model_dir_parameter_name)
     gp_compensation_enabled = LaunchConfiguration(gp_compensation_enabled_parameter_name)
@@ -267,6 +271,14 @@ def generate_launch_description():
             gp_prediction_enabled_parameter_name,
             default_value='true',
             description='Enable GP prediction path in the controller.'),
+        DeclareLaunchArgument(
+            gp_prediction_stride_parameter_name,
+            default_value='5',
+            description='Run GP predict/update once every N controller callbacks.'),
+        DeclareLaunchArgument(
+            future_trajectory_request_stride_parameter_name,
+            default_value='5',
+            description='Request /future_task_space once every N controller callbacks.'),
         DeclareLaunchArgument(
             gp_online_update_enabled_parameter_name,
             default_value='true',
@@ -537,6 +549,8 @@ def generate_launch_description():
                 reference_mode_parameter_name: ParameterValue(reference_mode, value_type=str),
                 joint_space_command_topic_parameter_name: joint_space_command_topic,
                 gp_prediction_enabled_parameter_name: gp_prediction_enabled,
+                gp_prediction_stride_parameter_name: ParameterValue(gp_prediction_stride, value_type=int),
+                future_trajectory_request_stride_parameter_name: ParameterValue(future_trajectory_request_stride, value_type=int),
                 gp_online_update_enabled_parameter_name: gp_online_update_enabled,
                 gp_model_dir_parameter_name: gp_model_dir,
                 gp_compensation_enabled_parameter_name: gp_compensation_enabled,
