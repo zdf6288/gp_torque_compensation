@@ -3583,13 +3583,23 @@ class CartesianImpedanceController(Node):
         }
 
     def _update_gp_shadow_logging_state(self, q, dq):
-        self._reset_gp_shadow_state()
-
         if (
             not self.gp_shadow_paper_fusion_logging_enabled
             or not self.gp_prediction_enabled
+            or not self.gp_active
+            or not self.use_gp
         ):
+            self._reset_gp_shadow_state()
             return
+
+        gp_tick = (
+            self.gp_counter > 0
+            and self.gp_counter % self.gp_prediction_stride == 0
+        )
+        if not gp_tick:
+            return
+
+        self._reset_gp_shadow_state()
 
         x_query = None
         if (
