@@ -62,6 +62,7 @@ class CartesianImpedanceController(Node):
     
     def __init__(self):
         super().__init__('cartesian_impedance')
+        self._shutdown_in_progress = False
 
         self.declare_parameter('reference_mode', 'cartesian')
         self.declare_parameter('joint_space_command_topic', '/joint_space_command')
@@ -1522,42 +1523,46 @@ class CartesianImpedanceController(Node):
         self.get_logger().info(f"[Controller] GP mode switched to: {self.gp_mode}")
 
     def shutdown_callback(self, msg):
-        if msg.data:
-            self.get_logger().info("[Controller] Received shutdown signal — stopping robot, saving data & exiting.")
+        if not msg.data:
+            return
 
-            # ------------------------------------------
-            # 1) 立即停止力矩输出（关键！！！）
-            # ------------------------------------------
-            try:
-                zero_tau = EffortCommand()
-                zero_tau.efforts = [0.0] * 7
+        if self._shutdown_in_progress:
+            return
+        self._shutdown_in_progress = True
+
+        self.get_logger().info(
+            "[Controller] Received shutdown signal — stopping command output and saving data."
+        )
+
+        # 停止后续高负载路径：shutdown 开始后不再继续 GP、future request、recording append。
+        self.gp_active = False
+        self.data_recording_enabled = False
+
+        try:
+            zero_tau = EffortCommand()
+            zero_tau.efforts = [0.0] * 7
+            for _ in range(3):
                 self.effort_publisher.publish(zero_tau)
-                self.get_logger().info("[Controller] Published zero torque to stop robot.")
-            except Exception as e:
-                self.get_logger().error(f"Error publishing zero torque: {e}")
+                time.sleep(0.02)
+            self.get_logger().info("[Controller] Published zero torque commands (x3).")
+        except Exception as e:
+            self.get_logger().error(f"Error publishing zero torque: {e}")
 
-            # ------------------------------------------
-            # 2) 停止后再保存数据
-            # ------------------------------------------
-            try:
-                self.save_data_to_file()
-            except Exception as e:
-                self.get_logger().error(f"Error saving data: {e}")
+        try:
+            self.save_data_to_file()
+        except Exception as e:
+            self.get_logger().error(f"Error saving data: {e}")
 
-            # ------------------------------------------
-            # 3) 自动画图
-            # ------------------------------------------
-            try:
-                os.system("python3 ablation.py cartesian_impedance_controller_data.csv")
-                self.get_logger().info("[Controller] Plotting completed.")
-            except Exception as e:
-                self.get_logger().error(f"Plotting error: {e}")
+        self.get_logger().info(
+            "[Controller] Skipping ablation.py automatic plotting during shutdown. "
+            "Run plotting offline after ROS shutdown."
+        )
 
-            # ------------------------------------------
-            # 4) 安全退出
-            # ------------------------------------------
-            rclpy.shutdown()
-            os._exit(0)
+        try:
+            if rclpy.ok():
+                rclpy.shutdown()
+        except Exception as e:
+            self.get_logger().warn(f"rclpy.shutdown() raised during shutdown: {e}")
     
 
     def stateParameterCallback(self, msg):
