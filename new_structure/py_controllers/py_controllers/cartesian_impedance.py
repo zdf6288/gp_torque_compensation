@@ -450,6 +450,8 @@ class CartesianImpedanceController(Node):
         self.declare_parameter("gp_triple_min_weight_cloud", 0.05)
         self.declare_parameter("gp_triple_require_hist_available", True)
         self.declare_parameter("gp_triple_fallback_source", "combined")
+        self.declare_parameter("gp_triple_debug_safety_log_enabled", True)
+        self.declare_parameter("gp_triple_debug_safety_log_first_n", 5)
         self.declare_parameter("gp_historical_soft_shadow_enabled", False)
         self.declare_parameter("gp_historical_soft_alpha", 1.0)
         self.declare_parameter("gp_historical_soft_distance_threshold", 0.2)
@@ -571,6 +573,12 @@ class CartesianImpedanceController(Node):
         self.gp_triple_fallback_source = str(
             self.get_parameter("gp_triple_fallback_source").value
         ).strip().lower()
+        self.gp_triple_debug_safety_log_enabled = self._get_bool_parameter(
+            "gp_triple_debug_safety_log_enabled"
+        )
+        self.gp_triple_debug_safety_log_first_n = self._get_bounded_int_parameter(
+            "gp_triple_debug_safety_log_first_n", 5, 0, 1000000
+        )
         self.gp_historical_soft_shadow_enabled = self._get_bool_parameter(
             "gp_historical_soft_shadow_enabled"
         )
@@ -602,6 +610,7 @@ class CartesianImpedanceController(Node):
             "deadline_ratio_warn_threshold", 0.8
         )
         self._gp_compensation_logged = False
+        self._gp_triple_debug_safety_log_count = 0
 
         # clip 只接受非负幅值；负数配置按绝对值处理，避免反向区间。
         if self.gp_compensation_clip_nm < 0.0:
@@ -792,7 +801,9 @@ class CartesianImpedanceController(Node):
             f"min_weight_local={self.gp_triple_min_weight_local}, "
             f"min_weight_cloud={self.gp_triple_min_weight_cloud}, "
             f"require_hist_available={self.gp_triple_require_hist_available}, "
-            f"fallback_source='{self.gp_triple_fallback_source}'; "
+            f"fallback_source='{self.gp_triple_fallback_source}', "
+            f"debug_safety_log_enabled={self.gp_triple_debug_safety_log_enabled}, "
+            f"debug_safety_log_first_n={self.gp_triple_debug_safety_log_first_n}; "
             "active only with gp_compensation_source='triple' and compensation enabled"
         )
         self.get_logger().info(
@@ -1979,6 +1990,7 @@ class CartesianImpedanceController(Node):
                 self.gp_scaled_history.append(self._gp_scaled.tolist())
                 self.gp_applied_history.append(self._gp_applied.tolist())
                 self.gp_clip_active_history.append(self._gp_clip_active.tolist())
+                # triple diagnostics 只在 recording block 中写入，避免 trajectory 启动前增加额外实时负担。
                 self.gp_triple_raw_history.append(self.gp_triple_raw.tolist())
                 self.gp_triple_weight_local_history.append(float(self.gp_triple_weight_local))
                 self.gp_triple_weight_cloud_history.append(float(self.gp_triple_weight_cloud))
@@ -3178,6 +3190,7 @@ class CartesianImpedanceController(Node):
             })
             return result
 
+        # triple 只复用本 callback 已经计算好的 local/cloud/hist_db_gated 结果，避免在实时回调里新增 GP 或 DB 查询负担。
         local_raw = self._as_finite_7d(self.y_hat_local, 0.0)
         cloud_raw = self._as_finite_7d(self.y_hat_cloud, 0.0)
         hist_raw = hist_candidate if hist_available else zero.copy()
@@ -3227,6 +3240,54 @@ class CartesianImpedanceController(Node):
             return np.where(np.isfinite(arr), arr, fill_value)
         except (TypeError, ValueError):
             return np.ones(7, dtype=float) * fill_value
+
+    def _log_gp_triple_debug_safety(self):
+        if (
+            not self.gp_triple_debug_safety_log_enabled
+            or self.gp_compensation_source != "triple"
+            or not self.gp_compensation_enabled
+            or (
+                self._gp_triple_debug_safety_log_count
+                >= self.gp_triple_debug_safety_log_first_n
+            )
+        ):
+            return
+
+        self._gp_triple_debug_safety_log_count += 1
+        log_index = self._gp_triple_debug_safety_log_count
+        max_abs_selected_raw = float(np.max(np.abs(self._gp_selected_raw)))
+        max_abs_scaled = float(np.max(np.abs(self._gp_scaled)))
+        max_abs_applied = float(np.max(np.abs(self._gp_applied)))
+        fallback_source = (
+            self.gp_triple_fallback_source
+            if int(self.gp_triple_used_fallback) == 1
+            else "none"
+        )
+
+        self.get_logger().warn(
+            "[GP Triple Safety] "
+            f"index={log_index}/{self.gp_triple_debug_safety_log_first_n}, "
+            f"gp_compensation_scale={self.gp_compensation_scale}, "
+            f"max_abs_selected_raw={max_abs_selected_raw:.9g}, "
+            f"max_abs_scaled={max_abs_scaled:.9g}, "
+            f"max_abs_applied={max_abs_applied:.9g}, "
+            f"weight_local={self.gp_triple_weight_local:.9g}, "
+            f"weight_cloud={self.gp_triple_weight_cloud:.9g}, "
+            f"weight_hist={self.gp_triple_weight_hist:.9g}, "
+            f"triple_available={int(self.gp_triple_available)}, "
+            f"triple_used_fallback={int(self.gp_triple_used_fallback)}, "
+            f"fallback_source='{fallback_source}'"
+        )
+
+        if (
+            float(self.gp_compensation_scale) == 0.0
+            and (max_abs_scaled > 0.0 or max_abs_applied > 0.0)
+        ):
+            self.get_logger().error(
+                "[GP Triple Safety] scale is exactly 0.0 but scaled/applied "
+                f"is nonzero: max_abs_scaled={max_abs_scaled:.9g}, "
+                f"max_abs_applied={max_abs_applied:.9g}"
+            )
 
     def _reset_gp_shadow_state(self):
         zero = np.zeros(7, dtype=float)
@@ -3668,6 +3729,9 @@ class CartesianImpedanceController(Node):
         ).astype(int)
         if self.gp_compensation_disable_joint7:
             self._gp_applied[6] = 0.0
+
+        if self.gp_compensation_source == "triple":
+            self._log_gp_triple_debug_safety()
 
         if not self._gp_compensation_logged:
             self.get_logger().warn(

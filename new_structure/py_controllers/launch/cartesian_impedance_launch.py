@@ -62,6 +62,12 @@ def generate_launch_description():
     gp_triple_min_weight_cloud_parameter_name = 'gp_triple_min_weight_cloud'
     gp_triple_require_hist_available_parameter_name = 'gp_triple_require_hist_available'
     gp_triple_fallback_source_parameter_name = 'gp_triple_fallback_source'
+    gp_triple_debug_safety_log_enabled_parameter_name = (
+        'gp_triple_debug_safety_log_enabled'
+    )
+    gp_triple_debug_safety_log_first_n_parameter_name = (
+        'gp_triple_debug_safety_log_first_n'
+    )
     gp_historical_soft_shadow_enabled_parameter_name = (
         'gp_historical_soft_shadow_enabled'
     )
@@ -154,6 +160,12 @@ def generate_launch_description():
     )
     gp_triple_fallback_source = LaunchConfiguration(
         gp_triple_fallback_source_parameter_name
+    )
+    gp_triple_debug_safety_log_enabled = LaunchConfiguration(
+        gp_triple_debug_safety_log_enabled_parameter_name
+    )
+    gp_triple_debug_safety_log_first_n = LaunchConfiguration(
+        gp_triple_debug_safety_log_first_n_parameter_name
     )
     gp_historical_soft_shadow_enabled = LaunchConfiguration(
         gp_historical_soft_shadow_enabled_parameter_name
@@ -392,6 +404,14 @@ def generate_launch_description():
             default_value='combined',
             description='Triple fallback source: none, local, cloud, combined, or hist_db.'),
         DeclareLaunchArgument(
+            gp_triple_debug_safety_log_enabled_parameter_name,
+            default_value='true',
+            description='Log first-N triple compensation safety values when active.'),
+        DeclareLaunchArgument(
+            gp_triple_debug_safety_log_first_n_parameter_name,
+            default_value='5',
+            description='Number of initial triple compensation callbacks to safety-log.'),
+        DeclareLaunchArgument(
             gp_historical_soft_shadow_enabled_parameter_name,
             default_value='false',
             description=(
@@ -573,6 +593,12 @@ def generate_launch_description():
                 gp_triple_fallback_source_parameter_name: ParameterValue(
                     gp_triple_fallback_source,
                     value_type=str),
+                gp_triple_debug_safety_log_enabled_parameter_name: ParameterValue(
+                    gp_triple_debug_safety_log_enabled,
+                    value_type=bool),
+                gp_triple_debug_safety_log_first_n_parameter_name: ParameterValue(
+                    gp_triple_debug_safety_log_first_n,
+                    value_type=int),
                 gp_historical_soft_shadow_enabled_parameter_name: ParameterValue(
                     gp_historical_soft_shadow_enabled,
                     value_type=bool),
