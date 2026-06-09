@@ -372,6 +372,18 @@ class CartesianImpedanceController(Node):
         self.hist_soft_norm_w_hist_history = []
         self.hist_soft_pred_history = []
         self.hist_soft_delta_vs_local_cloud_history = []
+        self.gp_triple_raw_history = []
+        self.gp_triple_weight_local_history = []
+        self.gp_triple_weight_cloud_history = []
+        self.gp_triple_weight_hist_history = []
+        self.gp_triple_available_history = []
+        self.gp_triple_used_fallback_history = []
+        self.gp_triple_fallback_source_code_history = []
+        self.gp_triple_weight_mode_code_history = []
+        self.gp_triple_hist_weight_cap_history = []
+        self.gp_triple_rmse_local_history = []
+        self.gp_triple_rmse_cloud_history = []
+        self.gp_triple_rmse_hist_history = []
         # set signal handler
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
@@ -424,6 +436,20 @@ class CartesianImpedanceController(Node):
         self.declare_parameter("gp_historical_db_query_stride", 1)
         self.declare_parameter("gp_historical_db_disable_when_online_update", True)
         self.declare_parameter("gp_historical_db_fallback_source", "cloud")
+        self.declare_parameter("gp_triple_weight_mode", "inverse_rmse")
+        self.declare_parameter("gp_triple_weight_local", 0.10)
+        self.declare_parameter("gp_triple_weight_cloud", 0.20)
+        self.declare_parameter("gp_triple_weight_hist", 0.70)
+        self.declare_parameter("gp_triple_weight_normalize", True)
+        self.declare_parameter("gp_triple_rmse_local", 0.330269)
+        self.declare_parameter("gp_triple_rmse_cloud", 0.330278)
+        self.declare_parameter("gp_triple_rmse_hist", 0.093071)
+        self.declare_parameter("gp_triple_inverse_rmse_eps", 1e-9)
+        self.declare_parameter("gp_triple_hist_weight_cap", 0.70)
+        self.declare_parameter("gp_triple_min_weight_local", 0.05)
+        self.declare_parameter("gp_triple_min_weight_cloud", 0.05)
+        self.declare_parameter("gp_triple_require_hist_available", True)
+        self.declare_parameter("gp_triple_fallback_source", "combined")
         self.declare_parameter("gp_historical_soft_shadow_enabled", False)
         self.declare_parameter("gp_historical_soft_alpha", 1.0)
         self.declare_parameter("gp_historical_soft_distance_threshold", 0.2)
@@ -503,6 +529,48 @@ class CartesianImpedanceController(Node):
         self.gp_historical_db_fallback_source = str(
             self.get_parameter("gp_historical_db_fallback_source").value
         ).strip().lower()
+        self.gp_triple_weight_mode = str(
+            self.get_parameter("gp_triple_weight_mode").value
+        ).strip().lower()
+        self.gp_triple_weight_local_param = self._get_nonnegative_float_parameter(
+            "gp_triple_weight_local", 0.10
+        )
+        self.gp_triple_weight_cloud_param = self._get_nonnegative_float_parameter(
+            "gp_triple_weight_cloud", 0.20
+        )
+        self.gp_triple_weight_hist_param = self._get_nonnegative_float_parameter(
+            "gp_triple_weight_hist", 0.70
+        )
+        self.gp_triple_weight_normalize = self._get_bool_parameter(
+            "gp_triple_weight_normalize"
+        )
+        self.gp_triple_rmse_local = self._get_positive_float_parameter(
+            "gp_triple_rmse_local", 0.330269
+        )
+        self.gp_triple_rmse_cloud = self._get_positive_float_parameter(
+            "gp_triple_rmse_cloud", 0.330278
+        )
+        self.gp_triple_rmse_hist = self._get_positive_float_parameter(
+            "gp_triple_rmse_hist", 0.093071
+        )
+        self.gp_triple_inverse_rmse_eps = self._get_positive_float_parameter(
+            "gp_triple_inverse_rmse_eps", 1e-9
+        )
+        self.gp_triple_hist_weight_cap = self._get_nonnegative_float_parameter(
+            "gp_triple_hist_weight_cap", 0.70
+        )
+        self.gp_triple_min_weight_local = self._get_nonnegative_float_parameter(
+            "gp_triple_min_weight_local", 0.05
+        )
+        self.gp_triple_min_weight_cloud = self._get_nonnegative_float_parameter(
+            "gp_triple_min_weight_cloud", 0.05
+        )
+        self.gp_triple_require_hist_available = self._get_bool_parameter(
+            "gp_triple_require_hist_available"
+        )
+        self.gp_triple_fallback_source = str(
+            self.get_parameter("gp_triple_fallback_source").value
+        ).strip().lower()
         self.gp_historical_soft_shadow_enabled = self._get_bool_parameter(
             "gp_historical_soft_shadow_enabled"
         )
@@ -543,7 +611,7 @@ class CartesianImpedanceController(Node):
             self.gp_compensation_clip_nm = abs(self.gp_compensation_clip_nm)
 
         # compensation source 只允许显式列出的安全链路，非法值保守 fallback 到 local。
-        valid_gp_compensation_sources = ("local", "cloud", "combined", "hist_db")
+        valid_gp_compensation_sources = ("local", "cloud", "combined", "hist_db", "triple")
         if self.gp_compensation_source not in valid_gp_compensation_sources:
             self.get_logger().warn(
                 f"[GP] Invalid gp_compensation_source='{self.gp_compensation_source}', "
@@ -577,6 +645,34 @@ class CartesianImpedanceController(Node):
             "combined": 3,
         }[self.gp_historical_db_fallback_source]
 
+        valid_gp_triple_weight_modes = ("fixed", "inverse_rmse")
+        if self.gp_triple_weight_mode not in valid_gp_triple_weight_modes:
+            self.get_logger().warn(
+                f"[GP Triple] Invalid gp_triple_weight_mode='{self.gp_triple_weight_mode}', "
+                "falling back to 'inverse_rmse'"
+            )
+            self.gp_triple_weight_mode = "inverse_rmse"
+        self.gp_triple_weight_mode_code = {
+            "fixed": 1,
+            "inverse_rmse": 2,
+        }[self.gp_triple_weight_mode]
+
+        valid_gp_triple_fallback_sources = ("none", "local", "cloud", "combined", "hist_db")
+        if self.gp_triple_fallback_source not in valid_gp_triple_fallback_sources:
+            self.get_logger().warn(
+                f"[GP Triple] Invalid gp_triple_fallback_source='{self.gp_triple_fallback_source}', "
+                "falling back to 'combined'"
+            )
+            self.gp_triple_fallback_source = "combined"
+        self.gp_triple_fallback_source_code = {
+            "none": 0,
+            "local": 1,
+            "cloud": 2,
+            "combined": 3,
+            "hist_db": 4,
+        }[self.gp_triple_fallback_source]
+        self.gp_triple_weights = self._compute_gp_triple_weights()
+
         if self.gp_historical_shadow_min_points > self.gp_historical_shadow_max_points:
             self.get_logger().warn(
                 "[GP Shadow] gp_historical_shadow_min_points exceeds max_points; "
@@ -597,9 +693,10 @@ class CartesianImpedanceController(Node):
         self._gp_local_feature_shadow = np.zeros(14, dtype=np.float32)
         self._gp_local_prediction_sequence_shadow = 0
         self._gp_hist_last_appended_sequence_shadow = 0
+        self._reset_gp_triple_state()
 
-        # Persistent residual DB is a separate shadow-only source. It is never
-        # inserted into the runtime prediction-pool paper fusion.
+        # Persistent residual DB is separate from runtime prediction-pool paper fusion.
+        # It enters active torque only through explicit hist_db/triple source selection.
         self.gp_historical_db_loaded = False
         self.gp_historical_db_row_count = 0
         self.gp_historical_db_x_scaled = None
@@ -677,7 +774,26 @@ class CartesianImpedanceController(Node):
             "disable_when_online_update="
             f"{self.gp_historical_db_disable_when_online_update}, "
             f"fallback_source='{self.gp_historical_db_fallback_source}'; "
-            "shadow-only and does not enter tau_final"
+            "active only with explicit hist_db/triple source"
+        )
+        self.get_logger().info(
+            "[GP Triple] Fusion controls: "
+            f"mode='{self.gp_triple_weight_mode}', "
+            f"weights=({self.gp_triple_weights[0]:.6f}, "
+            f"{self.gp_triple_weights[1]:.6f}, "
+            f"{self.gp_triple_weights[2]:.6f}), "
+            f"fixed_weights=({self.gp_triple_weight_local_param}, "
+            f"{self.gp_triple_weight_cloud_param}, "
+            f"{self.gp_triple_weight_hist_param}), "
+            f"rmse=({self.gp_triple_rmse_local}, "
+            f"{self.gp_triple_rmse_cloud}, "
+            f"{self.gp_triple_rmse_hist}), "
+            f"hist_weight_cap={self.gp_triple_hist_weight_cap}, "
+            f"min_weight_local={self.gp_triple_min_weight_local}, "
+            f"min_weight_cloud={self.gp_triple_min_weight_cloud}, "
+            f"require_hist_available={self.gp_triple_require_hist_available}, "
+            f"fallback_source='{self.gp_triple_fallback_source}'; "
+            "active only with gp_compensation_source='triple' and compensation enabled"
         )
         self.get_logger().info(
             "[GP Hist Soft] Soft-weight shadow logging controls: "
@@ -1863,6 +1979,24 @@ class CartesianImpedanceController(Node):
                 self.gp_scaled_history.append(self._gp_scaled.tolist())
                 self.gp_applied_history.append(self._gp_applied.tolist())
                 self.gp_clip_active_history.append(self._gp_clip_active.tolist())
+                self.gp_triple_raw_history.append(self.gp_triple_raw.tolist())
+                self.gp_triple_weight_local_history.append(float(self.gp_triple_weight_local))
+                self.gp_triple_weight_cloud_history.append(float(self.gp_triple_weight_cloud))
+                self.gp_triple_weight_hist_history.append(float(self.gp_triple_weight_hist))
+                self.gp_triple_available_history.append(int(self.gp_triple_available))
+                self.gp_triple_used_fallback_history.append(int(self.gp_triple_used_fallback))
+                self.gp_triple_fallback_source_code_history.append(
+                    int(self.gp_triple_active_fallback_source_code)
+                )
+                self.gp_triple_weight_mode_code_history.append(
+                    int(self.gp_triple_weight_mode_code)
+                )
+                self.gp_triple_hist_weight_cap_history.append(
+                    float(self.gp_triple_hist_weight_cap)
+                )
+                self.gp_triple_rmse_local_history.append(float(self.gp_triple_rmse_local))
+                self.gp_triple_rmse_cloud_history.append(float(self.gp_triple_rmse_cloud))
+                self.gp_triple_rmse_hist_history.append(float(self.gp_triple_rmse_hist))
                 self.gp_shadow_historical_available_history.append(
                     int(self.gp_shadow_historical_available)
                 )
@@ -2821,6 +2955,270 @@ class CartesianImpedanceController(Node):
             dtype=float,
         ).copy()
 
+    def _gp_triple_default_weights(self):
+        return np.array([0.10, 0.20, 0.70], dtype=float)
+
+    def _normalize_gp_triple_weights(self, weights):
+        default_weights = self._gp_triple_default_weights()
+        try:
+            weights_arr = np.asarray(weights, dtype=float)
+            if (
+                weights_arr.shape != (3,)
+                or not np.all(np.isfinite(weights_arr))
+                or np.any(weights_arr < 0.0)
+            ):
+                raise ValueError
+            total = float(np.sum(weights_arr))
+            if not np.isfinite(total) or total <= 0.0:
+                raise ValueError
+        except (TypeError, ValueError):
+            weights_arr = default_weights
+            total = float(np.sum(weights_arr))
+
+        return weights_arr / total
+
+    def _cap_gp_triple_hist_weight(self, weights):
+        weights_arr = self._normalize_gp_triple_weights(weights)
+        cap = float(self.gp_triple_hist_weight_cap)
+        if not np.isfinite(cap) or cap < 0.0:
+            cap = 0.70
+
+        if cap < 1.0 and weights_arr[2] > cap:
+            remaining = max(0.0, 1.0 - cap)
+            local_cloud = weights_arr[:2].copy()
+            local_cloud_total = float(np.sum(local_cloud))
+            if not np.isfinite(local_cloud_total) or local_cloud_total <= 0.0:
+                local_cloud = np.array([
+                    self.gp_triple_min_weight_local,
+                    self.gp_triple_min_weight_cloud,
+                ], dtype=float)
+                local_cloud_total = float(np.sum(local_cloud))
+            if not np.isfinite(local_cloud_total) or local_cloud_total <= 0.0:
+                local_cloud = np.array([0.5, 0.5], dtype=float)
+                local_cloud_total = 1.0
+
+            # hist cap 后的剩余权重按 cap 前 local/cloud 相对比例分回去。
+            weights_arr[0] = remaining * local_cloud[0] / local_cloud_total
+            weights_arr[1] = remaining * local_cloud[1] / local_cloud_total
+            weights_arr[2] = cap
+
+        return self._normalize_gp_triple_weights(weights_arr)
+
+    def _apply_gp_triple_min_weights(self, weights):
+        weights_arr = self._normalize_gp_triple_weights(weights)
+        min_local = float(self.gp_triple_min_weight_local)
+        min_cloud = float(self.gp_triple_min_weight_cloud)
+        if not np.isfinite(min_local) or min_local < 0.0:
+            min_local = 0.0
+        if not np.isfinite(min_cloud) or min_cloud < 0.0:
+            min_cloud = 0.0
+
+        min_sum = min_local + min_cloud
+        if min_sum <= 0.0:
+            return weights_arr
+        if min_sum >= 1.0:
+            return np.array([min_local / min_sum, min_cloud / min_sum, 0.0], dtype=float)
+        if weights_arr[0] >= min_local and weights_arr[1] >= min_cloud:
+            return weights_arr
+
+        floors = np.array([min_local, min_cloud, 0.0], dtype=float)
+        excess = np.maximum(weights_arr - floors, 0.0)
+        excess_total = float(np.sum(excess))
+        remaining = 1.0 - min_sum
+        if not np.isfinite(excess_total) or excess_total <= 0.0:
+            weights_arr = np.array([min_local, min_cloud, remaining], dtype=float)
+        else:
+            weights_arr = floors + remaining * excess / excess_total
+
+        return self._normalize_gp_triple_weights(weights_arr)
+
+    def _apply_gp_triple_weight_safety(self, weights):
+        # cap/min 都是比例约束；最终进入 active source 前统一归一化，避免权重和异常。
+        weights_arr = self._normalize_gp_triple_weights(weights)
+        weights_arr = self._cap_gp_triple_hist_weight(weights_arr)
+        weights_arr = self._apply_gp_triple_min_weights(weights_arr)
+        weights_arr = self._cap_gp_triple_hist_weight(weights_arr)
+        return self._normalize_gp_triple_weights(weights_arr)
+
+    def _compute_gp_triple_fixed_weights(self):
+        weights = np.array([
+            self.gp_triple_weight_local_param,
+            self.gp_triple_weight_cloud_param,
+            self.gp_triple_weight_hist_param,
+        ], dtype=float)
+        if (
+            weights.shape != (3,)
+            or not np.all(np.isfinite(weights))
+            or np.any(weights < 0.0)
+            or float(np.sum(weights)) <= 0.0
+        ):
+            weights = self._gp_triple_default_weights()
+        if self.gp_triple_weight_normalize:
+            weights = self._normalize_gp_triple_weights(weights)
+        return self._apply_gp_triple_weight_safety(weights)
+
+    def _compute_gp_triple_weights(self):
+        if self.gp_triple_weight_mode == "fixed":
+            return self._compute_gp_triple_fixed_weights()
+
+        rmse = np.array([
+            self.gp_triple_rmse_local,
+            self.gp_triple_rmse_cloud,
+            self.gp_triple_rmse_hist,
+        ], dtype=float)
+        eps = float(self.gp_triple_inverse_rmse_eps)
+        if (
+            rmse.shape != (3,)
+            or not np.all(np.isfinite(rmse))
+            or np.any(rmse <= 0.0)
+            or not np.isfinite(eps)
+            or eps <= 0.0
+        ):
+            return self._compute_gp_triple_fixed_weights()
+
+        with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+            weights = 1.0 / (rmse * rmse + eps)
+        if (
+            weights.shape != (3,)
+            or not np.all(np.isfinite(weights))
+            or np.any(weights < 0.0)
+            or float(np.sum(weights)) <= 0.0
+        ):
+            return self._compute_gp_triple_fixed_weights()
+
+        return self._apply_gp_triple_weight_safety(weights)
+
+    def _reset_gp_triple_state(self):
+        self.gp_triple_raw = np.zeros(7, dtype=float)
+        self.gp_triple_weight_local = 0.0
+        self.gp_triple_weight_cloud = 0.0
+        self.gp_triple_weight_hist = 0.0
+        self.gp_triple_available = 0
+        self.gp_triple_used_fallback = 0
+        self.gp_triple_active_fallback_source_code = 0
+
+    def _set_gp_triple_state(self, result):
+        weights = np.asarray(result.get("weights", np.zeros(3)), dtype=float)
+        if weights.shape != (3,) or not np.all(np.isfinite(weights)):
+            weights = np.zeros(3, dtype=float)
+
+        self.gp_triple_raw = self._as_finite_7d(result.get("raw"), 0.0).copy()
+        self.gp_triple_weight_local = float(weights[0])
+        self.gp_triple_weight_cloud = float(weights[1])
+        self.gp_triple_weight_hist = float(weights[2])
+        self.gp_triple_available = int(result.get("available", 0))
+        self.gp_triple_used_fallback = int(result.get("used_fallback", 0))
+        self.gp_triple_active_fallback_source_code = int(
+            result.get("fallback_source_code", 0)
+        )
+
+    def _get_gp_triple_hist_candidate(self):
+        zero = np.zeros(7, dtype=float)
+        try:
+            hist_db_gated_pred = np.asarray(self.hist_db_gated_pred, dtype=float)
+        except (TypeError, ValueError):
+            return zero, False
+
+        hist_available = (
+            bool(self.gp_historical_db_loaded)
+            and int(self.hist_db_loaded) == 1
+            and int(self.hist_db_query_valid) == 1
+            and int(self.hist_db_available) == 1
+            and int(self.hist_db_distance_pass) == 1
+            and int(self.hist_db_gated_source_code) == 4
+            and hist_db_gated_pred.shape == (7,)
+            and np.all(np.isfinite(hist_db_gated_pred))
+        )
+        if not hist_available:
+            return zero, False
+        return hist_db_gated_pred.copy(), True
+
+    def _get_gp_triple_fallback_candidate(self):
+        zero = np.zeros(7, dtype=float)
+        source = self.gp_triple_fallback_source
+        if source == "none":
+            return zero, 0
+        if source == "hist_db":
+            hist_candidate, hist_available = self._get_gp_triple_hist_candidate()
+            if hist_available:
+                return hist_candidate, self.gp_triple_fallback_source_code
+            return zero, self.gp_triple_fallback_source_code
+
+        candidate = {
+            "local": self.y_hat_local,
+            "cloud": self.y_hat_cloud,
+            "combined": self.y_hat_combined,
+        }.get(source)
+        try:
+            candidate_arr = np.asarray(candidate, dtype=float)
+        except (TypeError, ValueError):
+            return zero, 0
+
+        if candidate_arr.shape != (7,) or not np.all(np.isfinite(candidate_arr)):
+            return zero, 0
+        return candidate_arr.copy(), self.gp_triple_fallback_source_code
+
+    def _compute_gp_triple_prediction(self):
+        zero = np.zeros(7, dtype=float)
+        result = {
+            "raw": zero.copy(),
+            "weights": np.zeros(3, dtype=float),
+            "available": 0,
+            "used_fallback": 0,
+            "fallback_source_code": 0,
+        }
+
+        hist_candidate, hist_available = self._get_gp_triple_hist_candidate()
+        if not hist_available and self.gp_triple_require_hist_available:
+            fallback, fallback_source_code = self._get_gp_triple_fallback_candidate()
+            result.update({
+                "raw": fallback,
+                "used_fallback": 1,
+                "fallback_source_code": fallback_source_code,
+            })
+            return result
+
+        local_raw = self._as_finite_7d(self.y_hat_local, 0.0)
+        cloud_raw = self._as_finite_7d(self.y_hat_cloud, 0.0)
+        hist_raw = hist_candidate if hist_available else zero.copy()
+        weights = np.asarray(self.gp_triple_weights, dtype=float).copy()
+
+        if not hist_available:
+            local_cloud_total = float(weights[0] + weights[1])
+            if not np.isfinite(local_cloud_total) or local_cloud_total <= 0.0:
+                fallback, fallback_source_code = self._get_gp_triple_fallback_candidate()
+                result.update({
+                    "raw": fallback,
+                    "used_fallback": 1,
+                    "fallback_source_code": fallback_source_code,
+                })
+                return result
+            weights[0] = weights[0] / local_cloud_total
+            weights[1] = weights[1] / local_cloud_total
+            weights[2] = 0.0
+
+        # 这里只选择 raw source；scale / clip / joint7-disable 仍由外层统一处理。
+        triple_raw = (
+            weights[0] * local_raw
+            + weights[1] * cloud_raw
+            + weights[2] * hist_raw
+        )
+        if triple_raw.shape != (7,) or not np.all(np.isfinite(triple_raw)):
+            fallback, fallback_source_code = self._get_gp_triple_fallback_candidate()
+            result.update({
+                "raw": fallback,
+                "used_fallback": 1,
+                "fallback_source_code": fallback_source_code,
+            })
+            return result
+
+        result.update({
+            "raw": triple_raw.copy(),
+            "weights": weights.copy(),
+            "available": int(hist_available),
+        })
+        return result
+
     def _as_finite_7d(self, value, fill_value=0.0):
         try:
             arr = np.asarray(value, dtype=float)
@@ -3211,6 +3609,7 @@ class CartesianImpedanceController(Node):
         return y_hat_delayed.copy(), var_delayed.copy()
 
     def _apply_gp_compensation(self, tau):
+        self._reset_gp_triple_state()
         # 默认不改变最终 tau，只有显式开启 gp_compensation_enabled 才进入 torque command。
         if not self.gp_prediction_enabled or not self.gp_compensation_enabled:
             self._gp_source_code = 0
@@ -3247,6 +3646,11 @@ class CartesianImpedanceController(Node):
                 and np.all(np.isfinite(hist_db_gated_pred))
             ):
                 compensation = hist_db_gated_pred.copy()
+        elif self.gp_compensation_source == "triple":
+            triple_result = self._compute_gp_triple_prediction()
+            self._set_gp_triple_state(triple_result)
+            compensation = self.gp_triple_raw
+            self._gp_source_code = 5
         else:
             compensation = self.y_hat_local
             self._gp_source_code = 1
@@ -3470,6 +3874,18 @@ class CartesianImpedanceController(Node):
                 self.gp_scaled_history,
                 self.gp_applied_history,
                 self.gp_clip_active_history,
+                self.gp_triple_raw_history,
+                self.gp_triple_weight_local_history,
+                self.gp_triple_weight_cloud_history,
+                self.gp_triple_weight_hist_history,
+                self.gp_triple_available_history,
+                self.gp_triple_used_fallback_history,
+                self.gp_triple_fallback_source_code_history,
+                self.gp_triple_weight_mode_code_history,
+                self.gp_triple_hist_weight_cap_history,
+                self.gp_triple_rmse_local_history,
+                self.gp_triple_rmse_cloud_history,
+                self.gp_triple_rmse_hist_history,
                 self.gp_shadow_historical_available_history,
                 self.gp_shadow_local_raw_history,
                 self.gp_shadow_cloud_raw_history,
@@ -3562,6 +3978,20 @@ class CartesianImpedanceController(Node):
                 header.extend([f'gp_scaled_{i+1}' for i in range(7)])
                 header.extend([f'gp_applied_{i+1}' for i in range(7)])
                 header.extend([f'gp_clip_active_{i+1}' for i in range(7)])
+                header.extend([f'gp_triple_raw_{i+1}' for i in range(7)])
+                header.extend([
+                    'gp_triple_weight_local',
+                    'gp_triple_weight_cloud',
+                    'gp_triple_weight_hist',
+                    'gp_triple_available',
+                    'gp_triple_used_fallback',
+                    'gp_triple_fallback_source_code',
+                    'gp_triple_weight_mode_code',
+                    'gp_triple_hist_weight_cap',
+                    'gp_triple_rmse_local',
+                    'gp_triple_rmse_cloud',
+                    'gp_triple_rmse_hist',
+                ])
                 header.extend([
                     'gp_shadow_paper_fusion_logging_enabled',
                     'gp_historical_shadow_enabled',
@@ -3772,6 +4202,80 @@ class CartesianImpedanceController(Node):
                         row.extend([int(v) for v in self.gp_clip_active_history[i]])
                     else:
                         row.extend([0] * 7)
+
+                    if i < len(self.gp_triple_raw_history):
+                        row.extend(self.gp_triple_raw_history[i])
+                    else:
+                        row.extend([0.0] * 7)
+
+                    gp_triple_weight_local = (
+                        float(self.gp_triple_weight_local_history[i])
+                        if i < len(self.gp_triple_weight_local_history)
+                        else float(self.gp_triple_weight_local)
+                    )
+                    gp_triple_weight_cloud = (
+                        float(self.gp_triple_weight_cloud_history[i])
+                        if i < len(self.gp_triple_weight_cloud_history)
+                        else float(self.gp_triple_weight_cloud)
+                    )
+                    gp_triple_weight_hist = (
+                        float(self.gp_triple_weight_hist_history[i])
+                        if i < len(self.gp_triple_weight_hist_history)
+                        else float(self.gp_triple_weight_hist)
+                    )
+                    gp_triple_available = (
+                        int(self.gp_triple_available_history[i])
+                        if i < len(self.gp_triple_available_history)
+                        else int(self.gp_triple_available)
+                    )
+                    gp_triple_used_fallback = (
+                        int(self.gp_triple_used_fallback_history[i])
+                        if i < len(self.gp_triple_used_fallback_history)
+                        else int(self.gp_triple_used_fallback)
+                    )
+                    gp_triple_fallback_source_code = (
+                        int(self.gp_triple_fallback_source_code_history[i])
+                        if i < len(self.gp_triple_fallback_source_code_history)
+                        else int(self.gp_triple_active_fallback_source_code)
+                    )
+                    gp_triple_weight_mode_code = (
+                        int(self.gp_triple_weight_mode_code_history[i])
+                        if i < len(self.gp_triple_weight_mode_code_history)
+                        else int(self.gp_triple_weight_mode_code)
+                    )
+                    gp_triple_hist_weight_cap = (
+                        float(self.gp_triple_hist_weight_cap_history[i])
+                        if i < len(self.gp_triple_hist_weight_cap_history)
+                        else float(self.gp_triple_hist_weight_cap)
+                    )
+                    gp_triple_rmse_local = (
+                        float(self.gp_triple_rmse_local_history[i])
+                        if i < len(self.gp_triple_rmse_local_history)
+                        else float(self.gp_triple_rmse_local)
+                    )
+                    gp_triple_rmse_cloud = (
+                        float(self.gp_triple_rmse_cloud_history[i])
+                        if i < len(self.gp_triple_rmse_cloud_history)
+                        else float(self.gp_triple_rmse_cloud)
+                    )
+                    gp_triple_rmse_hist = (
+                        float(self.gp_triple_rmse_hist_history[i])
+                        if i < len(self.gp_triple_rmse_hist_history)
+                        else float(self.gp_triple_rmse_hist)
+                    )
+                    row.extend([
+                        gp_triple_weight_local,
+                        gp_triple_weight_cloud,
+                        gp_triple_weight_hist,
+                        gp_triple_available,
+                        gp_triple_used_fallback,
+                        gp_triple_fallback_source_code,
+                        gp_triple_weight_mode_code,
+                        gp_triple_hist_weight_cap,
+                        gp_triple_rmse_local,
+                        gp_triple_rmse_cloud,
+                        gp_triple_rmse_hist,
+                    ])
 
                     if i < len(self.gp_shadow_historical_available_history):
                         historical_available = int(

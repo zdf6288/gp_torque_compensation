@@ -48,6 +48,20 @@ def generate_launch_description():
         'gp_historical_db_disable_when_online_update'
     )
     gp_historical_db_fallback_source_parameter_name = 'gp_historical_db_fallback_source'
+    gp_triple_weight_mode_parameter_name = 'gp_triple_weight_mode'
+    gp_triple_weight_local_parameter_name = 'gp_triple_weight_local'
+    gp_triple_weight_cloud_parameter_name = 'gp_triple_weight_cloud'
+    gp_triple_weight_hist_parameter_name = 'gp_triple_weight_hist'
+    gp_triple_weight_normalize_parameter_name = 'gp_triple_weight_normalize'
+    gp_triple_rmse_local_parameter_name = 'gp_triple_rmse_local'
+    gp_triple_rmse_cloud_parameter_name = 'gp_triple_rmse_cloud'
+    gp_triple_rmse_hist_parameter_name = 'gp_triple_rmse_hist'
+    gp_triple_inverse_rmse_eps_parameter_name = 'gp_triple_inverse_rmse_eps'
+    gp_triple_hist_weight_cap_parameter_name = 'gp_triple_hist_weight_cap'
+    gp_triple_min_weight_local_parameter_name = 'gp_triple_min_weight_local'
+    gp_triple_min_weight_cloud_parameter_name = 'gp_triple_min_weight_cloud'
+    gp_triple_require_hist_available_parameter_name = 'gp_triple_require_hist_available'
+    gp_triple_fallback_source_parameter_name = 'gp_triple_fallback_source'
     gp_historical_soft_shadow_enabled_parameter_name = (
         'gp_historical_soft_shadow_enabled'
     )
@@ -112,6 +126,34 @@ def generate_launch_description():
     )
     gp_historical_db_fallback_source = LaunchConfiguration(
         gp_historical_db_fallback_source_parameter_name
+    )
+    gp_triple_weight_mode = LaunchConfiguration(gp_triple_weight_mode_parameter_name)
+    gp_triple_weight_local = LaunchConfiguration(gp_triple_weight_local_parameter_name)
+    gp_triple_weight_cloud = LaunchConfiguration(gp_triple_weight_cloud_parameter_name)
+    gp_triple_weight_hist = LaunchConfiguration(gp_triple_weight_hist_parameter_name)
+    gp_triple_weight_normalize = LaunchConfiguration(
+        gp_triple_weight_normalize_parameter_name
+    )
+    gp_triple_rmse_local = LaunchConfiguration(gp_triple_rmse_local_parameter_name)
+    gp_triple_rmse_cloud = LaunchConfiguration(gp_triple_rmse_cloud_parameter_name)
+    gp_triple_rmse_hist = LaunchConfiguration(gp_triple_rmse_hist_parameter_name)
+    gp_triple_inverse_rmse_eps = LaunchConfiguration(
+        gp_triple_inverse_rmse_eps_parameter_name
+    )
+    gp_triple_hist_weight_cap = LaunchConfiguration(
+        gp_triple_hist_weight_cap_parameter_name
+    )
+    gp_triple_min_weight_local = LaunchConfiguration(
+        gp_triple_min_weight_local_parameter_name
+    )
+    gp_triple_min_weight_cloud = LaunchConfiguration(
+        gp_triple_min_weight_cloud_parameter_name
+    )
+    gp_triple_require_hist_available = LaunchConfiguration(
+        gp_triple_require_hist_available_parameter_name
+    )
+    gp_triple_fallback_source = LaunchConfiguration(
+        gp_triple_fallback_source_parameter_name
     )
     gp_historical_soft_shadow_enabled = LaunchConfiguration(
         gp_historical_soft_shadow_enabled_parameter_name
@@ -210,7 +252,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             gp_compensation_source_parameter_name,
             default_value='local',
-            description='GP compensation source: local, cloud, combined, or hist_db.'),
+            description='GP compensation source: local, cloud, combined, hist_db, or triple.'),
         DeclareLaunchArgument(
             gp_compensation_scale_parameter_name,
             default_value='0.1',
@@ -248,14 +290,14 @@ def generate_launch_description():
             default_value='false',
             description=(
                 'Enable persistent historical DB CSV query only when explicitly '
-                'requested; active torque uses it only with gp_compensation_source:=hist_db.'
+                'requested; active torque uses it only with explicit hist_db or triple source.'
             )),
         DeclareLaunchArgument(
             gp_historical_db_path_parameter_name,
             default_value='',
             description=(
-                'Persistent historical DB .npz path for shadow logging or explicit hist_db source; '
-                'empty keeps the DB unavailable.'
+                'Persistent historical DB .npz path for shadow logging or explicit '
+                'hist_db/triple source; empty keeps the DB unavailable.'
             )),
         DeclareLaunchArgument(
             gp_historical_db_k_parameter_name,
@@ -293,6 +335,62 @@ def generate_launch_description():
             gp_historical_db_fallback_source_parameter_name,
             default_value='cloud',
             description='Shadow-only fallback source: none, local, cloud, or combined.'),
+        DeclareLaunchArgument(
+            gp_triple_weight_mode_parameter_name,
+            default_value='inverse_rmse',
+            description='Triple fusion weight mode: fixed or inverse_rmse.'),
+        DeclareLaunchArgument(
+            gp_triple_weight_local_parameter_name,
+            default_value='0.10',
+            description='Fixed-mode triple fusion local weight.'),
+        DeclareLaunchArgument(
+            gp_triple_weight_cloud_parameter_name,
+            default_value='0.20',
+            description='Fixed-mode triple fusion cloud-like weight.'),
+        DeclareLaunchArgument(
+            gp_triple_weight_hist_parameter_name,
+            default_value='0.70',
+            description='Fixed-mode triple fusion historical DB weight.'),
+        DeclareLaunchArgument(
+            gp_triple_weight_normalize_parameter_name,
+            default_value='true',
+            description='Normalize fixed triple fusion weights before safety constraints.'),
+        DeclareLaunchArgument(
+            gp_triple_rmse_local_parameter_name,
+            default_value='0.330269',
+            description='Inverse-RMSE triple fusion local RMSE.'),
+        DeclareLaunchArgument(
+            gp_triple_rmse_cloud_parameter_name,
+            default_value='0.330278',
+            description='Inverse-RMSE triple fusion cloud-like RMSE.'),
+        DeclareLaunchArgument(
+            gp_triple_rmse_hist_parameter_name,
+            default_value='0.093071',
+            description='Inverse-RMSE triple fusion historical DB RMSE.'),
+        DeclareLaunchArgument(
+            gp_triple_inverse_rmse_eps_parameter_name,
+            default_value='1e-9',
+            description='Positive epsilon used by inverse-RMSE squared triple weights.'),
+        DeclareLaunchArgument(
+            gp_triple_hist_weight_cap_parameter_name,
+            default_value='0.70',
+            description='Fractional cap for active triple historical DB weight.'),
+        DeclareLaunchArgument(
+            gp_triple_min_weight_local_parameter_name,
+            default_value='0.05',
+            description='Minimum local weight for triple fusion when feasible.'),
+        DeclareLaunchArgument(
+            gp_triple_min_weight_cloud_parameter_name,
+            default_value='0.05',
+            description='Minimum cloud-like weight for triple fusion when feasible.'),
+        DeclareLaunchArgument(
+            gp_triple_require_hist_available_parameter_name,
+            default_value='true',
+            description='Use triple fallback unless gated historical DB prediction is available.'),
+        DeclareLaunchArgument(
+            gp_triple_fallback_source_parameter_name,
+            default_value='combined',
+            description='Triple fallback source: none, local, cloud, combined, or hist_db.'),
         DeclareLaunchArgument(
             gp_historical_soft_shadow_enabled_parameter_name,
             default_value='false',
@@ -432,6 +530,48 @@ def generate_launch_description():
                     value_type=bool),
                 gp_historical_db_fallback_source_parameter_name: ParameterValue(
                     gp_historical_db_fallback_source,
+                    value_type=str),
+                gp_triple_weight_mode_parameter_name: ParameterValue(
+                    gp_triple_weight_mode,
+                    value_type=str),
+                gp_triple_weight_local_parameter_name: ParameterValue(
+                    gp_triple_weight_local,
+                    value_type=float),
+                gp_triple_weight_cloud_parameter_name: ParameterValue(
+                    gp_triple_weight_cloud,
+                    value_type=float),
+                gp_triple_weight_hist_parameter_name: ParameterValue(
+                    gp_triple_weight_hist,
+                    value_type=float),
+                gp_triple_weight_normalize_parameter_name: ParameterValue(
+                    gp_triple_weight_normalize,
+                    value_type=bool),
+                gp_triple_rmse_local_parameter_name: ParameterValue(
+                    gp_triple_rmse_local,
+                    value_type=float),
+                gp_triple_rmse_cloud_parameter_name: ParameterValue(
+                    gp_triple_rmse_cloud,
+                    value_type=float),
+                gp_triple_rmse_hist_parameter_name: ParameterValue(
+                    gp_triple_rmse_hist,
+                    value_type=float),
+                gp_triple_inverse_rmse_eps_parameter_name: ParameterValue(
+                    gp_triple_inverse_rmse_eps,
+                    value_type=float),
+                gp_triple_hist_weight_cap_parameter_name: ParameterValue(
+                    gp_triple_hist_weight_cap,
+                    value_type=float),
+                gp_triple_min_weight_local_parameter_name: ParameterValue(
+                    gp_triple_min_weight_local,
+                    value_type=float),
+                gp_triple_min_weight_cloud_parameter_name: ParameterValue(
+                    gp_triple_min_weight_cloud,
+                    value_type=float),
+                gp_triple_require_hist_available_parameter_name: ParameterValue(
+                    gp_triple_require_hist_available,
+                    value_type=bool),
+                gp_triple_fallback_source_parameter_name: ParameterValue(
+                    gp_triple_fallback_source,
                     value_type=str),
                 gp_historical_soft_shadow_enabled_parameter_name: ParameterValue(
                     gp_historical_soft_shadow_enabled,
