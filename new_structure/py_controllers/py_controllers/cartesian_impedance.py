@@ -949,6 +949,11 @@ class CartesianImpedanceController(Node):
         self.tau_alpha = 0.1
         self.tau_beta  = 0.005
 
+        # Watchdog variables for effort command publishing continuity
+        self.last_publish_time = None
+        self.publish_count = 0
+        self.last_watchdog_warning_time = 0.0
+
         # simulated future trajectory request delay
         self.future_delay = self.declare_parameter(
             'future_delay', 0.00 # 默认 60 ms
@@ -1489,7 +1494,7 @@ class CartesianImpedanceController(Node):
         tau = self._apply_gp_compensation(tau)
         self._tau_final = tau.copy()
         self.effort_msg.efforts = tau.tolist()
-        self.effort_publisher.publish(self.effort_msg)
+        self._publish_effort(self.effort_msg)
 
     def _future_traj_response_callback(self, future):
         try:
@@ -1540,7 +1545,7 @@ class CartesianImpedanceController(Node):
             try:
                 zero_tau = EffortCommand()
                 zero_tau.efforts = [0.0] * 7
-                self.effort_publisher.publish(zero_tau)
+                self._publish_effort(zero_tau)
                 self.get_logger().info("[Controller] Published zero torque to stop robot.")
             except Exception as e:
                 self.get_logger().error(f"Error publishing zero torque: {e}")
@@ -1557,8 +1562,15 @@ class CartesianImpedanceController(Node):
             # 3) 自动画图
             # ------------------------------------------
             try:
-                os.system("python3 ablation.py cartesian_impedance_controller_data.csv")
-                self.get_logger().info("[Controller] Plotting completed.")
+                # 使用 subprocess.Popen 后台非阻塞执行画图，并使用 nice -n 19 降低优先级
+                # 避免同步执行阻塞 Python Executor 导致控制器停摆以及与实时控制抢占 CPU
+                import subprocess
+                subprocess.Popen(
+                    ["nice", "-n", "19", "python3", "ablation.py", "cartesian_impedance_controller_data.csv"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                self.get_logger().info("[Controller] Background plotting process spawned successfully (nice -n 19).")
             except Exception as e:
                 self.get_logger().error(f"Plotting error: {e}")
 
@@ -1688,22 +1700,26 @@ class CartesianImpedanceController(Node):
                 )
 
                 if reached:
-                    self.joint_position_adjusted = True
-                    self.get_logger().info(f"End-effector reached start point. Error={pos_err_norm:.6f}")
-
                     if not self.trajectory_started:
-                        zero_tau = np.zeros(7)
-                        self.effort_msg.efforts = zero_tau.tolist()
-                        self.effort_publisher.publish(self.effort_msg)
                         self.start_trajectory()
-                else:
-                    self.effort_msg.efforts = tau.tolist()
-                    self.effort_publisher.publish(self.effort_msg)
+                        self.get_logger().info(f"End-effector reached start point. Error={pos_err_norm:.6f}. Requesting trajectory start...")
 
+                    # 只有真正收到了 task command 后才关闭启动期控制，完成无缝切换
+                    # 防止由于轨迹发布器启动延迟导致 /effort_command 发送出现空闲周期 (Transition Gap)
+                    if self.task_command_received:
+                        self.joint_position_adjusted = True
+                        self.get_logger().info(f"First task command received. Switching to active trajectory control.")
+
+                # 无论是否 reached，均持续发布正常的阻抗保持力矩，不发零力矩，不断流
+                self.effort_msg.efforts = tau.tolist()
+                self._publish_effort(self.effort_msg)
                 return
 
             if not self.task_command_received:
                 # 真机实时控制中避免高频终端输出；这里保持静默，防止增加通信/调度负载。
+                # 当定位完成后 (self.joint_position_adjusted == True) 若仍无轨迹数据导致不发布，则触发看门狗警告
+                if self.joint_position_adjusted:
+                    self._log_watchdog_warning("task_command_received is False (Transition Gap / Drop)", t_elapsed)
                 return  
 
             # cartesian impedance control (after joint position adjustment)   
@@ -1991,7 +2007,7 @@ class CartesianImpedanceController(Node):
             self._tau_final = tau.copy()
             # publish on topic /effort_command
             self.effort_msg.efforts = tau.tolist()
-            self.effort_publisher.publish(self.effort_msg)
+            self._publish_effort(self.effort_msg)
 
             # record data only when data recording is enabled
             if self.data_recording_enabled:
@@ -2340,6 +2356,20 @@ class CartesianImpedanceController(Node):
         except Exception as e:
             self.get_logger().error(f'Error in trajectory start callback: {str(e)}')
             self.trajectory_started = False             # reset flag to retry
+
+    def _publish_effort(self, msg):
+        self.effort_publisher.publish(msg)
+        self.publish_count += 1
+        self.last_publish_time = self.get_clock().now()
+
+    def _log_watchdog_warning(self, reason, elapsed_time):
+        t_now_sec = self.get_clock().now().nanoseconds / 1e9
+        if (t_now_sec - self.last_watchdog_warning_time) >= 1.0:
+            self.get_logger().warn(
+                f"[Watchdog] Controller active but callback skipped publishing effort! "
+                f"Reason: {reason}, Elapsed: {elapsed_time:.3f}s, Publish Count: {self.publish_count}"
+            )
+            self.last_watchdog_warning_time = t_now_sec
 
     def signal_handler(self, signum, frame):
         if self._signal_handled:
