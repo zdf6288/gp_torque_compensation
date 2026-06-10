@@ -59,7 +59,11 @@ def generate_launch_description():
     gp_triple_rmse_cloud_parameter_name = 'gp_triple_rmse_cloud'
     gp_triple_rmse_hist_parameter_name = 'gp_triple_rmse_hist'
     gp_triple_inverse_rmse_eps_parameter_name = 'gp_triple_inverse_rmse_eps'
+    gp_triple_hist_distance_scale_parameter_name = 'gp_triple_hist_distance_scale'
+    gp_triple_hist_distance_power_parameter_name = 'gp_triple_hist_distance_power'
     gp_triple_hist_weight_cap_parameter_name = 'gp_triple_hist_weight_cap'
+    gp_triple_hist_min_weight_parameter_name = 'gp_triple_hist_min_weight'
+    gp_triple_dynamic_eps_parameter_name = 'gp_triple_dynamic_eps'
     gp_triple_min_weight_local_parameter_name = 'gp_triple_min_weight_local'
     gp_triple_min_weight_cloud_parameter_name = 'gp_triple_min_weight_cloud'
     gp_triple_require_hist_available_parameter_name = 'gp_triple_require_hist_available'
@@ -162,9 +166,19 @@ def generate_launch_description():
     gp_triple_inverse_rmse_eps = LaunchConfiguration(
         gp_triple_inverse_rmse_eps_parameter_name
     )
+    gp_triple_hist_distance_scale = LaunchConfiguration(
+        gp_triple_hist_distance_scale_parameter_name
+    )
+    gp_triple_hist_distance_power = LaunchConfiguration(
+        gp_triple_hist_distance_power_parameter_name
+    )
     gp_triple_hist_weight_cap = LaunchConfiguration(
         gp_triple_hist_weight_cap_parameter_name
     )
+    gp_triple_hist_min_weight = LaunchConfiguration(
+        gp_triple_hist_min_weight_parameter_name
+    )
+    gp_triple_dynamic_eps = LaunchConfiguration(gp_triple_dynamic_eps_parameter_name)
     gp_triple_min_weight_local = LaunchConfiguration(
         gp_triple_min_weight_local_parameter_name
     )
@@ -306,7 +320,10 @@ def generate_launch_description():
         DeclareLaunchArgument(
             gp_compensation_source_parameter_name,
             default_value='local',
-            description='GP compensation source: local, cloud, combined, hist_db, or triple.'),
+            description=(
+                'GP compensation source: local, cloud, combined, hist_db, '
+                'triple, or triple_dynamic.'
+            )),
         DeclareLaunchArgument(
             gp_compensation_scale_parameter_name,
             default_value='0.1',
@@ -344,14 +361,15 @@ def generate_launch_description():
             default_value='false',
             description=(
                 'Enable persistent historical DB CSV query only when explicitly '
-                'requested; active torque uses it only with explicit hist_db or triple source.'
+                'requested; active torque uses it only with explicit hist_db, '
+                'triple, or triple_dynamic source.'
             )),
         DeclareLaunchArgument(
             gp_historical_db_path_parameter_name,
             default_value='',
             description=(
                 'Persistent historical DB .npz path for shadow logging or explicit '
-                'hist_db/triple source; empty keeps the DB unavailable.'
+                'hist_db/triple/triple_dynamic source; empty keeps the DB unavailable.'
             )),
         DeclareLaunchArgument(
             gp_historical_db_k_parameter_name,
@@ -426,9 +444,25 @@ def generate_launch_description():
             default_value='1e-9',
             description='Positive epsilon used by inverse-RMSE squared triple weights.'),
         DeclareLaunchArgument(
+            gp_triple_hist_distance_scale_parameter_name,
+            default_value='2.0',
+            description='Distance scale for triple_dynamic historical confidence penalty.'),
+        DeclareLaunchArgument(
+            gp_triple_hist_distance_power_parameter_name,
+            default_value='2.0',
+            description='Distance power for triple_dynamic historical confidence penalty.'),
+        DeclareLaunchArgument(
             gp_triple_hist_weight_cap_parameter_name,
             default_value='0.70',
             description='Fractional cap for active triple historical DB weight.'),
+        DeclareLaunchArgument(
+            gp_triple_hist_min_weight_parameter_name,
+            default_value='0.0',
+            description='Optional minimum historical DB weight for triple_dynamic.'),
+        DeclareLaunchArgument(
+            gp_triple_dynamic_eps_parameter_name,
+            default_value='1e-9',
+            description='Positive epsilon used by triple_dynamic precision weights.'),
         DeclareLaunchArgument(
             gp_triple_min_weight_local_parameter_name,
             default_value='0.05',
@@ -657,8 +691,20 @@ def generate_launch_description():
                 gp_triple_inverse_rmse_eps_parameter_name: ParameterValue(
                     gp_triple_inverse_rmse_eps,
                     value_type=float),
+                gp_triple_hist_distance_scale_parameter_name: ParameterValue(
+                    gp_triple_hist_distance_scale,
+                    value_type=float),
+                gp_triple_hist_distance_power_parameter_name: ParameterValue(
+                    gp_triple_hist_distance_power,
+                    value_type=float),
                 gp_triple_hist_weight_cap_parameter_name: ParameterValue(
                     gp_triple_hist_weight_cap,
+                    value_type=float),
+                gp_triple_hist_min_weight_parameter_name: ParameterValue(
+                    gp_triple_hist_min_weight,
+                    value_type=float),
+                gp_triple_dynamic_eps_parameter_name: ParameterValue(
+                    gp_triple_dynamic_eps,
                     value_type=float),
                 gp_triple_min_weight_local_parameter_name: ParameterValue(
                     gp_triple_min_weight_local,
