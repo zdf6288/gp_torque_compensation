@@ -86,6 +86,12 @@ def generate_launch_description():
     z_amplitude_parameter_name = 'z_amplitude'
     z_frequency_multiplier_parameter_name = 'z_frequency_multiplier'
     circle_frequency_parameter_name = 'circle_frequency'
+    circle_center_x_parameter_name = 'circle_center_x'
+    circle_center_y_parameter_name = 'circle_center_y'
+    circle_center_z_parameter_name = 'circle_center_z'
+    anchor_trajectory_start_to_current_pose_parameter_name = (
+        'anchor_trajectory_start_to_current_pose'
+    )
     transition_duration_parameter_name = 'transition_duration'
     trajectory_start_distance_warn_m_parameter_name = 'trajectory_start_distance_warn_m'
     trajectory_start_distance_refuse_m_parameter_name = 'trajectory_start_distance_refuse_m'
@@ -192,6 +198,12 @@ def generate_launch_description():
     z_amplitude = LaunchConfiguration(z_amplitude_parameter_name)
     z_frequency_multiplier = LaunchConfiguration(z_frequency_multiplier_parameter_name)
     circle_frequency = LaunchConfiguration(circle_frequency_parameter_name)
+    circle_center_x = LaunchConfiguration(circle_center_x_parameter_name)
+    circle_center_y = LaunchConfiguration(circle_center_y_parameter_name)
+    circle_center_z = LaunchConfiguration(circle_center_z_parameter_name)
+    anchor_trajectory_start_to_current_pose = LaunchConfiguration(
+        anchor_trajectory_start_to_current_pose_parameter_name
+    )
     transition_duration = LaunchConfiguration(transition_duration_parameter_name)
     trajectory_start_distance_warn_m = LaunchConfiguration(
         trajectory_start_distance_warn_m_parameter_name
@@ -482,6 +494,25 @@ def generate_launch_description():
             default_value='0.1',
             description='Circle trajectory frequency in Hz.'),
         DeclareLaunchArgument(
+            circle_center_x_parameter_name,
+            default_value='0.3',
+            description='Cartesian trajectory center x [m].'),
+        DeclareLaunchArgument(
+            circle_center_y_parameter_name,
+            default_value='0.0',
+            description='Cartesian trajectory center y [m].'),
+        DeclareLaunchArgument(
+            circle_center_z_parameter_name,
+            default_value='0.65',
+            description='Cartesian trajectory center z [m].'),
+        DeclareLaunchArgument(
+            anchor_trajectory_start_to_current_pose_parameter_name,
+            default_value='false',
+            description=(
+                'If true, shift the GOAL1 spatial multisine center at runtime so '
+                'the trajectory start point matches the measured current EE pose.'
+            )),
+        DeclareLaunchArgument(
             transition_duration_parameter_name,
             default_value='3.0',
             description='Smooth transition duration before trajectory recording starts.'),
@@ -663,6 +694,11 @@ def generate_launch_description():
                 z_frequency_multiplier_parameter_name: ParameterValue(
                     z_frequency_multiplier, value_type=float),
                 circle_frequency_parameter_name: ParameterValue(circle_frequency, value_type=float),
+                circle_center_x_parameter_name: ParameterValue(circle_center_x, value_type=float),
+                circle_center_y_parameter_name: ParameterValue(circle_center_y, value_type=float),
+                circle_center_z_parameter_name: ParameterValue(circle_center_z, value_type=float),
+                anchor_trajectory_start_to_current_pose_parameter_name: ParameterValue(
+                    anchor_trajectory_start_to_current_pose, value_type=bool),
                 transition_duration_parameter_name: ParameterValue(
                     transition_duration, value_type=float),
                 trajectory_start_distance_warn_m_parameter_name: ParameterValue(

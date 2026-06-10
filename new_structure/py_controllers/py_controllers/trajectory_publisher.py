@@ -54,7 +54,8 @@ class TrajectoryPublisher(Node):
         self.declare_parameter('circle_frequency', 0.1) # circle motion frequency (Hz)
         self.declare_parameter('circle_center_x', 0.3)  # circle center x coordinate
         self.declare_parameter('circle_center_y', 0.0)  # circle center y coordinate
-        self.declare_parameter('circle_center_z', 0.65) # circle center z coordinate       
+        self.declare_parameter('circle_center_z', 0.65) # circle center z coordinate
+        self.declare_parameter('anchor_trajectory_start_to_current_pose', False)
         # Stage 3A default-off：planar_circle 保持 Stage 1 / Stage 2A 的平面圆轨迹行为。
         # z_modulated_circle 只在显式设置 trajectory_mode 时启用。
         self.declare_parameter('trajectory_mode', 'planar_circle')
@@ -86,6 +87,9 @@ class TrajectoryPublisher(Node):
         self.center_x = self.get_parameter('circle_center_x').value
         self.center_y = self.get_parameter('circle_center_y').value
         self.center_z = self.get_parameter('circle_center_z').value
+        self.anchor_trajectory_start_to_current_pose = bool(
+            self.get_parameter('anchor_trajectory_start_to_current_pose').value
+        )
         self.trajectory_mode = self.get_parameter('trajectory_mode').value
         self.z_amplitude = self.get_parameter('z_amplitude').value
         self.z_frequency_multiplier = self.get_parameter('z_frequency_multiplier').value
@@ -157,6 +161,7 @@ class TrajectoryPublisher(Node):
         self.last_transition_command_time = None
         self.transition_step_clamp_logged = False
         self.transition_complete = False        # flag indicating the completion of moving to the start point of trajectory
+        self.trajectory_start_anchored = False   # true after center/start point is anchored to measured EE pose
         
         # get start point of trajectory
         trajectory_start, _, _ = self._compute_task_space_trajectory(0.0)
@@ -196,6 +201,9 @@ class TrajectoryPublisher(Node):
                 'this changes task-space position commands only.'
             )
         self.get_logger().info(f'Trajectory start point: ({self.trajectory_start_x:.3f}, {self.trajectory_start_y:.3f}, {self.trajectory_start_z:.3f})')
+        self.get_logger().info(
+            f'Anchor trajectory start to current pose: {self.anchor_trajectory_start_to_current_pose}'
+        )
         if self.use_transition:
             self.get_logger().info(f'Transition duration: {self.transition_duration} s')
         self.get_logger().info(
@@ -229,6 +237,7 @@ class TrajectoryPublisher(Node):
             self.transition_step_clamp_logged = False
             self.transition_complete = False
             self.robot_initial_received = False
+            self.trajectory_start_anchored = False
             
             response.success = True
             response.message = "Trajectory enabled successfully"
@@ -280,6 +289,34 @@ class TrajectoryPublisher(Node):
                     [self.trajectory_start_x, self.trajectory_start_y, self.trajectory_start_z],
                     dtype=float
                 )
+
+                if (
+                    self.anchor_trajectory_start_to_current_pose
+                    and self.trajectory_mode == 'goal1_spatial_multisine'
+                    and not self.trajectory_start_anchored
+                ):
+                    # 真机实验 anchor：保持 multisine 轨迹形状不变，只整体平移 center，
+                    # 使 t=0 的 trajectory start point 精确对齐当前测得 EE pose。
+                    # 这样每次 clear fault / unlock 后的毫米级初始位姿漂移不会造成 transition jump。
+                    offset = target_position - np.array(
+                        [self.center_x, self.center_y, self.center_z],
+                        dtype=float
+                    )
+                    new_center = current_position - offset
+                    self.center_x = float(new_center[0])
+                    self.center_y = float(new_center[1])
+                    self.center_z = float(new_center[2])
+                    self.trajectory_start_x = float(current_position[0])
+                    self.trajectory_start_y = float(current_position[1])
+                    self.trajectory_start_z = float(current_position[2])
+                    target_position = current_position.copy()
+                    self.trajectory_start_anchored = True
+                    self.get_logger().warn(
+                        '[TrajectoryPublisher] Anchored trajectory start to current pose: '
+                        f'new_center=({self.center_x:.4f}, {self.center_y:.4f}, {self.center_z:.4f}), '
+                        f'new_start=({self.trajectory_start_x:.4f}, {self.trajectory_start_y:.4f}, {self.trajectory_start_z:.4f})'
+                    )
+
                 distance_to_start = float(np.linalg.norm(target_position - current_position))
                 if self.transition_duration > 0.0:
                     average_speed = distance_to_start / float(self.transition_duration)

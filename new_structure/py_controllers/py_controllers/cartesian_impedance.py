@@ -3671,8 +3671,13 @@ class CartesianImpedanceController(Node):
 
     def _apply_gp_compensation(self, tau):
         self._reset_gp_triple_state()
-        # 默认不改变最终 tau，只有显式开启 gp_compensation_enabled 才进入 torque command。
-        if not self.gp_prediction_enabled or not self.gp_compensation_enabled:
+        # 真机安全 gate：smooth transition / 起步阶段不允许 GP compensation 进入 torque。
+        # 只有 trajectory_publisher 发布 /data_recording_enabled=True 后，才开始比较各 GP source 的补偿效果。
+        if (
+            not self.data_recording_enabled
+            or not self.gp_prediction_enabled
+            or not self.gp_compensation_enabled
+        ):
             self._gp_source_code = 0
             self._gp_selected_raw = np.zeros(7, dtype=float)
             self._gp_scaled = np.zeros(7, dtype=float)
