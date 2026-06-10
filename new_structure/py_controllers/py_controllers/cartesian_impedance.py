@@ -464,8 +464,16 @@ class CartesianImpedanceController(Node):
         self.declare_parameter("timing_log_stride", 1)
         self.declare_parameter("timing_output_dir", "outputs/goal12_controller_timing")
         self.declare_parameter("deadline_ratio_warn_threshold", 0.8)
+        self.declare_parameter("gp_prediction_stride", 5)
+        self.declare_parameter("future_trajectory_request_stride", 5)
 
         self.gp_prediction_enabled = self._get_bool_parameter("gp_prediction_enabled")
+        self.gp_prediction_stride = self._get_bounded_int_parameter(
+            "gp_prediction_stride", 5, 1, 100
+        )
+        self.future_trajectory_request_stride = self._get_bounded_int_parameter(
+            "future_trajectory_request_stride", 5, 1, 100
+        )
         self.gp_online_update_enabled = self._get_bool_parameter("gp_online_update_enabled")
         self.gp_model_dir = str(self.get_parameter("gp_model_dir").value)
         self.gp_compensation_enabled = self._get_bool_parameter("gp_compensation_enabled")
@@ -845,8 +853,9 @@ class CartesianImpedanceController(Node):
         self._reset_gp_shadow_state()
         self._reset_historical_residual_db_shadow_state()
 
-        self.gp_stride = 1      # 每 10 个 state callback 做一次 GP（你可以调）
+        self.gp_stride = self.gp_prediction_stride
         self.gp_counter = 0
+        self.future_trajectory_request_counter = 0
         self.cloud_counter = 0
         self.last_q = np.zeros(7)
         self.last_dq = np.zeros(7)
@@ -1850,14 +1859,19 @@ class CartesianImpedanceController(Node):
             dq_pred_next = dq_des_joint.copy()
             if self.data_recording_enabled and self.gp_prediction_enabled:
                 Td = dt   # 或者固定 0.001
-                future_request_start = time.perf_counter() if timing_row is not None else None
-                self.request_future_trajectory(Td)
-                if future_request_start is not None:
-                    self._timing_add_ms(
-                        timing_row,
-                        "future_request_ms",
-                        future_request_start
-                    )
+                self.future_trajectory_request_counter += 1
+                should_request_future = (
+                    self.future_trajectory_request_counter % self.future_trajectory_request_stride == 0
+                )
+                if should_request_future:
+                    future_request_start = time.perf_counter() if timing_row is not None else None
+                    self.request_future_trajectory(Td)
+                    if future_request_start is not None:
+                        self._timing_add_ms(
+                            timing_row,
+                            "future_request_ms",
+                            future_request_start
+                        )
 
                 if self._latest_future_traj is not None:
                     x_f = np.array(self._latest_future_traj["x_des"], dtype=float)
@@ -1910,64 +1924,64 @@ class CartesianImpedanceController(Node):
                 )
             # tau = tau
 
-            self._reset_historical_residual_db_shadow_state()
-
             # === 控制循环的最后：按节拍触发一次“GP 更新”（本地 + 云端） ===
             if self.gp_active and self.use_gp and self.gp_prediction_enabled:
                 gp_total_start = time.perf_counter() if timing_row is not None else None
                 self.gp_counter += 1
-                tick = (self.gp_counter % self.gp_stride == 0)
-                # # ---------------------------------------------------------
-                y_hat_local, var_local = self._gp_predict_and_update(
-                    self.q, dq, self.ddq_des_joint,
-                    self.tau_residual_filtered,
-                    self.gp_models_small,
-                    # True 保持原 online update；False 用于 frozen GP evaluation，不允许 add_point。
-                    update=self.gp_online_update_enabled,
-                    timing_label="local",
-                    timing_row=timing_row
-                )
-                self.y_hat_local = y_hat_local
-                self.var_local = var_local
-                if (
-                    self.gp_shadow_paper_fusion_logging_enabled
-                    and self.gp_historical_shadow_enabled
-                    and self.gp_historical_source_mode == "local_prediction_pool"
-                ):
-                    self._gp_local_feature_shadow = self._build_gp_shadow_feature(
-                        self.q, dq
+                gp_tick = (self.gp_counter % self.gp_prediction_stride == 0)
+                if gp_tick:
+                    self._reset_historical_residual_db_shadow_state()
+                    # # ---------------------------------------------------------
+                    y_hat_local, var_local = self._gp_predict_and_update(
+                        self.q, dq, self.ddq_des_joint,
+                        self.tau_residual_filtered,
+                        self.gp_models_small,
+                        # True 保持原 online update；False 用于 frozen GP evaluation，不允许 add_point。
+                        update=self.gp_online_update_enabled,
+                        timing_label="local",
+                        timing_row=timing_row
                     )
-                    self._gp_local_prediction_sequence_shadow += 1
+                    self.y_hat_local = y_hat_local
+                    self.var_local = var_local
+                    if (
+                        self.gp_shadow_paper_fusion_logging_enabled
+                        and self.gp_historical_shadow_enabled
+                        and self.gp_historical_source_mode == "local_prediction_pool"
+                    ):
+                        self._gp_local_feature_shadow = self._build_gp_shadow_feature(
+                            self.q, dq
+                        )
+                        self._gp_local_prediction_sequence_shadow += 1
 
-                y_hat_cloud_current, var_cloud_current = self._gp_predict_and_update(
-                    q, dq_pred_next, ddq,
-                    self.tau_residual_filtered,
-                    self.gp_models_big,
-                    update=self.gp_online_update_enabled,
-                    timing_label="cloud_like",
-                    timing_row=timing_row
-                )
-                self.y_hat_cloud_current = y_hat_cloud_current.copy()
-                self.y_hat_cloud, self.var_cloud = self._delay_cloud_like_output(
-                    y_hat_cloud_current,
-                    var_cloud_current
-                )
-                
-                # ---------------------------------------------------------
-                # C) 每帧融合（不要只在 else 融合）
-                # ---------------------------------------------------------
-                eps = 1e-8
-                v_l = np.maximum(self.var_local, eps)
-                v_c = np.maximum(self.var_cloud, eps)
+                    y_hat_cloud_current, var_cloud_current = self._gp_predict_and_update(
+                        q, dq_pred_next, ddq,
+                        self.tau_residual_filtered,
+                        self.gp_models_big,
+                        update=self.gp_online_update_enabled,
+                        timing_label="cloud_like",
+                        timing_row=timing_row
+                    )
+                    self.y_hat_cloud_current = y_hat_cloud_current.copy()
+                    self.y_hat_cloud, self.var_cloud = self._delay_cloud_like_output(
+                        y_hat_cloud_current,
+                        var_cloud_current
+                    )
+                    
+                    # ---------------------------------------------------------
+                    # C) 每帧融合（不要只在 else 融合）
+                    # ---------------------------------------------------------
+                    eps = 1e-8
+                    v_l = np.maximum(self.var_local, eps)
+                    v_c = np.maximum(self.var_cloud, eps)
 
-                prec_l = 1.0 / v_l
-                prec_c = 1.0 / v_c
-                w_l = prec_l / (prec_l + prec_c)
+                    prec_l = 1.0 / v_l
+                    prec_c = 1.0 / v_c
+                    w_l = prec_l / (prec_l + prec_c)
 
-                self.y_hat_combined = w_l * self.y_hat_local + (1.0 - w_l) * self.y_hat_cloud
-                self._update_historical_residual_db_shadow_state(self.q, dq)
-                if gp_total_start is not None:
-                    self._timing_add_ms(timing_row, "gp_total_ms", gp_total_start)
+                    self.y_hat_combined = w_l * self.y_hat_local + (1.0 - w_l) * self.y_hat_cloud
+                    self._update_historical_residual_db_shadow_state(self.q, dq)
+                    if gp_total_start is not None:
+                        self._timing_add_ms(timing_row, "gp_total_ms", gp_total_start)
 
             # tau = tau - self.y_hat_local
             # 默认 compensation 关闭时返回原始 tau；开启后才按原注释方向补偿。
@@ -3569,13 +3583,23 @@ class CartesianImpedanceController(Node):
         }
 
     def _update_gp_shadow_logging_state(self, q, dq):
-        self._reset_gp_shadow_state()
-
         if (
             not self.gp_shadow_paper_fusion_logging_enabled
             or not self.gp_prediction_enabled
+            or not self.gp_active
+            or not self.use_gp
         ):
+            self._reset_gp_shadow_state()
             return
+
+        gp_tick = (
+            self.gp_counter > 0
+            and self.gp_counter % self.gp_prediction_stride == 0
+        )
+        if not gp_tick:
+            return
+
+        self._reset_gp_shadow_state()
 
         x_query = None
         if (

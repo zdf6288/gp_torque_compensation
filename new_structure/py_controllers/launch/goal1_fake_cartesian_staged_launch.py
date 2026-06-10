@@ -31,6 +31,8 @@ def generate_launch_description():
     trajectory_start_delay_parameter_name = 'trajectory_start_delay_sec'
     cartesian_start_delay_parameter_name = 'cartesian_start_delay_sec'
     gp_prediction_enabled_parameter_name = 'gp_prediction_enabled'
+    gp_prediction_stride_parameter_name = 'gp_prediction_stride'
+    future_trajectory_request_stride_parameter_name = 'future_trajectory_request_stride'
     gp_model_dir_parameter_name = 'gp_model_dir'
     gp_compensation_enabled_parameter_name = 'gp_compensation_enabled'
     gp_compensation_source_parameter_name = 'gp_compensation_source'
@@ -97,6 +99,8 @@ def generate_launch_description():
     trajectory_start_delay_sec = LaunchConfiguration(trajectory_start_delay_parameter_name)
     cartesian_start_delay_sec = LaunchConfiguration(cartesian_start_delay_parameter_name)
     gp_prediction_enabled = LaunchConfiguration(gp_prediction_enabled_parameter_name)
+    gp_prediction_stride = LaunchConfiguration(gp_prediction_stride_parameter_name)
+    future_trajectory_request_stride = LaunchConfiguration(future_trajectory_request_stride_parameter_name)
     gp_model_dir = LaunchConfiguration(gp_model_dir_parameter_name)
     gp_compensation_enabled = LaunchConfiguration(gp_compensation_enabled_parameter_name)
     gp_compensation_source = LaunchConfiguration(gp_compensation_source_parameter_name)
@@ -228,6 +232,14 @@ def generate_launch_description():
             gp_prediction_enabled_parameter_name: ParameterValue(
                 gp_prediction_enabled,
                 value_type=bool,
+            ),
+            gp_prediction_stride_parameter_name: ParameterValue(
+                gp_prediction_stride,
+                value_type=int,
+            ),
+            future_trajectory_request_stride_parameter_name: ParameterValue(
+                future_trajectory_request_stride,
+                value_type=int,
             ),
             'gp_online_update_enabled': False,
             gp_model_dir_parameter_name: ParameterValue(gp_model_dir, value_type=str),
@@ -434,6 +446,16 @@ def generate_launch_description():
             gp_prediction_enabled_parameter_name,
             default_value='false',
             description='Enable GP prediction only for explicit fake/no-motion validation.',
+        ),
+        DeclareLaunchArgument(
+            gp_prediction_stride_parameter_name,
+            default_value='5',
+            description='Run GP predict/update once every N controller callbacks.',
+        ),
+        DeclareLaunchArgument(
+            future_trajectory_request_stride_parameter_name,
+            default_value='5',
+            description='Request /future_task_space once every N controller callbacks.',
         ),
         DeclareLaunchArgument(
             gp_model_dir_parameter_name,
