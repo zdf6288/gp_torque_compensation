@@ -118,6 +118,8 @@ def generate_launch_description():
         Node(
             package='controller_manager',
             executable='ros2_control_node',
+            name='controller_manager',
+            namespace='',
             parameters=[
                 {'robot_description': robot_description},
                 franka_controllers,
