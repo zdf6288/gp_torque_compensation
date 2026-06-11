@@ -34,28 +34,35 @@ def _positive_float_or_fallback(value_text, fallback_text, default_value=50.0):
 def _make_cpp_relayer_spawner(
         context,
         state_parameter_publish_rate,
-        control_frequency,
-        cpp_relayer_base_param_file):
+        control_frequency):
     state_rate = _positive_float_or_fallback(
         state_parameter_publish_rate.perform(context),
         control_frequency.perform(context),
     )
-    base_param_file_path = cpp_relayer_base_param_file.perform(context)
     with tempfile.NamedTemporaryFile(
         mode='w',
-        prefix='cpp_relayer_state_rate_',
+        prefix='cpp_relayer_full_params_',
         suffix='.yaml',
         delete=False,
     ) as param_file:
         param_file.write('cpp_relayer:\n')
         param_file.write('  ros__parameters:\n')
-        param_file.write(f'    state_parameter_publish_rate: {state_rate:.9g}\n')
+        param_file.write('    type: cpp_relayer/CPPRelayer\n')
+        param_file.write('    arm_id: panda\n')
+        param_file.write('    command_timeout_sec: 0.2\n')
+        param_file.write('    require_fresh_command_on_activate: false\n')
+        param_file.write('    diagnostics_enabled: true\n')
+        param_file.write('    diagnostics_log_period_sec: 5.0\n')
+        param_file.write('    log_first_n_stale_events: 5\n')
+        param_file.write(f'    state_parameter_publish_rate: {state_rate:.6f}\n')
         param_file_path = param_file.name
 
     return [
         LogInfo(
             msg=(
-                'cpp_relayer param files: controllers.yaml + '
+                'cpp_relayer full spawner param file with '
+                'require_fresh_command_on_activate=false, '
+                'command_timeout_sec=0.2, diagnostics enabled, '
                 'state_parameter_publish_rate override '
                 f'({state_rate:.3f} Hz)'
             )
@@ -64,7 +71,6 @@ def _make_cpp_relayer_spawner(
             package='controller_manager',
             executable='spawner',
             arguments=[
-                '--param-file', base_param_file_path,
                 '--param-file', param_file_path,
                 'cpp_relayer',
             ],
@@ -215,9 +221,6 @@ def generate_launch_description():
     ros2_control_update_rate = LaunchConfiguration(ros2_control_update_rate_parameter_name)
     trajectory_publish_rate = LaunchConfiguration(trajectory_publish_rate_parameter_name)
     state_parameter_publish_rate = LaunchConfiguration(state_parameter_publish_rate_parameter_name)
-    cpp_relayer_base_param_file = PathJoinSubstitution([
-        FindPackageShare('new_bringup'), 'config', 'controllers.yaml'
-    ])
     run_name = LaunchConfiguration(run_name_parameter_name)
     data_output_dir = LaunchConfiguration(data_output_dir_parameter_name)
     reference_mode = LaunchConfiguration(reference_mode_parameter_name)
@@ -827,7 +830,6 @@ def generate_launch_description():
             args=[
                 state_parameter_publish_rate,
                 control_frequency,
-                cpp_relayer_base_param_file,
             ],
         ),
         Node(

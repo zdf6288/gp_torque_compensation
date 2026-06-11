@@ -13,17 +13,84 @@
 #  limitations under the License.
 
 
+import math
 import os
+import tempfile
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, LogInfo, Shutdown
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, LogInfo, OpaqueFunction, Shutdown
 from launch.conditions import IfCondition, UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import Command, FindExecutable, LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
-from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
+
+
+def _positive_int_or_fallback(value_text, fallback_text, default_value=50):
+    try:
+        value = float(value_text)
+        if math.isfinite(value) and value > 0.0:
+            return int(round(value))
+    except (TypeError, ValueError):
+        pass
+
+    try:
+        fallback = float(fallback_text)
+        if math.isfinite(fallback) and fallback > 0.0:
+            return int(round(fallback))
+    except (TypeError, ValueError):
+        pass
+
+    return int(default_value)
+
+
+def _make_ros2_control_node(
+        context,
+        robot_description,
+        franka_controllers,
+        ros2_control_update_rate,
+        control_frequency):
+    update_rate = _positive_int_or_fallback(
+        ros2_control_update_rate.perform(context),
+        control_frequency.perform(context),
+    )
+    with tempfile.NamedTemporaryFile(
+        mode='w',
+        prefix='controller_manager_update_rate_',
+        suffix='.yaml',
+        delete=False,
+    ) as param_file:
+        param_file.write('/controller_manager:\n')
+        param_file.write('  ros__parameters:\n')
+        param_file.write(f'    update_rate: {update_rate}\n')
+        update_rate_param_file = param_file.name
+
+    return [
+        LogInfo(
+            msg=(
+                'controller_manager update_rate override param file after '
+                f'controllers.yaml: {update_rate} Hz'
+            )
+        ),
+        Node(
+            package='controller_manager',
+            executable='ros2_control_node',
+            name='controller_manager',
+            namespace='',
+            parameters=[
+                {'robot_description': robot_description},
+                franka_controllers,
+                update_rate_param_file,
+            ],
+            remappings=[('joint_states', 'franka/joint_states')],
+            output={
+                'stdout': 'screen',
+                'stderr': 'screen',
+            },
+            on_exit=Shutdown(),
+        ),
+    ]
 
 
 def generate_launch_description():
@@ -115,22 +182,14 @@ def generate_launch_description():
                 {'source_list': ['franka/joint_states', 'panda_gripper/joint_states'],
                  'rate': 30}],
         ),
-        Node(
-            package='controller_manager',
-            executable='ros2_control_node',
-            name='controller_manager',
-            namespace='',
-            parameters=[
-                {'robot_description': robot_description},
+        OpaqueFunction(
+            function=_make_ros2_control_node,
+            args=[
+                robot_description,
                 franka_controllers,
-                {'update_rate': ParameterValue(ros2_control_update_rate, value_type=int)},
+                ros2_control_update_rate,
+                control_frequency,
             ],
-            remappings=[('joint_states', 'franka/joint_states')],
-            output={
-                'stdout': 'screen',
-                'stderr': 'screen',
-            },
-            on_exit=Shutdown(),
         ),
         Node(
             package='controller_manager',
