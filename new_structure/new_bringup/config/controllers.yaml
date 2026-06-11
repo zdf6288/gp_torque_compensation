@@ -23,3 +23,7 @@ cpp_relayer:
     # false 允许 cpp_relayer 激活后使用 zero fallback 等待 fresh command，避免 activation deadlock。
     # command_timeout_sec=0.2 仍保留 stale command zeroing；这里不启用 GP/historical active compensation。
     require_fresh_command_on_activate: false
+    # Diagnostics only: confirm whether Python /effort_command publish jitter triggers stale fallback.
+    diagnostics_enabled: true
+    diagnostics_log_period_sec: 5.0
+    log_first_n_stale_events: 5

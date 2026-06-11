@@ -35,6 +35,18 @@ GOAL12_TIMING_FIELDS = [
     "callback_deadline_ms",
     "callback_deadline_miss",
     "callback_deadline_ratio",
+    "callback_wall_warn_sec",
+    "callback_wall_over_warn_count",
+    "callback_wall_over_20ms_count",
+    "callback_wall_over_50ms_count",
+    "callback_wall_over_100ms_count",
+    "effort_published_this_tick",
+    "effort_publish_skip_reason",
+    "effort_publish_count",
+    "effort_last_gap_ms",
+    "effort_max_gap_ms",
+    "effort_gap_warn_sec",
+    "effort_gap_warn_count",
     "gp_total_ms",
     "gp_local_predict_ms",
     "gp_cloud_like_predict_ms",
@@ -504,6 +516,10 @@ class CartesianImpedanceController(Node):
         self.declare_parameter("timing_log_stride", 1)
         self.declare_parameter("timing_output_dir", "outputs/goal12_controller_timing")
         self.declare_parameter("deadline_ratio_warn_threshold", 0.8)
+        self.declare_parameter("effort_gap_diagnostics_enabled", False)
+        self.declare_parameter("effort_gap_log_stride", 100)
+        self.declare_parameter("effort_gap_warn_sec", 0.2)
+        self.declare_parameter("callback_wall_warn_sec", 0.02)
         self.declare_parameter("gp_prediction_stride", 5)
         self.declare_parameter("gp_output_timeout_sec", 0.5)
         self.declare_parameter("future_trajectory_request_stride", 5)
@@ -710,6 +726,19 @@ class CartesianImpedanceController(Node):
             self.timing_output_dir = "outputs/goal12_controller_timing"
         self.deadline_ratio_warn_threshold = self._get_nonnegative_float_parameter(
             "deadline_ratio_warn_threshold", 0.8
+        )
+        # Diagnostics only: locate Python topic relay jitter; values never enter torque control.
+        self.effort_gap_diagnostics_enabled = self._get_bool_parameter(
+            "effort_gap_diagnostics_enabled"
+        )
+        self.effort_gap_log_stride = self._get_bounded_int_parameter(
+            "effort_gap_log_stride", 100, 1, 1000000
+        )
+        self.effort_gap_warn_sec = self._get_nonnegative_float_parameter(
+            "effort_gap_warn_sec", 0.2
+        )
+        self.callback_wall_warn_sec = self._get_nonnegative_float_parameter(
+            "callback_wall_warn_sec", 0.02
         )
         self._gp_compensation_logged = False
         self._gp_triple_debug_safety_log_count = 0
@@ -970,6 +999,13 @@ class CartesianImpedanceController(Node):
             )
         else:
             self.get_logger().info("[GOAL12 Timing] Timing logging disabled by default")
+        if self.effort_gap_diagnostics_enabled:
+            self.get_logger().info(
+                "[EffortGapDiag] Diagnostics enabled: "
+                f"log_stride={self.effort_gap_log_stride}, "
+                f"effort_gap_warn_sec={self.effort_gap_warn_sec:.3f}, "
+                f"callback_wall_warn_sec={self.callback_wall_warn_sec:.3f}"
+            )
 
         self._reset_gp_shadow_state()
         self._reset_historical_db_preflight_state()
@@ -1081,6 +1117,18 @@ class CartesianImpedanceController(Node):
         self.last_publish_time = None
         self.publish_count = 0
         self.last_watchdog_warning_time = 0.0
+        self._last_publish_perf = None
+        self.last_effort_publish_gap_sec = 0.0
+        self.max_effort_publish_gap_sec = 0.0
+        self.effort_publish_gap_warn_count = 0
+        self.effort_publish_gap_window = deque(maxlen=10000)
+        self._effort_published_this_tick = 0
+        self._effort_publish_skip_reason = ""
+        self.callback_wall_over_warn_count = 0
+        self.callback_wall_over_20ms_count = 0
+        self.callback_wall_over_50ms_count = 0
+        self.callback_wall_over_100ms_count = 0
+        self._effort_gap_diag_callback_count = 0
 
         # simulated future trajectory request delay
         self.future_delay = self.declare_parameter(
@@ -1196,6 +1244,7 @@ class CartesianImpedanceController(Node):
                 "callback_index": callback_index,
                 "callback_period_ms": callback_period_ms,
                 "callback_deadline_ms": self.callback_deadline_ms,
+                "callback_wall_warn_sec": self.callback_wall_warn_sec,
                 "gp_total_ms": 0.0,
                 "gp_local_predict_ms": 0.0,
                 "gp_cloud_like_predict_ms": 0.0,
@@ -1214,6 +1263,7 @@ class CartesianImpedanceController(Node):
                 "cloud_like_gp_called": 0,
                 "add_point_count": 0,
                 "exception_flag": 0,
+                "effort_gap_warn_sec": self.effort_gap_warn_sec,
             })
             return timing_row
         except Exception as e:
@@ -1221,17 +1271,32 @@ class CartesianImpedanceController(Node):
             return None
 
     def _finish_callback_timing(self, timing_row, callback_start_perf):
-        if timing_row is None or callback_start_perf is None:
+        if callback_start_perf is None:
             return
 
         try:
             callback_wall_ms = (time.perf_counter() - callback_start_perf) * 1000.0
+            self._update_effort_gap_diagnostics(callback_wall_ms)
+            if timing_row is None:
+                return
             deadline_ms = self.callback_deadline_ms
             deadline_ratio = callback_wall_ms / deadline_ms if deadline_ms > 0.0 else 0.0
             timing_row.update({
                 "callback_wall_ms": callback_wall_ms,
                 "callback_deadline_ratio": deadline_ratio,
                 "callback_deadline_miss": int(callback_wall_ms > deadline_ms),
+                "callback_wall_warn_sec": self.callback_wall_warn_sec,
+                "callback_wall_over_warn_count": int(self.callback_wall_over_warn_count),
+                "callback_wall_over_20ms_count": int(self.callback_wall_over_20ms_count),
+                "callback_wall_over_50ms_count": int(self.callback_wall_over_50ms_count),
+                "callback_wall_over_100ms_count": int(self.callback_wall_over_100ms_count),
+                "effort_published_this_tick": int(self._effort_published_this_tick),
+                "effort_publish_skip_reason": self._effort_publish_skip_reason,
+                "effort_publish_count": int(self.publish_count),
+                "effort_last_gap_ms": self.last_effort_publish_gap_sec * 1000.0,
+                "effort_max_gap_ms": self.max_effort_publish_gap_sec * 1000.0,
+                "effort_gap_warn_sec": self.effort_gap_warn_sec,
+                "effort_gap_warn_count": int(self.effort_publish_gap_warn_count),
                 "data_recording_enabled": int(bool(self.data_recording_enabled)),
                 "gp_prediction_enabled": int(bool(self.gp_prediction_enabled)),
                 "gp_prediction_stride": int(self.gp_prediction_stride),
@@ -1264,6 +1329,64 @@ class CartesianImpedanceController(Node):
             timing_row[field] = float(current_value) + duration_ms
         except Exception as e:
             self._disable_timing_logging(e)
+
+    def _mark_effort_publish_skipped(self, reason):
+        if not self._effort_published_this_tick and not self._effort_publish_skip_reason:
+            self._effort_publish_skip_reason = reason
+
+    @staticmethod
+    def _percentile(sorted_values, fraction):
+        if not sorted_values:
+            return 0.0
+        idx = int(round((len(sorted_values) - 1) * fraction))
+        idx = min(max(idx, 0), len(sorted_values) - 1)
+        return float(sorted_values[idx])
+
+    def _update_effort_gap_diagnostics(self, callback_wall_ms):
+        callback_wall_sec = callback_wall_ms / 1000.0
+        if callback_wall_sec > self.callback_wall_warn_sec:
+            self.callback_wall_over_warn_count += 1
+        if callback_wall_sec > 0.020:
+            self.callback_wall_over_20ms_count += 1
+        if callback_wall_sec > 0.050:
+            self.callback_wall_over_50ms_count += 1
+        if callback_wall_sec > 0.100:
+            self.callback_wall_over_100ms_count += 1
+
+        if not self.effort_gap_diagnostics_enabled:
+            return
+
+        self._effort_gap_diag_callback_count += 1
+        if self._effort_gap_diag_callback_count % self.effort_gap_log_stride != 0:
+            return
+
+        gap_values = sorted(self.effort_publish_gap_window)
+        p95_gap = self._percentile(gap_values, 0.95)
+        p99_gap = self._percentile(gap_values, 0.99)
+        log_msg = (
+            "[EffortGapDiag] "
+            f"callbacks={self._effort_gap_diag_callback_count}, "
+            f"publish_count={self.publish_count}, "
+            f"last_gap={self.last_effort_publish_gap_sec:.6f}s, "
+            f"max_gap={self.max_effort_publish_gap_sec:.6f}s, "
+            f"p95_gap={p95_gap:.6f}s, "
+            f"p99_gap={p99_gap:.6f}s, "
+            f"gap_warn_count={self.effort_publish_gap_warn_count}, "
+            f"callback_wall_ms={callback_wall_ms:.3f}, "
+            f"over_20ms={self.callback_wall_over_20ms_count}, "
+            f"over_50ms={self.callback_wall_over_50ms_count}, "
+            f"over_100ms={self.callback_wall_over_100ms_count}, "
+            f"published_this_tick={self._effort_published_this_tick}, "
+            f"skip_reason='{self._effort_publish_skip_reason}'"
+        )
+        if (
+            self.last_effort_publish_gap_sec > self.effort_gap_warn_sec
+            or callback_wall_sec > self.callback_wall_warn_sec
+            or not self._effort_published_this_tick
+        ):
+            self.get_logger().warn(log_msg)
+        else:
+            self.get_logger().info(log_msg)
 
     def _append_csv_save_timing(self, csv_save_ms):
         if not self.timing_logging_enabled:
@@ -1348,10 +1471,26 @@ class CartesianImpedanceController(Node):
                     float(row.get("callback_deadline_ratio", 0.0))
                     for row in callback_rows
                 )
+                effort_gap_ms = sorted(
+                    float(row.get("effort_last_gap_ms", 0.0))
+                    for row in callback_rows
+                    if row.get("effort_last_gap_ms") not in ("", None)
+                )
+                max_effort_gap_ms = max(effort_gap_ms) if effort_gap_ms else 0.0
+                p95_effort_gap_ms = self._percentile(effort_gap_ms, 0.95)
+                p99_effort_gap_ms = self._percentile(effort_gap_ms, 0.99)
+                skip_count = sum(
+                    1
+                    for row in callback_rows
+                    if str(row.get("effort_publish_skip_reason", "")).strip()
+                )
                 msg = (
                     f"[GOAL12 Timing] Saved {len(callback_rows)} callback timing rows "
                     f"to {filename}; deadline_miss_count={miss_count}, "
-                    f"max_deadline_ratio={max_ratio:.3f}"
+                    f"max_deadline_ratio={max_ratio:.3f}, "
+                    f"effort_gap_ms(max/p95/p99)="
+                    f"{max_effort_gap_ms:.3f}/{p95_effort_gap_ms:.3f}/{p99_effort_gap_ms:.3f}, "
+                    f"effort_skip_count={skip_count}"
                 )
                 if max_ratio >= self.deadline_ratio_warn_threshold:
                     self.get_logger().warn(msg)
@@ -1458,6 +1597,8 @@ class CartesianImpedanceController(Node):
         self.hist_db_query_updated_this_tick = 0
         self.hist_db_runtime_fallback_used = 0
         self._future_trajectory_updated_this_tick = 0
+        self._effort_published_this_tick = 0
+        self._effort_publish_skip_reason = ""
 
     def _should_run_gp_prediction_this_tick(self):
         self.gp_counter += 1
@@ -1608,14 +1749,17 @@ class CartesianImpedanceController(Node):
                     "no effort command is published."
                 )
                 self._joint_reference_wait_logged = True
+            self._mark_effort_publish_skipped("joint_command_missing")
             return
 
         if not self.joint_command_enabled:
             self.joint_reference_last_tau = np.zeros(7, dtype=float)
             self.joint_reference_last_tau_time = None
+            self._mark_effort_publish_skipped("joint_command_disabled")
             return
 
         if self.joint_command_time is None:
+            self._mark_effort_publish_skipped("joint_command_time_missing")
             return
 
         command_age = (t_now - self.joint_command_time).nanoseconds / 1e9
@@ -1630,6 +1774,7 @@ class CartesianImpedanceController(Node):
                     "no effort command is published."
                 )
                 self._joint_reference_stale_logged = True
+            self._mark_effort_publish_skipped("joint_command_stale")
             return
 
         tau = (
@@ -1857,8 +2002,9 @@ class CartesianImpedanceController(Node):
         """callback function for /state_parameter subscriber"""
         timing_row = None
         callback_start_perf = None
-        if self.timing_logging_enabled:
+        if self.timing_logging_enabled or self.effort_gap_diagnostics_enabled:
             callback_start_perf = time.perf_counter()
+        if self.timing_logging_enabled:
             timing_row = self._start_callback_timing(callback_start_perf)
 
         try:
@@ -1993,6 +2139,7 @@ class CartesianImpedanceController(Node):
                 # 当定位完成后 (self.joint_position_adjusted == True) 若仍无轨迹数据导致不发布，则触发看门狗警告
                 if self.joint_position_adjusted:
                     self._log_watchdog_warning("task_command_received is False (Transition Gap / Drop)", t_elapsed)
+                self._mark_effort_publish_skipped("task_command_missing")
                 return  
 
             # cartesian impedance control (after joint position adjustment)   
@@ -2473,6 +2620,7 @@ class CartesianImpedanceController(Node):
         except Exception as e:
             if timing_row is not None:
                 timing_row["exception_flag"] = 1
+            self._mark_effort_publish_skipped("exception")
             self.get_logger().error(f'Parameter error: {str(e)}')
         finally:
             self._finish_callback_timing(timing_row, callback_start_perf)
@@ -2687,8 +2835,19 @@ class CartesianImpedanceController(Node):
 
     def _publish_effort(self, msg):
         self.effort_publisher.publish(msg)
+        publish_perf = time.perf_counter()
+        if self._last_publish_perf is not None:
+            self.last_effort_publish_gap_sec = publish_perf - self._last_publish_perf
+            if self.last_effort_publish_gap_sec > self.max_effort_publish_gap_sec:
+                self.max_effort_publish_gap_sec = self.last_effort_publish_gap_sec
+            self.effort_publish_gap_window.append(self.last_effort_publish_gap_sec)
+            if self.last_effort_publish_gap_sec > self.effort_gap_warn_sec:
+                self.effort_publish_gap_warn_count += 1
+        self._last_publish_perf = publish_perf
         self.publish_count += 1
         self.last_publish_time = self.get_clock().now()
+        self._effort_published_this_tick = 1
+        self._effort_publish_skip_reason = ""
 
     def _log_watchdog_warning(self, reason, elapsed_time):
         t_now_sec = self.get_clock().now().nanoseconds / 1e9

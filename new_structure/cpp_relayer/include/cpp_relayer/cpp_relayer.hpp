@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cstdint>
 #include <mutex>
 #include <string>
 
@@ -35,6 +36,9 @@ class CPPRelayer : public controller_interface::ControllerInterface {
   const int num_joints = 7;
   double command_timeout_sec_{0.2};
   bool require_fresh_command_on_activate_{true};
+  bool diagnostics_enabled_{true};
+  double diagnostics_log_period_sec_{5.0};
+  int log_first_n_stale_events_{5};
   Vector7d q_;               // from state interface
   Vector7d dq_;              // from state interface
   Vector7d tau_measured_;    // from state interface
@@ -58,6 +62,15 @@ class CPPRelayer : public controller_interface::ControllerInterface {
   void effortCommandCallback(const custom_msgs::msg::EffortCommand::SharedPtr msg) ;
   void setZeroCommandInterfaces();
   bool isCommandFresh(const rclcpp::Time& now, const rclcpp::Time& last_command_time) const;
+  void maybeLogDiagnostics(const rclcpp::Time& now);
+  std::uint64_t received_command_count_{0};
+  std::uint64_t update_count_{0};
+  std::uint64_t stale_command_count_{0};
+  std::uint64_t zero_fallback_count_{0};
+  std::uint64_t stale_event_log_count_{0};
+  double last_command_age_sec_{0.0};
+  double max_command_age_sec_{0.0};
+  rclcpp::Time last_diagnostics_log_time_;
 
 
   // Publisher

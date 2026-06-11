@@ -40,6 +40,10 @@ def generate_launch_description():
     timing_log_stride_parameter_name = 'timing_log_stride'
     timing_output_dir_parameter_name = 'timing_output_dir'
     deadline_ratio_warn_threshold_parameter_name = 'deadline_ratio_warn_threshold'
+    effort_gap_diagnostics_enabled_parameter_name = 'effort_gap_diagnostics_enabled'
+    effort_gap_log_stride_parameter_name = 'effort_gap_log_stride'
+    effort_gap_warn_sec_parameter_name = 'effort_gap_warn_sec'
+    callback_wall_warn_sec_parameter_name = 'callback_wall_warn_sec'
     gp_historical_db_enabled_parameter_name = 'gp_historical_db_enabled'
     gp_historical_db_path_parameter_name = 'gp_historical_db_path'
     gp_historical_db_k_parameter_name = 'gp_historical_db_k'
@@ -166,6 +170,12 @@ def generate_launch_description():
     deadline_ratio_warn_threshold = LaunchConfiguration(
         deadline_ratio_warn_threshold_parameter_name
     )
+    effort_gap_diagnostics_enabled = LaunchConfiguration(
+        effort_gap_diagnostics_enabled_parameter_name
+    )
+    effort_gap_log_stride = LaunchConfiguration(effort_gap_log_stride_parameter_name)
+    effort_gap_warn_sec = LaunchConfiguration(effort_gap_warn_sec_parameter_name)
+    callback_wall_warn_sec = LaunchConfiguration(callback_wall_warn_sec_parameter_name)
     gp_historical_db_enabled = LaunchConfiguration(gp_historical_db_enabled_parameter_name)
     gp_historical_db_path = LaunchConfiguration(gp_historical_db_path_parameter_name)
     gp_historical_db_k = LaunchConfiguration(gp_historical_db_k_parameter_name)
@@ -420,6 +430,22 @@ def generate_launch_description():
             deadline_ratio_warn_threshold_parameter_name,
             default_value='0.8',
             description='Warn in timing summary when max callback deadline ratio reaches this threshold.'),
+        DeclareLaunchArgument(
+            effort_gap_diagnostics_enabled_parameter_name,
+            default_value='false',
+            description='Enable low-frequency Python effort publish gap diagnostics.'),
+        DeclareLaunchArgument(
+            effort_gap_log_stride_parameter_name,
+            default_value='100',
+            description='Log one Python effort gap diagnostics summary every N callbacks.'),
+        DeclareLaunchArgument(
+            effort_gap_warn_sec_parameter_name,
+            default_value='0.2',
+            description='Warn when Python effort publish gap exceeds this duration in seconds.'),
+        DeclareLaunchArgument(
+            callback_wall_warn_sec_parameter_name,
+            default_value='0.02',
+            description='Warn when Python stateParameterCallback wall time exceeds this duration.'),
         DeclareLaunchArgument(
             gp_historical_db_enabled_parameter_name,
             default_value='false',
@@ -743,6 +769,14 @@ def generate_launch_description():
                     timing_output_dir, value_type=str),
                 deadline_ratio_warn_threshold_parameter_name: ParameterValue(
                     deadline_ratio_warn_threshold, value_type=float),
+                effort_gap_diagnostics_enabled_parameter_name: ParameterValue(
+                    effort_gap_diagnostics_enabled, value_type=bool),
+                effort_gap_log_stride_parameter_name: ParameterValue(
+                    effort_gap_log_stride, value_type=int),
+                effort_gap_warn_sec_parameter_name: ParameterValue(
+                    effort_gap_warn_sec, value_type=float),
+                callback_wall_warn_sec_parameter_name: ParameterValue(
+                    callback_wall_warn_sec, value_type=float),
                 gp_historical_db_enabled_parameter_name: ParameterValue(
                     gp_historical_db_enabled,
                     value_type=bool),

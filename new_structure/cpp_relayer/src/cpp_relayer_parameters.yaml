@@ -11,3 +11,15 @@ cpp_relayer:
     type: bool,
     default_value: true,
   }
+  diagnostics_enabled: {
+    type: bool,
+    default_value: true,
+  }
+  diagnostics_log_period_sec: {
+    type: double,
+    default_value: 5.0,
+  }
+  log_first_n_stale_events: {
+    type: int,
+    default_value: 5,
+  }

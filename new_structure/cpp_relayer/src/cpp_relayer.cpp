@@ -50,6 +50,7 @@ controller_interface::return_type CPPRelayer::update(
     const rclcpp::Duration& /*period*/) {
 
   const auto now = get_node()->get_clock()->now();
+  ++update_count_;
   Vector7d command_to_write = Vector7d::Zero();
   bool has_command = false;
   bool command_is_fresh = false;
@@ -62,6 +63,10 @@ controller_interface::return_type CPPRelayer::update(
       const auto command_age = now - last_command_time_;
       command_age_sec = command_age.seconds();
       command_is_fresh = isCommandFresh(now, last_command_time_);
+      last_command_age_sec_ = command_age_sec;
+      if (command_age_sec > max_command_age_sec_) {
+        max_command_age_sec_ = command_age_sec;
+      }
       if (command_is_fresh) {
         command_to_write = tau_d_received_;
       }
@@ -73,8 +78,23 @@ controller_interface::return_type CPPRelayer::update(
       command_interfaces_[i].set_value(command_to_write(i));
     }
   } else {
+    ++zero_fallback_count_;
     setZeroCommandInterfaces();
     if (has_command) {
+      ++stale_command_count_;
+      // Diagnostics only: confirm whether Python /effort_command publish jitter triggers fallback.
+      if (diagnostics_enabled_ &&
+          stale_event_log_count_ < static_cast<std::uint64_t>(log_first_n_stale_events_)) {
+        ++stale_event_log_count_;
+        RCLCPP_WARN(
+            get_node()->get_logger(),
+            "[CPPRelayerDiag] stale fallback event #%llu: command_age=%.6f s, "
+            "timeout=%.6f s, update_count=%llu, received_command_count=%llu. Writing zero.",
+            static_cast<unsigned long long>(stale_event_log_count_),
+            command_age_sec, command_timeout_sec_,
+            static_cast<unsigned long long>(update_count_),
+            static_cast<unsigned long long>(received_command_count_));
+      }
       RCLCPP_WARN_THROTTLE(
           get_node()->get_logger(), *get_node()->get_clock(), kWarningThrottleMs,
           "Refusing stale EffortCommand: age %.3f s, timeout %.3f s. Writing zero.",
@@ -95,6 +115,7 @@ controller_interface::return_type CPPRelayer::update(
   std::copy(zero_jacobian_flange_.begin(), zero_jacobian_flange_.end(), state_param.zero_jacobian_flange.begin());
   std::copy(gravity_.begin(), gravity_.end(), state_param.gravity.begin());
   state_param_pub_->publish(state_param);
+  maybeLogDiagnostics(now);
 
   return controller_interface::return_type::OK;
 }
@@ -104,6 +125,9 @@ CallbackReturn CPPRelayer::on_init() {
     auto_declare<std::string>("arm_id", "panda");
     auto_declare<double>("command_timeout_sec", kDefaultCommandTimeoutSec);
     auto_declare<bool>("require_fresh_command_on_activate", true);
+    auto_declare<bool>("diagnostics_enabled", true);
+    auto_declare<double>("diagnostics_log_period_sec", 5.0);
+    auto_declare<int>("log_first_n_stale_events", 5);
   } 
   catch (const std::exception& e) {
     fprintf(stderr, "Exception thrown during init stage with message: %s \n", e.what());
@@ -119,12 +143,31 @@ CallbackReturn CPPRelayer::on_configure(
     command_timeout_sec_ = get_node()->get_parameter("command_timeout_sec").as_double();
     require_fresh_command_on_activate_ =
         get_node()->get_parameter("require_fresh_command_on_activate").as_bool();
+    diagnostics_enabled_ = get_node()->get_parameter("diagnostics_enabled").as_bool();
+    diagnostics_log_period_sec_ =
+        get_node()->get_parameter("diagnostics_log_period_sec").as_double();
+    log_first_n_stale_events_ =
+        get_node()->get_parameter("log_first_n_stale_events").as_int();
     if (!std::isfinite(command_timeout_sec_) || command_timeout_sec_ <= 0.0) {
       RCLCPP_WARN(
           get_node()->get_logger(),
           "Invalid command_timeout_sec %.3f. Falling back to safe default %.3f s.",
           command_timeout_sec_, kDefaultCommandTimeoutSec);
       command_timeout_sec_ = kDefaultCommandTimeoutSec;
+    }
+    if (!std::isfinite(diagnostics_log_period_sec_) || diagnostics_log_period_sec_ <= 0.0) {
+      RCLCPP_WARN(
+          get_node()->get_logger(),
+          "Invalid diagnostics_log_period_sec %.3f. Falling back to 5.000 s.",
+          diagnostics_log_period_sec_);
+      diagnostics_log_period_sec_ = 5.0;
+    }
+    if (log_first_n_stale_events_ < 0) {
+      RCLCPP_WARN(
+          get_node()->get_logger(),
+          "Invalid log_first_n_stale_events %d. Falling back to 5.",
+          log_first_n_stale_events_);
+      log_first_n_stale_events_ = 5;
     }
   } 
   catch (const std::exception& e) {
@@ -151,9 +194,14 @@ CallbackReturn CPPRelayer::on_configure(
     RCLCPP_INFO(
         get_node()->get_logger(),
         "cpp_relayer configured with command_timeout_sec=%.3f s, "
-        "require_fresh_command_on_activate=%s; stale commands will be zeroed.",
+        "require_fresh_command_on_activate=%s; stale commands will be zeroed. "
+        "diagnostics_enabled=%s, diagnostics_log_period_sec=%.3f, "
+        "log_first_n_stale_events=%d.",
         command_timeout_sec_,
-        require_fresh_command_on_activate_ ? "true" : "false");
+        require_fresh_command_on_activate_ ? "true" : "false",
+        diagnostics_enabled_ ? "true" : "false",
+        diagnostics_log_period_sec_,
+        log_first_n_stale_events_);
     return CallbackReturn::SUCCESS;
   } 
   catch (const std::exception& e) {
@@ -174,6 +222,7 @@ CallbackReturn CPPRelayer::on_activate(
   gravity_.fill(0.0);
 
   const auto now = get_node()->get_clock()->now();
+  last_diagnostics_log_time_ = now;
   Vector7d command_to_write = Vector7d::Zero();
   bool has_command = false;
   bool command_is_fresh = false;
@@ -303,6 +352,7 @@ void CPPRelayer::effortCommandCallback(const custom_msgs::msg::EffortCommand::Sh
     tau_d_received_ = command;
     last_command_time_ = get_node()->get_clock()->now();
     received_effort_command_ = true;
+    ++received_command_count_;
   }
 }
 
@@ -316,6 +366,31 @@ bool CPPRelayer::isCommandFresh(
     const rclcpp::Time& now, const rclcpp::Time& last_command_time) const {
   const auto command_age = now - last_command_time;
   return command_age.nanoseconds() >= 0 && command_age.seconds() <= command_timeout_sec_;
+}
+
+void CPPRelayer::maybeLogDiagnostics(const rclcpp::Time& now) {
+  if (!diagnostics_enabled_) {
+    return;
+  }
+
+  if (last_diagnostics_log_time_.nanoseconds() != 0) {
+    const auto elapsed = now - last_diagnostics_log_time_;
+    if (elapsed.nanoseconds() >= 0 && elapsed.seconds() < diagnostics_log_period_sec_) {
+      return;
+    }
+  }
+  last_diagnostics_log_time_ = now;
+
+  RCLCPP_INFO(
+      get_node()->get_logger(),
+      "[CPPRelayerDiag] updates=%llu, received_effort_commands=%llu, "
+      "stale_command_count=%llu, zero_fallback_count=%llu, "
+      "last_command_age=%.6f s, max_command_age=%.6f s, timeout=%.6f s.",
+      static_cast<unsigned long long>(update_count_),
+      static_cast<unsigned long long>(received_command_count_),
+      static_cast<unsigned long long>(stale_command_count_),
+      static_cast<unsigned long long>(zero_fallback_count_),
+      last_command_age_sec_, max_command_age_sec_, command_timeout_sec_);
 }
 
 void CPPRelayer::updateStateParam() {
