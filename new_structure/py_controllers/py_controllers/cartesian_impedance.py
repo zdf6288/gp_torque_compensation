@@ -12,6 +12,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 import signal
 import csv
+import json
 import traceback
 import sys
 import os, pickle
@@ -45,6 +46,10 @@ GOAL12_TIMING_FIELDS = [
     "residual_update_ms",
     "data_recording_enabled",
     "gp_prediction_enabled",
+    "gp_prediction_stride",
+    "gp_prediction_updated_this_tick",
+    "gp_prediction_age_sec",
+    "gp_output_fresh",
     "gp_online_update_enabled",
     "gp_compensation_enabled",
     "gp_compensation_source",
@@ -52,6 +57,8 @@ GOAL12_TIMING_FIELDS = [
     "gp_compensation_clip_nm",
     "gp_compensation_disable_joint7",
     "delay_steps",
+    "future_trajectory_request_stride",
+    "future_trajectory_updated_this_tick",
     "local_gp_called",
     "cloud_like_gp_called",
     "add_point_count",
@@ -329,6 +336,12 @@ class CartesianImpedanceController(Node):
         self.gp_scaled_history = []
         self.gp_applied_history = []
         self.gp_clip_active_history = []
+        self.gp_prediction_stride_history = []
+        self.gp_prediction_updated_this_tick_history = []
+        self.gp_prediction_age_sec_history = []
+        self.gp_output_fresh_history = []
+        self.future_trajectory_request_stride_history = []
+        self.future_trajectory_updated_this_tick_history = []
         self.gp_shadow_historical_available_history = []
         self.gp_shadow_local_raw_history = []
         self.gp_shadow_cloud_raw_history = []
@@ -362,8 +375,18 @@ class CartesianImpedanceController(Node):
         self.hist_db_pred_history = []
         self.hist_db_gated_pred_history = []
         self.hist_db_query_stride_history = []
+        self.hist_db_query_updated_this_tick_history = []
         self.hist_db_query_reused_history = []
         self.hist_db_query_counter_history = []
+        self.hist_db_preflight_phase_history = []
+        self.hist_db_preflight_pass_history = []
+        self.hist_db_preflight_active_allowed_history = []
+        self.hist_db_preflight_sample_count_history = []
+        self.hist_db_preflight_pass_ratio_history = []
+        self.hist_db_preflight_nearest_mean_history = []
+        self.hist_db_preflight_nearest_p95_history = []
+        self.hist_db_preflight_nearest_max_history = []
+        self.hist_db_runtime_fallback_used_history = []
         self.hist_soft_valid_history = []
         self.hist_soft_nearest_distance_history = []
         self.hist_soft_raw_w_hist_history = []
@@ -439,6 +462,16 @@ class CartesianImpedanceController(Node):
         self.declare_parameter("gp_historical_db_query_stride", 1)
         self.declare_parameter("gp_historical_db_disable_when_online_update", True)
         self.declare_parameter("gp_historical_db_fallback_source", "cloud")
+        self.declare_parameter("gp_historical_db_preflight_enabled", False)
+        self.declare_parameter("gp_historical_db_preflight_required", False)
+        self.declare_parameter("gp_disable_silent_hist_fallback", False)
+        self.declare_parameter("gp_historical_db_preflight_mode", "segment")
+        self.declare_parameter("gp_historical_db_preflight_duration_sec", 5.0)
+        self.declare_parameter("gp_historical_db_preflight_min_samples", 50)
+        self.declare_parameter("gp_historical_db_preflight_min_pass_ratio", 0.95)
+        self.declare_parameter("gp_historical_db_preflight_p95_max_distance", 1.5)
+        self.declare_parameter("gp_historical_db_preflight_max_distance", 2.0)
+        self.declare_parameter("gp_historical_db_preflight_log_first_n", 5)
         self.declare_parameter("gp_triple_weight_mode", "inverse_rmse")
         self.declare_parameter("gp_triple_weight_local", 0.10)
         self.declare_parameter("gp_triple_weight_cloud", 0.20)
@@ -472,11 +505,15 @@ class CartesianImpedanceController(Node):
         self.declare_parameter("timing_output_dir", "outputs/goal12_controller_timing")
         self.declare_parameter("deadline_ratio_warn_threshold", 0.8)
         self.declare_parameter("gp_prediction_stride", 5)
+        self.declare_parameter("gp_output_timeout_sec", 0.5)
         self.declare_parameter("future_trajectory_request_stride", 5)
 
         self.gp_prediction_enabled = self._get_bool_parameter("gp_prediction_enabled")
         self.gp_prediction_stride = self._get_bounded_int_parameter(
             "gp_prediction_stride", 5, 1, 100
+        )
+        self.gp_output_timeout_sec = self._get_positive_float_parameter(
+            "gp_output_timeout_sec", 0.5
         )
         self.future_trajectory_request_stride = self._get_bounded_int_parameter(
             "future_trajectory_request_stride", 5, 1, 100
@@ -546,6 +583,44 @@ class CartesianImpedanceController(Node):
         self.gp_historical_db_fallback_source = str(
             self.get_parameter("gp_historical_db_fallback_source").value
         ).strip().lower()
+        self.gp_historical_db_preflight_enabled = self._get_bool_parameter(
+            "gp_historical_db_preflight_enabled"
+        )
+        self.gp_historical_db_preflight_required = self._get_bool_parameter(
+            "gp_historical_db_preflight_required"
+        )
+        self.gp_disable_silent_hist_fallback = self._get_bool_parameter(
+            "gp_disable_silent_hist_fallback"
+        )
+        self.gp_historical_db_preflight_mode = str(
+            self.get_parameter("gp_historical_db_preflight_mode").value
+        ).strip().lower()
+        self.gp_historical_db_preflight_duration_sec = (
+            self._get_nonnegative_float_parameter(
+                "gp_historical_db_preflight_duration_sec", 5.0
+            )
+        )
+        self.gp_historical_db_preflight_min_samples = self._get_bounded_int_parameter(
+            "gp_historical_db_preflight_min_samples", 50, 1, 1000000
+        )
+        self.gp_historical_db_preflight_min_pass_ratio = (
+            self._get_bounded_float_parameter(
+                "gp_historical_db_preflight_min_pass_ratio", 0.95, 0.0, 1.0
+            )
+        )
+        self.gp_historical_db_preflight_p95_max_distance = (
+            self._get_positive_float_parameter(
+                "gp_historical_db_preflight_p95_max_distance", 1.5
+            )
+        )
+        self.gp_historical_db_preflight_max_distance = (
+            self._get_positive_float_parameter(
+                "gp_historical_db_preflight_max_distance", 2.0
+            )
+        )
+        self.gp_historical_db_preflight_log_first_n = self._get_bounded_int_parameter(
+            "gp_historical_db_preflight_log_first_n", 5, 0, 1000000
+        )
         self.gp_triple_weight_mode = str(
             self.get_parameter("gp_triple_weight_mode").value
         ).strip().lower()
@@ -688,6 +763,14 @@ class CartesianImpedanceController(Node):
             "combined": 3,
         }[self.gp_historical_db_fallback_source]
 
+        valid_preflight_modes = ("single", "segment", "single_and_segment")
+        if self.gp_historical_db_preflight_mode not in valid_preflight_modes:
+            self.get_logger().warn(
+                "[GP Hist DB] Invalid gp_historical_db_preflight_mode="
+                f"'{self.gp_historical_db_preflight_mode}', falling back to 'segment'"
+            )
+            self.gp_historical_db_preflight_mode = "segment"
+
         valid_gp_triple_weight_modes = ("fixed", "inverse_rmse")
         if self.gp_triple_weight_mode not in valid_gp_triple_weight_modes:
             self.get_logger().warn(
@@ -780,6 +863,9 @@ class CartesianImpedanceController(Node):
             f"gp_compensation_clip_nm={self.gp_compensation_clip_nm}, "
             f"gp_compensation_disable_joint7={self.gp_compensation_disable_joint7}, "
             f"delay_steps={self.delay_steps}, "
+            f"gp_prediction_stride={self.gp_prediction_stride}, "
+            f"gp_output_timeout_sec={self.gp_output_timeout_sec}, "
+            f"future_trajectory_request_stride={self.future_trajectory_request_stride}, "
             f"control_frequency={self.control_frequency}, "
             f"run_name='{self.run_name}', "
             f"data_output_dir='{self.data_output_dir}'"
@@ -817,6 +903,10 @@ class CartesianImpedanceController(Node):
             "disable_when_online_update="
             f"{self.gp_historical_db_disable_when_online_update}, "
             f"fallback_source='{self.gp_historical_db_fallback_source}'; "
+            f"preflight_enabled={self.gp_historical_db_preflight_enabled}, "
+            f"preflight_required={self.gp_historical_db_preflight_required}, "
+            f"preflight_mode='{self.gp_historical_db_preflight_mode}', "
+            f"disable_silent_fallback={self.gp_disable_silent_hist_fallback}; "
             "active only with explicit hist_db/triple/triple_dynamic source"
         )
         self.get_logger().info(
@@ -882,11 +972,17 @@ class CartesianImpedanceController(Node):
             self.get_logger().info("[GOAL12 Timing] Timing logging disabled by default")
 
         self._reset_gp_shadow_state()
+        self._reset_historical_db_preflight_state()
         self._reset_historical_residual_db_shadow_state()
 
         self.gp_stride = self.gp_prediction_stride
         self.gp_counter = 0
         self.future_trajectory_request_counter = 0
+        self._gp_prediction_updated_this_tick = 0
+        self._last_gp_prediction_time = None
+        self._last_valid_gp_prediction = False
+        self.gp_prediction_age_sec = 0.0
+        self.gp_output_fresh = 0
         self.cloud_counter = 0
         self.last_q = np.zeros(7)
         self.last_dq = np.zeros(7)
@@ -913,6 +1009,7 @@ class CartesianImpedanceController(Node):
         self.y_hat_local = np.zeros(7)
         self.y_hat_local_history = []
         self.offline_limit = 0
+        self._reset_gp_model_diagnostics()
 
         # ===== local GP history memory =====
         self.printer = 0
@@ -1042,6 +1139,9 @@ class CartesianImpedanceController(Node):
 
         # 存最新一次未来轨迹
         self._latest_future_traj = None   # dict: {"x_des": np.array(6,), "dx_des": ..., "ddx_des": ...}
+        self._last_future_trajectory_time = None
+        self._future_request_pending = False
+        self._future_trajectory_updated_this_tick = 0
         self._future_traj_counter = 0
         self._future_traj_warned = False
 
@@ -1104,6 +1204,12 @@ class CartesianImpedanceController(Node):
                 "csv_append_ms": 0.0,
                 "state_buffer_append_ms": 0.0,
                 "residual_update_ms": 0.0,
+                "gp_prediction_stride": self.gp_prediction_stride,
+                "gp_prediction_updated_this_tick": 0,
+                "gp_prediction_age_sec": self.gp_prediction_age_sec,
+                "gp_output_fresh": int(self.gp_output_fresh),
+                "future_trajectory_request_stride": self.future_trajectory_request_stride,
+                "future_trajectory_updated_this_tick": 0,
                 "local_gp_called": 0,
                 "cloud_like_gp_called": 0,
                 "add_point_count": 0,
@@ -1128,6 +1234,10 @@ class CartesianImpedanceController(Node):
                 "callback_deadline_miss": int(callback_wall_ms > deadline_ms),
                 "data_recording_enabled": int(bool(self.data_recording_enabled)),
                 "gp_prediction_enabled": int(bool(self.gp_prediction_enabled)),
+                "gp_prediction_stride": int(self.gp_prediction_stride),
+                "gp_prediction_updated_this_tick": int(self._gp_prediction_updated_this_tick),
+                "gp_prediction_age_sec": float(self.gp_prediction_age_sec),
+                "gp_output_fresh": int(self.gp_output_fresh),
                 "gp_online_update_enabled": int(bool(self.gp_online_update_enabled)),
                 "gp_compensation_enabled": int(bool(self.gp_compensation_enabled)),
                 "gp_compensation_source": self.gp_compensation_source,
@@ -1135,6 +1245,8 @@ class CartesianImpedanceController(Node):
                 "gp_compensation_clip_nm": self.gp_compensation_clip_nm,
                 "gp_compensation_disable_joint7": int(bool(self.gp_compensation_disable_joint7)),
                 "delay_steps": self.delay_steps,
+                "future_trajectory_request_stride": int(self.future_trajectory_request_stride),
+                "future_trajectory_updated_this_tick": int(self._future_trajectory_updated_this_tick),
             })
             self.timing_history.append(timing_row)
         except Exception as e:
@@ -1169,6 +1281,10 @@ class CartesianImpedanceController(Node):
                 "csv_save_ms": csv_save_ms,
                 "data_recording_enabled": int(bool(self.data_recording_enabled)),
                 "gp_prediction_enabled": int(bool(self.gp_prediction_enabled)),
+                "gp_prediction_stride": int(self.gp_prediction_stride),
+                "gp_prediction_updated_this_tick": int(self._gp_prediction_updated_this_tick),
+                "gp_prediction_age_sec": float(self.gp_prediction_age_sec),
+                "gp_output_fresh": int(self.gp_output_fresh),
                 "gp_online_update_enabled": int(bool(self.gp_online_update_enabled)),
                 "gp_compensation_enabled": int(bool(self.gp_compensation_enabled)),
                 "gp_compensation_source": self.gp_compensation_source,
@@ -1176,6 +1292,8 @@ class CartesianImpedanceController(Node):
                 "gp_compensation_clip_nm": self.gp_compensation_clip_nm,
                 "gp_compensation_disable_joint7": int(bool(self.gp_compensation_disable_joint7)),
                 "delay_steps": self.delay_steps,
+                "future_trajectory_request_stride": int(self.future_trajectory_request_stride),
+                "future_trajectory_updated_this_tick": int(self._future_trajectory_updated_this_tick),
             })
             self.timing_history.append(timing_row)
         except Exception as e:
@@ -1297,6 +1415,22 @@ class CartesianImpedanceController(Node):
             )
             return float(default_value)
 
+    def _get_bounded_float_parameter(self, name, default_value, min_value, max_value):
+        try:
+            raw_value = self.get_parameter(name).value
+            if isinstance(raw_value, bool):
+                raise ValueError
+            value = float(raw_value)
+            if not np.isfinite(value) or value < min_value or value > max_value:
+                raise ValueError
+            return value
+        except (TypeError, ValueError, OverflowError):
+            self.get_logger().warn(
+                f"Parameter '{name}' must be a finite value in [{min_value}, {max_value}]; "
+                f"using default {default_value}"
+            )
+            return float(default_value)
+
     def _get_bounded_int_parameter(self, name, default_value, min_value, max_value):
         try:
             raw_value = self.get_parameter(name).value
@@ -1318,6 +1452,79 @@ class CartesianImpedanceController(Node):
                 f"using default {default_value}"
             )
             return int(default_value)
+
+    def _begin_control_tick(self):
+        self._gp_prediction_updated_this_tick = 0
+        self.hist_db_query_updated_this_tick = 0
+        self.hist_db_runtime_fallback_used = 0
+        self._future_trajectory_updated_this_tick = 0
+
+    def _should_run_gp_prediction_this_tick(self):
+        self.gp_counter += 1
+        should_update = self.gp_counter % self.gp_prediction_stride == 0
+        self._gp_prediction_updated_this_tick = int(should_update)
+        return should_update
+
+    def _gp_outputs_are_valid(self):
+        vector_values = (
+            self.y_hat_local,
+            self.y_hat_cloud,
+            self.y_hat_combined,
+        )
+        variance_values = (
+            self.var_local,
+            self.var_cloud,
+        )
+
+        try:
+            for value in vector_values:
+                arr = np.asarray(value, dtype=float)
+                if arr.shape != (7,) or not np.all(np.isfinite(arr)):
+                    return False
+            for value in variance_values:
+                arr = np.asarray(value, dtype=float)
+                if (
+                    arr.shape != (7,)
+                    or not np.all(np.isfinite(arr))
+                    or np.any(arr <= 0.0)
+                ):
+                    return False
+        except (TypeError, ValueError):
+            return False
+
+        return True
+
+    def _mark_gp_prediction_result(self, t_now):
+        if self._gp_outputs_are_valid():
+            self._last_valid_gp_prediction = True
+            self._last_gp_prediction_time = t_now
+        else:
+            self._last_valid_gp_prediction = False
+            self._last_gp_prediction_time = None
+            self.y_hat_local = np.zeros(7, dtype=float)
+            self.y_hat_cloud = np.zeros(7, dtype=float)
+            self.y_hat_combined = np.zeros(7, dtype=float)
+            self.var_local = np.ones(7, dtype=float) * 1e6
+            self.var_cloud = np.ones(7, dtype=float) * 1e6
+
+        self._update_gp_output_freshness(t_now)
+
+    def _update_gp_output_freshness(self, t_now):
+        self.gp_prediction_age_sec = 0.0
+        self.gp_output_fresh = 0
+        if not self._last_valid_gp_prediction or self._last_gp_prediction_time is None:
+            return
+
+        try:
+            age_sec = (t_now - self._last_gp_prediction_time).nanoseconds / 1e9
+        except Exception:
+            age_sec = self.gp_output_timeout_sec + 1.0
+
+        if not np.isfinite(age_sec) or age_sec < 0.0:
+            age_sec = self.gp_output_timeout_sec + 1.0
+
+        self.gp_prediction_age_sec = float(age_sec)
+        self.gp_output_fresh = int(age_sec <= self.gp_output_timeout_sec)
 
     def dls_dyn_pinv(self, J, M, lam):
         """
@@ -1471,54 +1678,59 @@ class CartesianImpedanceController(Node):
         # 这不改变现有 Cartesian 分支的 GP 调用语义。
         if self.use_gp and self.gp_prediction_enabled:
             gp_total_start = time.perf_counter() if timing_row is not None else None
-            y_hat_local, var_local = self._gp_predict_and_update(
-                q,
-                self.dq_des_joint,
-                self.ddq_des_joint,
-                self.tau_residual_filtered,
-                self.gp_models_small,
-                update=self.gp_online_update_enabled,
-                timing_label="local",
-                timing_row=timing_row
-            )
-            self.y_hat_local = y_hat_local
-            self.var_local = var_local
-            if (
-                self.gp_shadow_paper_fusion_logging_enabled
-                and self.gp_historical_shadow_enabled
-                and self.gp_historical_source_mode == "local_prediction_pool"
-            ):
-                self._gp_local_feature_shadow = self._build_gp_shadow_feature(
-                    q, self.dq_des_joint
+            if self._should_run_gp_prediction_this_tick():
+                y_hat_local, var_local = self._gp_predict_and_update(
+                    q,
+                    self.dq_des_joint,
+                    self.ddq_des_joint,
+                    self.tau_residual_filtered,
+                    self.gp_models_small,
+                    update=self.gp_online_update_enabled,
+                    timing_label="local",
+                    timing_row=timing_row
                 )
-                self._gp_local_prediction_sequence_shadow += 1
+                self.y_hat_local = y_hat_local
+                self.var_local = var_local
+                if (
+                    self.gp_shadow_paper_fusion_logging_enabled
+                    and self.gp_historical_shadow_enabled
+                    and self.gp_historical_source_mode == "local_prediction_pool"
+                ):
+                    self._gp_local_feature_shadow = self._build_gp_shadow_feature(
+                        q, self.dq_des_joint
+                    )
+                    self._gp_local_prediction_sequence_shadow += 1
 
-            y_hat_cloud_current, var_cloud_current = self._gp_predict_and_update(
-                q,
-                self.dq_des_joint,
-                self.ddq_des_joint,
-                self.tau_residual_filtered,
-                self.gp_models_big,
-                update=self.gp_online_update_enabled,
-                timing_label="cloud_like",
-                timing_row=timing_row
-            )
-            self.y_hat_cloud_current = y_hat_cloud_current.copy()
-            self.y_hat_cloud, self.var_cloud = self._delay_cloud_like_output(
-                y_hat_cloud_current,
-                var_cloud_current
-            )
+                y_hat_cloud_current, var_cloud_current = self._gp_predict_and_update(
+                    q,
+                    self.dq_des_joint,
+                    self.ddq_des_joint,
+                    self.tau_residual_filtered,
+                    self.gp_models_big,
+                    update=self.gp_online_update_enabled,
+                    timing_label="cloud_like",
+                    timing_row=timing_row
+                )
+                self.y_hat_cloud_current = y_hat_cloud_current.copy()
+                self.y_hat_cloud, self.var_cloud = self._delay_cloud_like_output(
+                    y_hat_cloud_current,
+                    var_cloud_current
+                )
 
-            eps = 1e-8
-            v_l = np.maximum(self.var_local, eps)
-            v_c = np.maximum(self.var_cloud, eps)
-            prec_l = 1.0 / v_l
-            prec_c = 1.0 / v_c
-            w_l = prec_l / (prec_l + prec_c)
-            self.y_hat_combined = w_l * self.y_hat_local + (1.0 - w_l) * self.y_hat_cloud
-            self._update_historical_residual_db_shadow_state(q, dq)
-            if gp_total_start is not None:
-                self._timing_add_ms(timing_row, "gp_total_ms", gp_total_start)
+                eps = 1e-8
+                v_l = np.maximum(self.var_local, eps)
+                v_c = np.maximum(self.var_cloud, eps)
+                prec_l = 1.0 / v_l
+                prec_c = 1.0 / v_c
+                w_l = prec_l / (prec_l + prec_c)
+                self.y_hat_combined = w_l * self.y_hat_local + (1.0 - w_l) * self.y_hat_cloud
+                self._mark_gp_prediction_result(t_now)
+                if gp_total_start is not None:
+                    self._timing_add_ms(timing_row, "gp_total_ms", gp_total_start)
+            else:
+                self._update_gp_output_freshness(t_now)
+
+            self._update_historical_residual_db_shadow_state(q, dq, t_now)
 
         self._update_gp_shadow_logging_state(q, self.dq_des_joint)
         self._tau_nominal = tau.copy()
@@ -1531,6 +1743,7 @@ class CartesianImpedanceController(Node):
         try:
             res = future.result()
         except Exception as e:
+            self._future_request_pending = False
             self.get_logger().error(f"[Controller] /future_task_space call failed: {e}")
             return
 
@@ -1538,29 +1751,57 @@ class CartesianImpedanceController(Node):
         dx_f = np.array(res.dx_des, dtype=float)
         ddx_f = np.array(res.ddx_des, dtype=float)
 
+        if (
+            x_f.ndim != 1
+            or dx_f.ndim != 1
+            or ddx_f.ndim != 1
+            or x_f.shape[0] < 3
+            or dx_f.shape[0] < 5
+            or ddx_f.shape[0] < 5
+            or not np.all(np.isfinite(x_f))
+            or not np.all(np.isfinite(dx_f))
+            or not np.all(np.isfinite(ddx_f))
+        ):
+            self._future_request_pending = False
+            return
+
         self._latest_future_traj = {
             "x_des": x_f,
             "dx_des": dx_f,
             "ddx_des": ddx_f,
         }
+        self._last_future_trajectory_time = self.get_clock().now()
+        self._future_request_pending = False
         # 调试时可以看看
         self.get_logger().debug(f"Got future traj: x={x_f[:3]}")
     
     def request_future_trajectory(self, t_delay):
         if not self.gp_prediction_enabled:
-            return
+            return False
+
+        if self._future_request_pending:
+            return False
 
         if not self.future_traj_client.service_is_ready():
             if not self._future_traj_warned:
                 self.get_logger().warn("/future_task_space service not ready")
                 self._future_traj_warned = True
-            return
+            return False
 
         req = GetFutureTrajectory.Request()
         req.t_delay = float(t_delay)
 
-        future = self.future_traj_client.call_async(req)
-        future.add_done_callback(self._future_traj_response_callback)
+        try:
+            future = self.future_traj_client.call_async(req)
+            future.add_done_callback(self._future_traj_response_callback)
+        except Exception as e:
+            self._future_request_pending = False
+            self.get_logger().error(f"[Controller] /future_task_space request failed: {e}")
+            return False
+
+        self._future_request_pending = True
+        self._future_trajectory_updated_this_tick = 1
+        return True
 
     def gp_mode_callback(self, msg):
         self.gp_mode = msg.data
@@ -1624,6 +1865,7 @@ class CartesianImpedanceController(Node):
             # initialize t_initial, get t_elapsed, t_last and dt
             # initialize q_initial, get q, dq and ddq
             t_now = self.get_clock().now()
+            self._begin_control_tick()
             q = np.array(msg.position, dtype=float)
             self.q = q
 
@@ -1974,8 +2216,7 @@ class CartesianImpedanceController(Node):
             # === 控制循环的最后：按节拍触发一次“GP 更新”（本地 + 云端） ===
             if self.gp_active and self.use_gp and self.gp_prediction_enabled:
                 gp_total_start = time.perf_counter() if timing_row is not None else None
-                self.gp_counter += 1
-                gp_tick = (self.gp_counter % self.gp_prediction_stride == 0)
+                gp_tick = self._should_run_gp_prediction_this_tick()
                 if gp_tick:
                     self._reset_historical_residual_db_shadow_state()
                     # # ---------------------------------------------------------
@@ -2026,9 +2267,12 @@ class CartesianImpedanceController(Node):
                     w_l = prec_l / (prec_l + prec_c)
 
                     self.y_hat_combined = w_l * self.y_hat_local + (1.0 - w_l) * self.y_hat_cloud
-                    self._update_historical_residual_db_shadow_state(self.q, dq)
+                    self._mark_gp_prediction_result(t_now)
+                    self._update_historical_residual_db_shadow_state(self.q, dq, t_now)
                     if gp_total_start is not None:
                         self._timing_add_ms(timing_row, "gp_total_ms", gp_total_start)
+                else:
+                    self._update_gp_output_freshness(t_now)
 
             # tau = tau - self.y_hat_local
             # 默认 compensation 关闭时返回原始 tau；开启后才按原注释方向补偿。
@@ -2051,6 +2295,20 @@ class CartesianImpedanceController(Node):
                 self.gp_scaled_history.append(self._gp_scaled.tolist())
                 self.gp_applied_history.append(self._gp_applied.tolist())
                 self.gp_clip_active_history.append(self._gp_clip_active.tolist())
+                self.gp_prediction_stride_history.append(int(self.gp_prediction_stride))
+                self.gp_prediction_updated_this_tick_history.append(
+                    int(self._gp_prediction_updated_this_tick)
+                )
+                self.gp_prediction_age_sec_history.append(
+                    float(self.gp_prediction_age_sec)
+                )
+                self.gp_output_fresh_history.append(int(self.gp_output_fresh))
+                self.future_trajectory_request_stride_history.append(
+                    int(self.future_trajectory_request_stride)
+                )
+                self.future_trajectory_updated_this_tick_history.append(
+                    int(self._future_trajectory_updated_this_tick)
+                )
                 # triple diagnostics 只在 recording block 中写入，避免 trajectory 启动前增加额外实时负担。
                 self.gp_triple_raw_history.append(self.gp_triple_raw.tolist())
                 self.gp_triple_weight_local_history.append(float(self.gp_triple_weight_local))
@@ -2138,11 +2396,41 @@ class CartesianImpedanceController(Node):
                 self.hist_db_query_stride_history.append(
                     int(getattr(self, "gp_historical_db_query_stride", 1))
                 )
+                self.hist_db_query_updated_this_tick_history.append(
+                    int(getattr(self, "hist_db_query_updated_this_tick", 0))
+                )
                 self.hist_db_query_reused_history.append(
                     int(getattr(self, "hist_db_query_reused", 0))
                 )
                 self.hist_db_query_counter_history.append(
                     int(getattr(self, "hist_db_query_counter", 0))
+                )
+                self.hist_db_preflight_phase_history.append(
+                    str(getattr(self, "hist_db_preflight_phase", "disabled"))
+                )
+                self.hist_db_preflight_pass_history.append(
+                    int(getattr(self, "hist_db_preflight_pass", 0))
+                )
+                self.hist_db_preflight_active_allowed_history.append(
+                    int(getattr(self, "hist_db_preflight_active_allowed", 0))
+                )
+                self.hist_db_preflight_sample_count_history.append(
+                    int(getattr(self, "hist_db_preflight_sample_count", 0))
+                )
+                self.hist_db_preflight_pass_ratio_history.append(
+                    float(getattr(self, "hist_db_preflight_pass_ratio", 0.0))
+                )
+                self.hist_db_preflight_nearest_mean_history.append(
+                    float(getattr(self, "hist_db_preflight_nearest_mean", 0.0))
+                )
+                self.hist_db_preflight_nearest_p95_history.append(
+                    float(getattr(self, "hist_db_preflight_nearest_p95", 0.0))
+                )
+                self.hist_db_preflight_nearest_max_history.append(
+                    float(getattr(self, "hist_db_preflight_nearest_max", 0.0))
+                )
+                self.hist_db_runtime_fallback_used_history.append(
+                    int(getattr(self, "hist_db_runtime_fallback_used", 0))
                 )
                 self.hist_soft_valid_history.append(int(self.hist_soft_valid))
                 self.hist_soft_nearest_distance_history.append(
@@ -2430,12 +2718,95 @@ class CartesianImpedanceController(Node):
         # 4. 直接退出程序
         os._exit(0)
 
+    def _npz_scalar_to_python(self, value):
+        arr = np.asarray(value)
+        if arr.shape == ():
+            item = arr.item()
+            if isinstance(item, np.generic):
+                return item.item()
+            return item
+        if arr.size == 1:
+            item = arr.reshape(-1)[0]
+            if isinstance(item, np.generic):
+                return item.item()
+            return item
+        return arr.tolist()
+
+    def _read_historical_db_metadata(self, db):
+        metadata = {}
+        metadata_keys = (
+            "metadata_json",
+            "source_files",
+            "load_group",
+            "load_gripper",
+            "ee_load_model",
+            "q_scale_recommended",
+            "dq_scale_recommended",
+        )
+
+        for key in metadata_keys:
+            if key not in db.files:
+                continue
+            try:
+                value = self._npz_scalar_to_python(db[key])
+            except Exception:
+                continue
+            metadata[key] = value
+            if key == "source_files":
+                try:
+                    metadata["source_files_count"] = int(np.asarray(db[key]).size)
+                except Exception:
+                    pass
+
+        raw_json = metadata.get("metadata_json")
+        if raw_json:
+            try:
+                parsed = json.loads(str(raw_json))
+                if isinstance(parsed, dict):
+                    for key, value in parsed.items():
+                        metadata.setdefault(key, value)
+                    if "n_source_files" in parsed:
+                        metadata.setdefault("source_files_count", parsed["n_source_files"])
+            except json.JSONDecodeError as e:
+                self.get_logger().warn(
+                    "[GP Hist DB] metadata_json exists but cannot be parsed: "
+                    f"{e}"
+                )
+
+        return metadata
+
+    def _log_historical_db_metadata_summary(self, db_path):
+        metadata = self.gp_historical_db_metadata
+        if not metadata:
+            return
+
+        source_files_count = metadata.get("source_files_count")
+        if source_files_count is None and "source_files" in metadata:
+            try:
+                source_files_count = len(metadata["source_files"])
+            except TypeError:
+                source_files_count = 1
+
+        self.get_logger().info(
+            "[GP Hist DB] Metadata summary: "
+            f"path='{db_path}', "
+            f"target_key='{self.gp_historical_db_target_key}', "
+            f"source_files={source_files_count if source_files_count is not None else 'unknown'}, "
+            f"load_group='{metadata.get('load_group', '')}', "
+            f"load_gripper={metadata.get('load_gripper', '')}, "
+            f"ee_load_model='{metadata.get('ee_load_model', '')}', "
+            f"q_scale_recommended={metadata.get('q_scale_recommended', '')}, "
+            f"dq_scale_recommended={metadata.get('dq_scale_recommended', '')}"
+        )
+
     def _load_historical_residual_db(self):
         """Load a persistent residual DB once for shadow-only KNN queries."""
         self.gp_historical_db_loaded = False
         self.gp_historical_db_row_count = 0
         self.gp_historical_db_x_scaled = None
         self.gp_historical_db_y_residual = None
+        self.gp_historical_db_metadata = {}
+        self.gp_historical_db_target_key = ""
 
         if not self.gp_historical_db_enabled:
             self.get_logger().info("[GP Hist DB] Disabled; persistent DB will not be loaded.")
@@ -2453,30 +2824,28 @@ class CartesianImpedanceController(Node):
             if not os.path.isfile(db_path):
                 raise FileNotFoundError(db_path)
 
-            # Only numeric arrays are accessed. Object metadata arrays may exist
-            # in the archive, but they are intentionally not loaded.
             with np.load(db_path, allow_pickle=False) as db:
-                missing = [name for name in ("X", "Y_residual") if name not in db.files]
+                target_key = "Y_residual" if "Y_residual" in db.files else "Y"
+                missing = [name for name in ("X", target_key) if name not in db.files]
                 if missing:
                     raise ValueError(f"missing arrays: {missing}")
                 x = np.asarray(db["X"], dtype=float)
-                y_residual = np.asarray(db["Y_residual"], dtype=float)
+                y_residual = np.asarray(db[target_key], dtype=float)
+                metadata = self._read_historical_db_metadata(db)
 
             if x.ndim != 2 or x.shape[1] != 14:
                 raise ValueError(f"X must have shape (N, 14), got {x.shape}")
             if y_residual.ndim != 2 or y_residual.shape[1] != 7:
-                raise ValueError(
-                    f"Y_residual must have shape (N, 7), got {y_residual.shape}"
-                )
+                raise ValueError(f"{target_key} must have shape (N, 7), got {y_residual.shape}")
             if x.shape[0] != y_residual.shape[0]:
                 raise ValueError(
-                    "X and Y_residual row counts differ: "
+                    f"X and {target_key} row counts differ: "
                     f"{x.shape[0]} != {y_residual.shape[0]}"
                 )
             if x.shape[0] <= 0:
-                raise ValueError("X and Y_residual must contain at least one row")
+                raise ValueError(f"X and {target_key} must contain at least one row")
             if not np.all(np.isfinite(x)) or not np.all(np.isfinite(y_residual)):
-                raise ValueError("X and Y_residual must contain only finite values")
+                raise ValueError(f"X and {target_key} must contain only finite values")
 
             x_scaled = np.ascontiguousarray(
                 x / self.gp_historical_db_feature_scale.reshape(1, -1),
@@ -2492,22 +2861,204 @@ class CartesianImpedanceController(Node):
             )
             self.gp_historical_db_row_count = int(x.shape[0])
             self.gp_historical_db_loaded = True
+            self.gp_historical_db_target_key = target_key
+            self.gp_historical_db_metadata = metadata
             self.get_logger().info(
                 "[GP Hist DB] Loaded persistent residual DB: "
-                f"path='{db_path}', rows={self.gp_historical_db_row_count}"
+                f"path='{db_path}', rows={self.gp_historical_db_row_count}, "
+                f"target_key='{self.gp_historical_db_target_key}'"
             )
+            self._log_historical_db_metadata_summary(db_path)
         except Exception as e:
             self.gp_historical_db_loaded = False
             self.gp_historical_db_row_count = 0
             self.gp_historical_db_x_scaled = None
             self.gp_historical_db_y_residual = None
+            self.gp_historical_db_metadata = {}
+            self.gp_historical_db_target_key = ""
             self.get_logger().error(
                 "[GP Hist DB] Failed to load persistent residual DB; "
                 f"continuing with DB unavailable: {e}"
             )
 
+    def _reset_gp_model_diagnostics(self):
+        self.gp_model_local_loaded_count = 0
+        self.gp_model_cloud_loaded_count = 0
+        self.gp_model_cloud_fallback_count = 0
+        self.gp_model_empty_or_prior_count = 0
+        self.gp_model_cloud_uses_cloud_pkl = 0
+        self.gp_model_cloud_uses_local_fallback = 0
+        self.gp_model_local_files_by_joint = {}
+        self.gp_model_cloud_files_by_joint = {}
+
+    def _count_numeric_samples(self, value):
+        if value is None:
+            return None
+        try:
+            arr = np.asarray(value)
+            if arr.size == 0:
+                return 0
+            if arr.dtype.kind in ("b", "i", "u", "f"):
+                return int(np.sum(arr))
+        except Exception:
+            pass
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _model_sample_summary(self, model):
+        summary = {}
+        for attr in ("X_list", "Y_list", "y_list", "experts", "local_experts"):
+            value = getattr(model, attr, None)
+            if value is not None:
+                try:
+                    summary[f"{attr}_len"] = len(value)
+                except TypeError:
+                    summary[f"{attr}_len"] = "NA"
+
+        sample_count = None
+        for attr in ("localCount", "num_points", "N"):
+            count = self._count_numeric_samples(getattr(model, attr, None))
+            if count is not None:
+                summary[attr] = count
+                sample_count = count
+                break
+
+        if sample_count is None:
+            for attr in ("experts", "local_experts"):
+                experts = getattr(model, attr, None)
+                if experts is None:
+                    continue
+                total = 0
+                detected = False
+                try:
+                    for expert in experts:
+                        for count_attr in ("localCount", "num_points", "N"):
+                            count = self._count_numeric_samples(
+                                getattr(expert, count_attr, None)
+                            )
+                            if count is not None:
+                                total += count
+                                detected = True
+                                break
+                except TypeError:
+                    detected = False
+                if detected:
+                    summary[f"{attr}_sample_total"] = total
+                    sample_count = total
+                    break
+
+        x_list_len = summary.get("X_list_len")
+        empty_or_prior = (
+            x_list_len == 0
+            or sample_count is None
+            or sample_count <= 0
+        )
+        return sample_count, summary, empty_or_prior
+
+    def _format_gp_model_summary(self, summary):
+        if not summary:
+            return "no sample attributes detected"
+        return ", ".join(f"{key}={value}" for key, value in sorted(summary.items()))
+
+    def _apply_gp_model_runtime_cfg(self, model, joint, cfg):
+        try:
+            # 只有在模型里确实有这些属性时才改，避免旧版本崩溃。
+            if hasattr(model, "max_data_per_expert"):
+                model.max_data_per_expert = int(cfg["max_data_per_expert"])
+            if hasattr(model, "nearest_k"):
+                model.nearest_k = int(cfg["nearest_k"])
+            if hasattr(model, "max_experts"):
+                model.max_experts = int(cfg["max_experts"])
+            if hasattr(model, "timescale"):
+                model.timescale = float(cfg["timescale"])
+        except Exception as e:
+            self.get_logger().warn(
+                f"[GP] joint{joint}: override model params failed: {e}"
+            )
+
+    def _load_gp_model_pack(self, path, joint, role, cfg):
+        abs_path = os.path.abspath(path)
+        self.get_logger().debug(f"[GP] 尝试加载 {role} 模型: {abs_path}")
+
+        if not os.path.isfile(path):
+            self.get_logger().warn(f"[GP] {role} model file not found: {abs_path}")
+            return None
+
+        try:
+            with open(path, "rb") as f:
+                pack = pickle.load(f)
+
+            model = pack["model"]
+            stats = pack["stats"]   # (Xm, Xs, Ym, Ys)
+            Xm, Xs, Ym, Ys = stats
+            x_dim = int(len(Xm))    # 自动推断 14 或 21 维
+
+            self._apply_gp_model_runtime_cfg(model, joint, cfg)
+            sample_count, sample_summary, empty_or_prior = self._model_sample_summary(model)
+            if empty_or_prior:
+                self.gp_model_empty_or_prior_count += 1
+                self.get_logger().warn(
+                    "[GP Sanity] "
+                    f"joint{joint} {role} frozen model appears empty/prior-only; "
+                    "non-online prediction may be constant; "
+                    f"{self._format_gp_model_summary(sample_summary)}"
+                )
+
+            self.get_logger().debug(
+                f"[GP] joint{joint} {role} loaded: x_dim={x_dim}, "
+                f"file='{os.path.basename(path)}', "
+                f"sample_count={sample_count if sample_count is not None else 'unknown'}, "
+                f"max_data_per_expert={getattr(model, 'max_data_per_expert', 'NA')}, "
+                f"nearest_k={getattr(model, 'nearest_k', 'NA')}, "
+                f"max_experts={getattr(model, 'max_experts', 'NA')}, "
+                f"timescale={getattr(model, 'timescale', 'NA')}"
+            )
+
+            return {
+                "model": model,
+                "stats": stats,
+                "x_dim": x_dim,
+                "file_basename": os.path.basename(path),
+                "sample_count": sample_count,
+                "sample_summary": sample_summary,
+                "empty_or_prior": empty_or_prior,
+            }
+
+        except Exception as e:
+            self.get_logger().error(f"[GP] fail loading {abs_path}: {e}")
+            return None
+
+    def _format_gp_model_files_by_joint(self, files_by_joint):
+        parts = []
+        for joint in range(1, 8):
+            parts.append(f"joint{joint}:{files_by_joint.get(joint, 'missing')}")
+        return ", ".join(parts)
+
+    def _summarize_loaded_gp_models(self, dir_path):
+        self.get_logger().info(
+            "[GP] Model loading summary: "
+            f"gp_model_dir='{dir_path}', "
+            f"local_model_loaded_count={self.gp_model_local_loaded_count}, "
+            f"cloud_model_loaded_count={self.gp_model_cloud_loaded_count}, "
+            f"cloud_local_fallback_count={self.gp_model_cloud_fallback_count}, "
+            f"empty_or_prior_model_count={self.gp_model_empty_or_prior_count}, "
+            f"gp_online_update_enabled={self.gp_online_update_enabled}, "
+            f"gp_compensation_source='{self.gp_compensation_source}', "
+            f"delay_steps={self.delay_steps}"
+        )
+        self.get_logger().info(
+            "[GP] Local model file basenames per joint: "
+            f"{self._format_gp_model_files_by_joint(self.gp_model_local_files_by_joint)}"
+        )
+        self.get_logger().info(
+            "[GP] Cloud-like delayed GP model file basenames per joint: "
+            f"{self._format_gp_model_files_by_joint(self.gp_model_cloud_files_by_joint)}"
+        )
+
     def _load_gp_models(self, dir_path="./new_structure/gp/gp_models"):
-        """加载离线训练好的每关节GP，支持高维输入（14或21）""" 
+        """加载离线训练好的每关节GP，支持高维输入（14或21）"""
 
         if not self._ensure_skygp_import():
             self.get_logger().error("[GP] skygp import failed; pickle loading will likely fail.")
@@ -2516,161 +3067,100 @@ class CartesianImpedanceController(Node):
         abs_dir = os.path.abspath(dir_path)
         self.get_logger().info(f"[GP] 当前工作目录: {cwd}")
         self.get_logger().info(f"[GP] 模型目录绝对路径: {abs_dir}")
-        
-        # ===== 按关节定制 GP 参数（你可以自己改这些值） =====
-        # key = 关节号（1..6），"default" 为所有关节的默认配置
-        per_joint_cfg = {
+
+        self._reset_gp_model_diagnostics()
+
+        local_joint_cfg = {
             "default": dict(
                 max_data_per_expert=25,
                 nearest_k=1,
                 max_experts=1,
                 timescale=0.03,
             ),
-            # 举例：如果你想让 6 号关节忘得快一点、专家少一点，可以单独改：
             6: dict(
                 max_data_per_expert=25,
                 nearest_k=1,
                 max_experts=1,
+                timescale=0.05,
+            ),
+        }
+        cloud_joint_cfg = {
+            "default": dict(
+                max_data_per_expert=50,
+                nearest_k=2,
+                max_experts=10,
+                timescale=0.03,
+            ),
+            6: dict(
+                max_data_per_expert=50,
+                nearest_k=2,
+                max_experts=10,
                 timescale=0.05,
             ),
         }
 
         self.gp_models_small = {}
-        loaded = 0
-
-        # ==== 必须改成加载 1..7 ====
-        for j in range(1, 8):
-            p = os.path.join(dir_path, f"joint{j}_local.pkl")
-            abs_p = os.path.abspath(p)
-            self.get_logger().info(f"[GP] 尝试加载模型: {abs_p}")
-
-            if not os.path.isfile(p):
-                self.get_logger().warn(f"[GP] model file not found: {abs_p}")
-                continue
-
-            try:
-                with open(p, "rb") as f:
-                    pack = pickle.load(f)
-
-                model = pack["model"]
-                stats = pack["stats"]   # (Xm, Xs, Ym, Ys)
-                Xm, Xs, Ym, Ys = stats
-                x_dim = int(len(Xm))    # 自动推断 14 或 21 维
-
-                # ===== 在这里覆盖 SkyGP_rBCM 的参数 =====
-                cfg = per_joint_cfg.get(j, per_joint_cfg["default"])
-                try:
-                    # 只有在模型里确实有这些属性时才改，避免旧版本崩溃
-                    if hasattr(model, "max_data_per_expert"):
-                        model.max_data_per_expert = int(cfg["max_data_per_expert"])
-                    if hasattr(model, "nearest_k"):
-                        model.nearest_k = int(cfg["nearest_k"])
-                    if hasattr(model, "max_experts"):
-                        model.max_experts = int(cfg["max_experts"])
-                    if hasattr(model, "timescale"):
-                        model.timescale = float(cfg["timescale"])
-
-                    self.get_logger().info(
-                        f"[GP] joint{j} loaded: x_dim={x_dim}, "
-                        f"max_data_per_expert={getattr(model, 'max_data_per_expert', 'NA')}, "
-                        f"nearest_k={getattr(model, 'nearest_k', 'NA')}, "
-                        f"max_experts={getattr(model, 'max_experts', 'NA')}, "
-                        f"timescale={getattr(model, 'timescale', 'NA')}"
-                    )
-                except Exception as e:
-                    self.get_logger().warn(
-                        f"[GP] joint{j}: override model params failed: {e}"
-                    )
-
-                self.gp_models_small[j] = {
-                    "model": model,
-                    "stats": stats,
-                    "x_dim": x_dim
-                }
-
-                loaded += 1
-                self.get_logger().info(f"[GP] 成功加载关节{j}模型, x_dim={x_dim}")
-
-            except Exception as e:
-                self.get_logger().error(f"[GP] fail loading {abs_p}: {e}")
-        
-        per_joint_cfg = {
-            "default": dict(
-                max_data_per_expert=50,
-                nearest_k=2,
-                max_experts=10,
-                timescale=0.03,
-            ),
-            # 举例：如果你想让 6 号关节忘得快一点、专家少一点，可以单独改：
-            6: dict(
-                max_data_per_expert=50,
-                nearest_k=2,
-                max_experts=10,
-                timescale=0.05,
-            ),
-        }
-
         self.gp_models_big = {}
-        loaded = 0
 
-        # ==== 必须改成加载 1..7 ====
         for j in range(1, 8):
-            p = os.path.join(dir_path, f"joint{j}_local.pkl")
-            abs_p = os.path.abspath(p)
-            self.get_logger().info(f"[GP] 尝试加载模型: {abs_p}")
-
-            if not os.path.isfile(p):
-                self.get_logger().warn(f"[GP] model file not found: {abs_p}")
+            local_path = os.path.join(dir_path, f"joint{j}_local.pkl")
+            pack = self._load_gp_model_pack(
+                local_path,
+                j,
+                "local",
+                local_joint_cfg.get(j, local_joint_cfg["default"])
+            )
+            if pack is None:
                 continue
+            self.gp_models_small[j] = pack
+            self.gp_model_local_loaded_count += 1
+            self.gp_model_local_files_by_joint[j] = pack["file_basename"]
 
-            try:
-                with open(p, "rb") as f:
-                    pack = pickle.load(f)
+        for j in range(1, 8):
+            cloud_path = os.path.join(dir_path, f"joint{j}_cloud.pkl")
+            local_fallback_path = os.path.join(dir_path, f"joint{j}_local.pkl")
+            model_path = cloud_path
 
-                model = pack["model"]
-                stats = pack["stats"]   # (Xm, Xs, Ym, Ys)
-                Xm, Xs, Ym, Ys = stats
-                x_dim = int(len(Xm))    # 自动推断 14 或 21 维
-
-                # ===== 在这里覆盖 SkyGP_rBCM 的参数 =====
-                cfg = per_joint_cfg.get(j, per_joint_cfg["default"])
-                try:
-                    # 只有在模型里确实有这些属性时才改，避免旧版本崩溃
-                    if hasattr(model, "max_data_per_expert"):
-                        model.max_data_per_expert = int(cfg["max_data_per_expert"])
-                    if hasattr(model, "nearest_k"):
-                        model.nearest_k = int(cfg["nearest_k"])
-                    if hasattr(model, "max_experts"):
-                        model.max_experts = int(cfg["max_experts"])
-                    if hasattr(model, "timescale"):
-                        model.timescale = float(cfg["timescale"])
-
-                    self.get_logger().info(
-                        f"[GP] joint{j} loaded: x_dim={x_dim}, "
-                        f"max_data_per_expert={getattr(model, 'max_data_per_expert', 'NA')}, "
-                        f"nearest_k={getattr(model, 'nearest_k', 'NA')}, "
-                        f"max_experts={getattr(model, 'max_experts', 'NA')}, "
-                        f"timescale={getattr(model, 'timescale', 'NA')}"
-                    )
-                except Exception as e:
+            if not os.path.isfile(cloud_path):
+                if not os.path.isfile(local_fallback_path):
                     self.get_logger().warn(
-                        f"[GP] joint{j}: override model params failed: {e}"
+                        "[GP] cloud-like model file not found and no local fallback "
+                        f"exists for joint{j}: {os.path.abspath(cloud_path)}"
                     )
+                    continue
+                model_path = local_fallback_path
+                self.gp_model_cloud_fallback_count += 1
+                self.gp_model_cloud_uses_local_fallback = 1
+                self.get_logger().warn(
+                    "[GP] "
+                    f"joint{j}_cloud.pkl not found; using joint{j}_local.pkl as "
+                    "cloud-like local fallback. This is not an actual remote cloud "
+                    "model and must not be treated as a silent cloud model load."
+                )
+            else:
+                self.gp_model_cloud_uses_cloud_pkl = 1
 
-                self.gp_models_big[j] = {
-                    "model": model,
-                    "stats": stats,
-                    "x_dim": x_dim
-                }
+            pack = self._load_gp_model_pack(
+                model_path,
+                j,
+                "cloud-like",
+                cloud_joint_cfg.get(j, cloud_joint_cfg["default"])
+            )
+            if pack is None:
+                continue
+            self.gp_models_big[j] = pack
+            self.gp_model_cloud_loaded_count += 1
+            self.gp_model_cloud_files_by_joint[j] = pack["file_basename"]
 
-                loaded += 1
-                self.get_logger().info(f"[GP] 成功加载关节{j}模型, x_dim={x_dim}")
-
-            except Exception as e:
-                self.get_logger().error(f"[GP] fail loading {abs_p}: {e}")
-
-        self.gp_ready = (loaded > 0)
-        self.get_logger().info(f"[GP] 共加载 {loaded} 个模型，ready={self.gp_ready}")
+        self.gp_ready = (
+            self.gp_model_local_loaded_count > 0
+            or self.gp_model_cloud_loaded_count > 0
+        )
+        self._summarize_loaded_gp_models(dir_path)
+        self.get_logger().info(
+            f"[GP] 共加载 local={self.gp_model_local_loaded_count}, "
+            f"cloud-like={self.gp_model_cloud_loaded_count} 个模型，ready={self.gp_ready}"
+        )
 
     def _lowpass_vector(self, x_raw, x_prev, dt, cutoff_hz):
         """
@@ -2725,6 +3215,369 @@ class CartesianImpedanceController(Node):
     def _build_gp_shadow_feature(self, q, dq):
         """Build the same 14D [q, dq] feature used by the active GP predictor."""
         return np.concatenate([q, dq]).astype(np.float32)
+
+    def _historical_db_source_requested(self):
+        return (
+            bool(getattr(self, "gp_compensation_enabled", False))
+            and bool(getattr(self, "gp_prediction_enabled", False))
+            and getattr(self, "gp_compensation_source", "") == "hist_db"
+        )
+
+    def _reset_historical_db_preflight_state(self):
+        self.hist_db_preflight_enabled = int(
+            bool(self.gp_historical_db_preflight_enabled)
+        )
+        self.hist_db_preflight_required = int(
+            bool(self.gp_historical_db_preflight_required)
+        )
+        self.hist_db_preflight_mode = self.gp_historical_db_preflight_mode
+        self.hist_db_preflight_phase = (
+            "idle" if self.gp_historical_db_preflight_enabled else "disabled"
+        )
+        self.hist_db_preflight_pass = int(
+            not self.gp_historical_db_preflight_enabled
+        )
+        self.hist_db_preflight_active_allowed = int(
+            not self.gp_historical_db_preflight_enabled
+            or not self.gp_historical_db_preflight_required
+        )
+        self.hist_db_preflight_sample_count = 0
+        self.hist_db_preflight_pass_ratio = 0.0
+        self.hist_db_preflight_nearest_mean = 0.0
+        self.hist_db_preflight_nearest_p95 = 0.0
+        self.hist_db_preflight_nearest_max = 0.0
+        self.hist_db_runtime_fallback_used = 0
+        self._hist_db_preflight_start_time = None
+        self._hist_db_preflight_distances = []
+        self._hist_db_preflight_pass_count = 0
+        self._hist_db_preflight_distance_sum = 0.0
+        self._hist_db_preflight_probe_logged = False
+        self._hist_db_preflight_final_logged = False
+        self._hist_db_runtime_diag_count = 0
+
+    def _historical_db_result_passes_preflight_distance(self, result):
+        try:
+            nearest_distance = float(result["nearest_distance"])
+            return bool(
+                result["loaded"]
+                and result["query_valid"]
+                and not result.get("online_disabled", 0)
+                and result["k_used"] > 0
+                and np.isfinite(nearest_distance)
+                and nearest_distance <= self.gp_historical_db_preflight_max_distance
+            )
+        except (KeyError, TypeError, ValueError):
+            return False
+
+    def _historical_db_result_has_finite_distance(self, result):
+        try:
+            nearest_distance = float(result["nearest_distance"])
+            return bool(
+                result["loaded"]
+                and result["query_valid"]
+                and not result.get("online_disabled", 0)
+                and result["k_used"] > 0
+                and np.isfinite(nearest_distance)
+            )
+        except (KeyError, TypeError, ValueError):
+            return False
+
+    def _historical_db_preflight_fail_reason(self, result):
+        if not self.gp_historical_db_loaded:
+            return "db_not_loaded"
+        if self.gp_historical_db_row_count <= 0:
+            return "db_empty"
+        if not result.get("query_valid", 0):
+            return "query_not_valid"
+        if result.get("online_disabled", 0):
+            return "hist_db_disabled_while_online_update_enabled"
+        if result.get("k_used", 0) <= 0:
+            return "knn_unavailable"
+        try:
+            nearest_distance = float(result["nearest_distance"])
+        except (KeyError, TypeError, ValueError):
+            return "nearest_distance_invalid"
+        if not np.isfinite(nearest_distance):
+            return "nearest_distance_invalid"
+        if nearest_distance > self.gp_historical_db_preflight_max_distance:
+            return (
+                "nearest_distance_exceeds_preflight_max: "
+                f"{nearest_distance:.6f} > "
+                f"{self.gp_historical_db_preflight_max_distance:.6f}"
+            )
+        return "preflight_failed"
+
+    def _log_historical_db_preflight_probe_once(self, result):
+        if self._hist_db_preflight_probe_logged:
+            return
+        self._hist_db_preflight_probe_logged = True
+        distance_pass = self._historical_db_result_passes_preflight_distance(result)
+        message = (
+            "[GP Hist DB] Single-state preflight probe: "
+            f"source='{self.gp_compensation_source}', "
+            f"loaded={int(result.get('loaded', 0))}, "
+            f"rows={self.gp_historical_db_row_count}, "
+            f"k={result.get('k_used', 0)}, "
+            f"nearest_distance={float(result.get('nearest_distance', 0.0)):.6f}, "
+            f"max_distance={self.gp_historical_db_preflight_max_distance}, "
+            f"distance_pass={int(distance_pass)}, "
+            f"required={int(self.gp_historical_db_preflight_required)}, "
+            f"fallback_source='{self.gp_historical_db_fallback_source}'"
+        )
+        if distance_pass:
+            self.get_logger().info(message)
+        elif (
+            self.gp_historical_db_preflight_required
+            or self.gp_disable_silent_hist_fallback
+        ):
+            self.get_logger().error(message)
+        else:
+            self.get_logger().warn(message)
+
+    def _log_historical_db_preflight_final(self, passed, reason):
+        if self._hist_db_preflight_final_logged:
+            return
+        self._hist_db_preflight_final_logged = True
+        self._refresh_historical_db_preflight_full_stats()
+        message = (
+            "[GP Hist DB] Preflight "
+            f"{'PASS' if passed else 'FAIL'}: "
+            f"source='{self.gp_compensation_source}', "
+            f"phase='{self.hist_db_preflight_phase}', "
+            f"samples={self.hist_db_preflight_sample_count}, "
+            f"pass_ratio={self.hist_db_preflight_pass_ratio:.6f}, "
+            f"nearest_mean={self.hist_db_preflight_nearest_mean:.6f}, "
+            f"nearest_p95={self.hist_db_preflight_nearest_p95:.6f}, "
+            f"nearest_max={self.hist_db_preflight_nearest_max:.6f}, "
+            f"active_allowed={self.hist_db_preflight_active_allowed}, "
+            f"required={int(self.gp_historical_db_preflight_required)}, "
+            f"disable_silent_fallback={int(self.gp_disable_silent_hist_fallback)}, "
+            f"reason='{reason}'"
+        )
+        if passed:
+            self.get_logger().info(message)
+        elif (
+            self.gp_historical_db_preflight_required
+            or self.gp_disable_silent_hist_fallback
+        ):
+            self.get_logger().error(message)
+        else:
+            self.get_logger().warn(message)
+
+    def _set_historical_db_preflight_failed(self, reason):
+        self.hist_db_preflight_phase = "failed"
+        self.hist_db_preflight_pass = 0
+        self.hist_db_preflight_active_allowed = int(
+            not self.gp_historical_db_preflight_required
+        )
+        self._log_historical_db_preflight_final(False, reason)
+
+    def _set_historical_db_preflight_passed(self, reason):
+        self.hist_db_preflight_phase = "passed"
+        self.hist_db_preflight_pass = 1
+        self.hist_db_preflight_active_allowed = 1
+        self._log_historical_db_preflight_final(True, reason)
+
+    def _update_historical_db_preflight_stats(self, nearest_distance):
+        nearest_distance = float(nearest_distance)
+        self._hist_db_preflight_distances.append(nearest_distance)
+        self._hist_db_preflight_distance_sum += nearest_distance
+        if nearest_distance <= self.gp_historical_db_preflight_max_distance:
+            self._hist_db_preflight_pass_count += 1
+
+        self.hist_db_preflight_sample_count = len(self._hist_db_preflight_distances)
+        if self.hist_db_preflight_sample_count <= 0:
+            self.hist_db_preflight_pass_ratio = 0.0
+            self.hist_db_preflight_nearest_mean = 0.0
+            self.hist_db_preflight_nearest_p95 = 0.0
+            self.hist_db_preflight_nearest_max = 0.0
+            return
+
+        self.hist_db_preflight_pass_ratio = (
+            float(self._hist_db_preflight_pass_count)
+            / float(self.hist_db_preflight_sample_count)
+        )
+        self.hist_db_preflight_nearest_mean = (
+            self._hist_db_preflight_distance_sum
+            / float(self.hist_db_preflight_sample_count)
+        )
+        self.hist_db_preflight_nearest_max = max(
+            self.hist_db_preflight_nearest_max,
+            nearest_distance,
+        )
+
+    def _refresh_historical_db_preflight_full_stats(self):
+        distances = np.asarray(self._hist_db_preflight_distances, dtype=float)
+        self.hist_db_preflight_sample_count = int(distances.size)
+        if distances.size <= 0:
+            self.hist_db_preflight_pass_ratio = 0.0
+            self.hist_db_preflight_nearest_mean = 0.0
+            self.hist_db_preflight_nearest_p95 = 0.0
+            self.hist_db_preflight_nearest_max = 0.0
+            return
+
+        self.hist_db_preflight_pass_ratio = (
+            float(self._hist_db_preflight_pass_count) / float(distances.size)
+        )
+        self.hist_db_preflight_nearest_mean = float(
+            self._hist_db_preflight_distance_sum / float(distances.size)
+        )
+        self.hist_db_preflight_nearest_p95 = float(np.percentile(distances, 95.0))
+        self.hist_db_preflight_nearest_max = float(np.max(distances))
+
+    def _historical_db_preflight_elapsed_sec(self, t_now):
+        if self._hist_db_preflight_start_time is None:
+            if t_now is None:
+                return (
+                    self.hist_db_preflight_sample_count
+                    / max(float(self.control_frequency), 1e-6)
+                )
+            self._hist_db_preflight_start_time = t_now
+            return 0.0
+        if t_now is None:
+            return (
+                self.hist_db_preflight_sample_count
+                / max(float(self.control_frequency), 1e-6)
+            )
+        try:
+            elapsed = (
+                t_now - self._hist_db_preflight_start_time
+            ).nanoseconds / 1e9
+        except Exception:
+            elapsed = (
+                self.hist_db_preflight_sample_count
+                / max(float(self.control_frequency), 1e-6)
+            )
+        if not np.isfinite(elapsed) or elapsed < 0.0:
+            return 0.0
+        return float(elapsed)
+
+    def _update_historical_db_preflight_state(self, t_now, result, fresh_query):
+        if not self._historical_db_source_requested():
+            self.hist_db_preflight_phase = "disabled"
+            self.hist_db_preflight_active_allowed = 0
+            return
+
+        if not self.gp_historical_db_preflight_enabled:
+            self.hist_db_preflight_phase = "disabled"
+            self.hist_db_preflight_pass = 1
+            self.hist_db_preflight_active_allowed = 1
+            return
+
+        if self.hist_db_preflight_phase in ("passed", "failed"):
+            return
+
+        self._log_historical_db_preflight_probe_once(result)
+        single_pass = self._historical_db_result_passes_preflight_distance(result)
+
+        if self.gp_historical_db_preflight_mode == "single":
+            if single_pass:
+                self._set_historical_db_preflight_passed("single_state_pass")
+            else:
+                self._set_historical_db_preflight_failed(
+                    self._historical_db_preflight_fail_reason(result)
+                )
+            return
+
+        if (
+            self.gp_historical_db_preflight_mode == "single_and_segment"
+            and not single_pass
+        ):
+            self._set_historical_db_preflight_failed(
+                self._historical_db_preflight_fail_reason(result)
+            )
+            return
+
+        self.hist_db_preflight_phase = "segment_collecting"
+        self.hist_db_preflight_active_allowed = int(
+            not self.gp_historical_db_preflight_required
+        )
+        elapsed_sec = self._historical_db_preflight_elapsed_sec(t_now)
+
+        if fresh_query and self._historical_db_result_has_finite_distance(result):
+            self._update_historical_db_preflight_stats(
+                float(result["nearest_distance"])
+            )
+
+        if elapsed_sec < self.gp_historical_db_preflight_duration_sec:
+            return
+        if (
+            self.hist_db_preflight_sample_count
+            < self.gp_historical_db_preflight_min_samples
+        ):
+            self._refresh_historical_db_preflight_full_stats()
+            self._set_historical_db_preflight_failed("insufficient_preflight_samples")
+            return
+
+        self._refresh_historical_db_preflight_full_stats()
+        pass_ratio_ok = (
+            self.hist_db_preflight_pass_ratio
+            >= self.gp_historical_db_preflight_min_pass_ratio
+        )
+        p95_ok = (
+            self.hist_db_preflight_nearest_p95
+            <= self.gp_historical_db_preflight_p95_max_distance
+        )
+        max_ok = (
+            self.hist_db_preflight_nearest_max
+            <= self.gp_historical_db_preflight_max_distance
+        )
+        if pass_ratio_ok and p95_ok and max_ok:
+            self._set_historical_db_preflight_passed("segment_pass")
+        else:
+            reason_parts = []
+            if not pass_ratio_ok:
+                reason_parts.append("pass_ratio_below_threshold")
+            if not p95_ok:
+                reason_parts.append("p95_distance_above_threshold")
+            if not max_ok:
+                reason_parts.append("max_distance_above_threshold")
+            self._set_historical_db_preflight_failed(";".join(reason_parts))
+
+    def _historical_db_active_allowed(self):
+        if not self._historical_db_source_requested():
+            return False
+        if not self.gp_historical_db_preflight_required:
+            return True
+        if not self.gp_historical_db_preflight_enabled:
+            return True
+        return bool(self.hist_db_preflight_active_allowed)
+
+    def _maybe_log_hist_db_runtime_diag(self, selected_source):
+        if not self._historical_db_source_requested():
+            return
+        if self._hist_db_runtime_diag_count >= self.gp_historical_db_preflight_log_first_n:
+            return
+        if self.hist_db_preflight_phase in ("idle", "segment_collecting"):
+            return
+        if (
+            not self.hist_db_preflight_active_allowed
+            and not self.hist_db_runtime_fallback_used
+        ):
+            return
+
+        self._hist_db_runtime_diag_count += 1
+        message = (
+            "[GP Hist DB] Runtime active diagnostic: "
+            f"source='{self.gp_compensation_source}', "
+            f"available={int(self.hist_db_available)}, "
+            f"distance={float(self.hist_db_nearest_distance):.6f}, "
+            f"distance_pass={int(self.hist_db_distance_pass)}, "
+            f"preflight_pass={int(self.hist_db_preflight_pass)}, "
+            f"active_allowed={int(self.hist_db_preflight_active_allowed)}, "
+            f"fallback_used={int(self.hist_db_runtime_fallback_used)}, "
+            f"selected_source='{selected_source}'"
+        )
+        if self.hist_db_runtime_fallback_used:
+            if (
+                self.gp_historical_db_preflight_required
+                or self.gp_disable_silent_hist_fallback
+            ):
+                self.get_logger().error(message)
+            else:
+                self.get_logger().warn(message)
+        else:
+            self.get_logger().info(message)
 
     def _get_historical_residual_db_fallback_candidate(self):
         zero = np.zeros(7, dtype=float)
@@ -2867,9 +3720,10 @@ class CartesianImpedanceController(Node):
         self.hist_db_pred = zero.copy()
         self.hist_db_gated_pred = zero.copy()
         self.hist_db_gated_source_code = 0
+        self.hist_db_query_updated_this_tick = 0
         self._reset_historical_soft_shadow_state()
 
-    def _update_historical_residual_db_shadow_state(self, q, dq):
+    def _update_historical_residual_db_shadow_state(self, q, dq, t_now=None):
         # 为降低真机 callback 负载，可按 stride 降频查询 hist DB。
         # 默认 gp_historical_db_query_stride=1 时，每周期查询，保持原始行为。
         # stride>1 时，中间 callback 复用上一帧 gated prediction 和 gate 诊断。
@@ -2894,6 +3748,7 @@ class CartesianImpedanceController(Node):
         )
 
         self.hist_db_query_reused = int(not should_query)
+        self.hist_db_query_updated_this_tick = int(should_query)
 
         if should_query:
             result = self._query_historical_residual_db_shadow(q, dq)
@@ -2917,6 +3772,7 @@ class CartesianImpedanceController(Node):
             dtype=float,
         ).copy()
         self.hist_db_gated_source_code = int(result["gated_source_code"])
+        self._update_historical_db_preflight_state(t_now, result, bool(should_query))
         self._update_historical_soft_shadow_state()
 
     def _new_historical_soft_shadow_result(self):
@@ -4001,6 +4857,7 @@ class CartesianImpedanceController(Node):
             return tau
 
         # combined 当前是 local/cloud variance fusion candidate；hist_db 必须显式 opt-in。
+        hist_compensation_ready = False
         if self.gp_compensation_source == "cloud":
             compensation = self.y_hat_cloud
             self._gp_source_code = 2
@@ -4010,6 +4867,18 @@ class CartesianImpedanceController(Node):
         elif self.gp_compensation_source == "hist_db":
             compensation = np.zeros(7, dtype=float)
             self._gp_source_code = 4
+            if (
+                self.gp_historical_db_preflight_required
+                and not self._historical_db_active_allowed()
+            ):
+                self.hist_db_runtime_fallback_used = 1
+                self._gp_source_code = 0
+                self._gp_selected_raw = np.zeros(7, dtype=float)
+                self._gp_scaled = np.zeros(7, dtype=float)
+                self._gp_applied = np.zeros(7, dtype=float)
+                self._gp_clip_active = np.zeros(7, dtype=int)
+                self._maybe_log_hist_db_runtime_diag("nominal")
+                return tau
             try:
                 hist_db_gated_pred = np.asarray(self.hist_db_gated_pred, dtype=float)
             except (TypeError, ValueError):
@@ -4027,6 +4896,19 @@ class CartesianImpedanceController(Node):
                 and np.all(np.isfinite(hist_db_gated_pred))
             ):
                 compensation = hist_db_gated_pred.copy()
+                hist_compensation_ready = True
+            else:
+                self.hist_db_runtime_fallback_used = 1
+                if self.gp_disable_silent_hist_fallback:
+                    self._gp_source_code = 0
+                    self._gp_selected_raw = np.zeros(7, dtype=float)
+                    self._gp_scaled = np.zeros(7, dtype=float)
+                    self._gp_applied = np.zeros(7, dtype=float)
+                    self._gp_clip_active = np.zeros(7, dtype=int)
+                    self._maybe_log_hist_db_runtime_diag("nominal")
+                    return tau
+                if self.gp_historical_db_preflight_enabled:
+                    self._maybe_log_hist_db_runtime_diag("zero_fallback")
         elif self.gp_compensation_source == "triple":
             triple_result = self._compute_gp_triple_prediction()
             self._set_gp_triple_state(triple_result)
@@ -4040,6 +4922,14 @@ class CartesianImpedanceController(Node):
         else:
             compensation = self.y_hat_local
             self._gp_source_code = 1
+
+        if self.gp_compensation_source in ("local", "cloud", "combined") and not self.gp_output_fresh:
+            self._gp_source_code = 0
+            self._gp_selected_raw = np.zeros(7, dtype=float)
+            self._gp_scaled = np.zeros(7, dtype=float)
+            self._gp_applied = np.zeros(7, dtype=float)
+            self._gp_clip_active = np.zeros(7, dtype=int)
+            return tau
 
         # 先清洗成 finite 7D，再 scale / clip，避免 non-finite 进入 torque command。
         self._gp_selected_raw = self._as_finite_7d(compensation, 0.0).copy()
@@ -4057,6 +4947,8 @@ class CartesianImpedanceController(Node):
 
         if self.gp_compensation_source in ("triple", "triple_dynamic"):
             self._log_gp_triple_debug_safety()
+        if self.gp_compensation_source == "hist_db" and hist_compensation_ready:
+            self._maybe_log_hist_db_runtime_diag("hist_db")
 
         if not self._gp_compensation_logged:
             self.get_logger().warn(
@@ -4263,6 +5155,12 @@ class CartesianImpedanceController(Node):
                 self.gp_scaled_history,
                 self.gp_applied_history,
                 self.gp_clip_active_history,
+                self.gp_prediction_stride_history,
+                self.gp_prediction_updated_this_tick_history,
+                self.gp_prediction_age_sec_history,
+                self.gp_output_fresh_history,
+                self.future_trajectory_request_stride_history,
+                self.future_trajectory_updated_this_tick_history,
                 self.gp_triple_raw_history,
                 self.gp_triple_weight_local_history,
                 self.gp_triple_weight_cloud_history,
@@ -4310,6 +5208,19 @@ class CartesianImpedanceController(Node):
                 self.hist_db_gated_source_code_history,
                 self.hist_db_pred_history,
                 self.hist_db_gated_pred_history,
+                self.hist_db_query_stride_history,
+                self.hist_db_query_updated_this_tick_history,
+                self.hist_db_query_reused_history,
+                self.hist_db_query_counter_history,
+                self.hist_db_preflight_phase_history,
+                self.hist_db_preflight_pass_history,
+                self.hist_db_preflight_active_allowed_history,
+                self.hist_db_preflight_sample_count_history,
+                self.hist_db_preflight_pass_ratio_history,
+                self.hist_db_preflight_nearest_mean_history,
+                self.hist_db_preflight_nearest_p95_history,
+                self.hist_db_preflight_nearest_max_history,
+                self.hist_db_runtime_fallback_used_history,
                 self.hist_soft_valid_history,
                 self.hist_soft_nearest_distance_history,
                 self.hist_soft_raw_w_hist_history,
@@ -4363,6 +5274,18 @@ class CartesianImpedanceController(Node):
                     'gp_compensation_source_code',
                     'gp_compensation_scale',
                     'gp_compensation_clip_nm',
+                    'gp_model_local_loaded_count',
+                    'gp_model_cloud_loaded_count',
+                    'gp_model_cloud_fallback_count',
+                    'gp_model_empty_or_prior_count',
+                    'gp_model_cloud_uses_cloud_pkl',
+                    'gp_model_cloud_uses_local_fallback',
+                    'gp_prediction_stride',
+                    'gp_prediction_updated_this_tick',
+                    'gp_prediction_age_sec',
+                    'gp_output_fresh',
+                    'future_trajectory_request_stride',
+                    'future_trajectory_updated_this_tick',
                 ])
                 header.extend([f'tau_nominal_{i+1}' for i in range(7)])
                 header.extend([f'tau_final_{i+1}' for i in range(7)])
@@ -4437,8 +5360,21 @@ class CartesianImpedanceController(Node):
                 header.extend([f'hist_db_gated_pred_{i+1}' for i in range(7)])
                 header.extend([
                     'hist_db_query_stride',
+                    'hist_db_query_updated_this_tick',
                     'hist_db_query_reused',
                     'hist_db_query_counter',
+                    'hist_db_preflight_enabled',
+                    'hist_db_preflight_required',
+                    'hist_db_preflight_mode',
+                    'hist_db_preflight_phase',
+                    'hist_db_preflight_pass',
+                    'hist_db_preflight_active_allowed',
+                    'hist_db_preflight_sample_count',
+                    'hist_db_preflight_pass_ratio',
+                    'hist_db_preflight_nearest_mean',
+                    'hist_db_preflight_nearest_p95',
+                    'hist_db_preflight_nearest_max',
+                    'hist_db_runtime_fallback_used',
                 ])
                 header.extend([
                     'hist_soft_enabled',
@@ -4566,6 +5502,30 @@ class CartesianImpedanceController(Node):
                         gp_source_code,
                         self.gp_compensation_scale,
                         self.gp_compensation_clip_nm,
+                        int(self.gp_model_local_loaded_count),
+                        int(self.gp_model_cloud_loaded_count),
+                        int(self.gp_model_cloud_fallback_count),
+                        int(self.gp_model_empty_or_prior_count),
+                        int(self.gp_model_cloud_uses_cloud_pkl),
+                        int(self.gp_model_cloud_uses_local_fallback),
+                        self.gp_prediction_stride_history[i]
+                        if i < len(self.gp_prediction_stride_history)
+                        else int(self.gp_prediction_stride),
+                        self.gp_prediction_updated_this_tick_history[i]
+                        if i < len(self.gp_prediction_updated_this_tick_history)
+                        else 0,
+                        self.gp_prediction_age_sec_history[i]
+                        if i < len(self.gp_prediction_age_sec_history)
+                        else float(self.gp_prediction_age_sec),
+                        self.gp_output_fresh_history[i]
+                        if i < len(self.gp_output_fresh_history)
+                        else int(self.gp_output_fresh),
+                        self.future_trajectory_request_stride_history[i]
+                        if i < len(self.future_trajectory_request_stride_history)
+                        else int(self.future_trajectory_request_stride),
+                        self.future_trajectory_updated_this_tick_history[i]
+                        if i < len(self.future_trajectory_updated_this_tick_history)
+                        else 0,
                     ])
 
                     if i < len(self.tau_nominal_history):
@@ -4899,12 +5859,45 @@ class CartesianImpedanceController(Node):
                         self.hist_db_query_stride_history[i]
                         if i < len(self.hist_db_query_stride_history)
                         else int(getattr(self, "gp_historical_db_query_stride", 1)),
+                        self.hist_db_query_updated_this_tick_history[i]
+                        if i < len(self.hist_db_query_updated_this_tick_history)
+                        else int(getattr(self, "hist_db_query_updated_this_tick", 0)),
                         self.hist_db_query_reused_history[i]
                         if i < len(self.hist_db_query_reused_history)
                         else 0,
                         self.hist_db_query_counter_history[i]
                         if i < len(self.hist_db_query_counter_history)
                         else 0,
+                        int(bool(self.gp_historical_db_preflight_enabled)),
+                        int(bool(self.gp_historical_db_preflight_required)),
+                        self.gp_historical_db_preflight_mode,
+                        self.hist_db_preflight_phase_history[i]
+                        if i < len(self.hist_db_preflight_phase_history)
+                        else str(getattr(self, "hist_db_preflight_phase", "disabled")),
+                        self.hist_db_preflight_pass_history[i]
+                        if i < len(self.hist_db_preflight_pass_history)
+                        else int(getattr(self, "hist_db_preflight_pass", 0)),
+                        self.hist_db_preflight_active_allowed_history[i]
+                        if i < len(self.hist_db_preflight_active_allowed_history)
+                        else int(getattr(self, "hist_db_preflight_active_allowed", 0)),
+                        self.hist_db_preflight_sample_count_history[i]
+                        if i < len(self.hist_db_preflight_sample_count_history)
+                        else int(getattr(self, "hist_db_preflight_sample_count", 0)),
+                        self.hist_db_preflight_pass_ratio_history[i]
+                        if i < len(self.hist_db_preflight_pass_ratio_history)
+                        else float(getattr(self, "hist_db_preflight_pass_ratio", 0.0)),
+                        self.hist_db_preflight_nearest_mean_history[i]
+                        if i < len(self.hist_db_preflight_nearest_mean_history)
+                        else float(getattr(self, "hist_db_preflight_nearest_mean", 0.0)),
+                        self.hist_db_preflight_nearest_p95_history[i]
+                        if i < len(self.hist_db_preflight_nearest_p95_history)
+                        else float(getattr(self, "hist_db_preflight_nearest_p95", 0.0)),
+                        self.hist_db_preflight_nearest_max_history[i]
+                        if i < len(self.hist_db_preflight_nearest_max_history)
+                        else float(getattr(self, "hist_db_preflight_nearest_max", 0.0)),
+                        self.hist_db_runtime_fallback_used_history[i]
+                        if i < len(self.hist_db_runtime_fallback_used_history)
+                        else int(getattr(self, "hist_db_runtime_fallback_used", 0)),
                     ])
 
                     hist_soft_valid = (

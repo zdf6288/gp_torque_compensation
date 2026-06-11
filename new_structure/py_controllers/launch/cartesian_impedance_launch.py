@@ -26,6 +26,7 @@ def generate_launch_description():
     # Stage 1: frozen GP / compensation experiment 参数，默认值保持安全。
     gp_prediction_enabled_parameter_name = 'gp_prediction_enabled'
     gp_prediction_stride_parameter_name = 'gp_prediction_stride'
+    gp_output_timeout_sec_parameter_name = 'gp_output_timeout_sec'
     future_trajectory_request_stride_parameter_name = 'future_trajectory_request_stride'
     gp_online_update_enabled_parameter_name = 'gp_online_update_enabled'
     gp_model_dir_parameter_name = 'gp_model_dir'
@@ -50,6 +51,34 @@ def generate_launch_description():
         'gp_historical_db_disable_when_online_update'
     )
     gp_historical_db_fallback_source_parameter_name = 'gp_historical_db_fallback_source'
+    gp_historical_db_preflight_enabled_parameter_name = (
+        'gp_historical_db_preflight_enabled'
+    )
+    gp_historical_db_preflight_required_parameter_name = (
+        'gp_historical_db_preflight_required'
+    )
+    gp_historical_db_preflight_mode_parameter_name = (
+        'gp_historical_db_preflight_mode'
+    )
+    gp_historical_db_preflight_duration_sec_parameter_name = (
+        'gp_historical_db_preflight_duration_sec'
+    )
+    gp_historical_db_preflight_min_samples_parameter_name = (
+        'gp_historical_db_preflight_min_samples'
+    )
+    gp_historical_db_preflight_min_pass_ratio_parameter_name = (
+        'gp_historical_db_preflight_min_pass_ratio'
+    )
+    gp_historical_db_preflight_p95_max_distance_parameter_name = (
+        'gp_historical_db_preflight_p95_max_distance'
+    )
+    gp_historical_db_preflight_max_distance_parameter_name = (
+        'gp_historical_db_preflight_max_distance'
+    )
+    gp_historical_db_preflight_log_first_n_parameter_name = (
+        'gp_historical_db_preflight_log_first_n'
+    )
+    gp_disable_silent_hist_fallback_parameter_name = 'gp_disable_silent_hist_fallback'
     gp_triple_weight_mode_parameter_name = 'gp_triple_weight_mode'
     gp_triple_weight_local_parameter_name = 'gp_triple_weight_local'
     gp_triple_weight_cloud_parameter_name = 'gp_triple_weight_cloud'
@@ -119,6 +148,7 @@ def generate_launch_description():
     joint_space_command_topic = LaunchConfiguration(joint_space_command_topic_parameter_name)
     gp_prediction_enabled = LaunchConfiguration(gp_prediction_enabled_parameter_name)
     gp_prediction_stride = LaunchConfiguration(gp_prediction_stride_parameter_name)
+    gp_output_timeout_sec = LaunchConfiguration(gp_output_timeout_sec_parameter_name)
     future_trajectory_request_stride = LaunchConfiguration(future_trajectory_request_stride_parameter_name)
     gp_online_update_enabled = LaunchConfiguration(gp_online_update_enabled_parameter_name)
     gp_model_dir = LaunchConfiguration(gp_model_dir_parameter_name)
@@ -152,6 +182,36 @@ def generate_launch_description():
     )
     gp_historical_db_fallback_source = LaunchConfiguration(
         gp_historical_db_fallback_source_parameter_name
+    )
+    gp_historical_db_preflight_enabled = LaunchConfiguration(
+        gp_historical_db_preflight_enabled_parameter_name
+    )
+    gp_historical_db_preflight_required = LaunchConfiguration(
+        gp_historical_db_preflight_required_parameter_name
+    )
+    gp_historical_db_preflight_mode = LaunchConfiguration(
+        gp_historical_db_preflight_mode_parameter_name
+    )
+    gp_historical_db_preflight_duration_sec = LaunchConfiguration(
+        gp_historical_db_preflight_duration_sec_parameter_name
+    )
+    gp_historical_db_preflight_min_samples = LaunchConfiguration(
+        gp_historical_db_preflight_min_samples_parameter_name
+    )
+    gp_historical_db_preflight_min_pass_ratio = LaunchConfiguration(
+        gp_historical_db_preflight_min_pass_ratio_parameter_name
+    )
+    gp_historical_db_preflight_p95_max_distance = LaunchConfiguration(
+        gp_historical_db_preflight_p95_max_distance_parameter_name
+    )
+    gp_historical_db_preflight_max_distance = LaunchConfiguration(
+        gp_historical_db_preflight_max_distance_parameter_name
+    )
+    gp_historical_db_preflight_log_first_n = LaunchConfiguration(
+        gp_historical_db_preflight_log_first_n_parameter_name
+    )
+    gp_disable_silent_hist_fallback = LaunchConfiguration(
+        gp_disable_silent_hist_fallback_parameter_name
     )
     gp_triple_weight_mode = LaunchConfiguration(gp_triple_weight_mode_parameter_name)
     gp_triple_weight_local = LaunchConfiguration(gp_triple_weight_local_parameter_name)
@@ -302,6 +362,10 @@ def generate_launch_description():
             default_value='5',
             description='Run GP predict/update once every N controller callbacks.'),
         DeclareLaunchArgument(
+            gp_output_timeout_sec_parameter_name,
+            default_value='0.5',
+            description='Maximum local/cloud GP output age before active compensation fails closed.'),
+        DeclareLaunchArgument(
             future_trajectory_request_stride_parameter_name,
             default_value='5',
             description='Request /future_task_space once every N controller callbacks.'),
@@ -407,6 +471,46 @@ def generate_launch_description():
             gp_historical_db_fallback_source_parameter_name,
             default_value='cloud',
             description='Shadow-only fallback source: none, local, cloud, or combined.'),
+        DeclareLaunchArgument(
+            gp_historical_db_preflight_enabled_parameter_name,
+            default_value='false',
+            description='Enable hist_db source preflight diagnostics only when explicitly requested.'),
+        DeclareLaunchArgument(
+            gp_historical_db_preflight_required_parameter_name,
+            default_value='false',
+            description='Require passing hist_db preflight before active hist_db torque compensation.'),
+        DeclareLaunchArgument(
+            gp_historical_db_preflight_mode_parameter_name,
+            default_value='segment',
+            description='Hist DB preflight mode: single, segment, or single_and_segment.'),
+        DeclareLaunchArgument(
+            gp_historical_db_preflight_duration_sec_parameter_name,
+            default_value='5.0',
+            description='Hist DB segment preflight duration in seconds.'),
+        DeclareLaunchArgument(
+            gp_historical_db_preflight_min_samples_parameter_name,
+            default_value='50',
+            description='Minimum hist DB preflight query samples before pass/fail.'),
+        DeclareLaunchArgument(
+            gp_historical_db_preflight_min_pass_ratio_parameter_name,
+            default_value='0.95',
+            description='Minimum hist DB preflight pass ratio.'),
+        DeclareLaunchArgument(
+            gp_historical_db_preflight_p95_max_distance_parameter_name,
+            default_value='1.5',
+            description='Hist DB preflight nearest-distance p95 threshold.'),
+        DeclareLaunchArgument(
+            gp_historical_db_preflight_max_distance_parameter_name,
+            default_value='2.0',
+            description='Hist DB preflight nearest-distance max threshold.'),
+        DeclareLaunchArgument(
+            gp_historical_db_preflight_log_first_n_parameter_name,
+            default_value='5',
+            description='Number of initial hist DB preflight probe logs.'),
+        DeclareLaunchArgument(
+            gp_disable_silent_hist_fallback_parameter_name,
+            default_value='false',
+            description='Fail closed instead of silently using hist_db fallback when active hist_db is invalid.'),
         DeclareLaunchArgument(
             gp_triple_weight_mode_parameter_name,
             default_value='inverse_rmse',
@@ -615,6 +719,8 @@ def generate_launch_description():
                 joint_space_command_topic_parameter_name: joint_space_command_topic,
                 gp_prediction_enabled_parameter_name: gp_prediction_enabled,
                 gp_prediction_stride_parameter_name: ParameterValue(gp_prediction_stride, value_type=int),
+                gp_output_timeout_sec_parameter_name: ParameterValue(
+                    gp_output_timeout_sec, value_type=float),
                 future_trajectory_request_stride_parameter_name: ParameterValue(future_trajectory_request_stride, value_type=int),
                 gp_online_update_enabled_parameter_name: gp_online_update_enabled,
                 gp_model_dir_parameter_name: gp_model_dir,
@@ -664,6 +770,36 @@ def generate_launch_description():
                 gp_historical_db_fallback_source_parameter_name: ParameterValue(
                     gp_historical_db_fallback_source,
                     value_type=str),
+                gp_historical_db_preflight_enabled_parameter_name: ParameterValue(
+                    gp_historical_db_preflight_enabled,
+                    value_type=bool),
+                gp_historical_db_preflight_required_parameter_name: ParameterValue(
+                    gp_historical_db_preflight_required,
+                    value_type=bool),
+                gp_historical_db_preflight_mode_parameter_name: ParameterValue(
+                    gp_historical_db_preflight_mode,
+                    value_type=str),
+                gp_historical_db_preflight_duration_sec_parameter_name: ParameterValue(
+                    gp_historical_db_preflight_duration_sec,
+                    value_type=float),
+                gp_historical_db_preflight_min_samples_parameter_name: ParameterValue(
+                    gp_historical_db_preflight_min_samples,
+                    value_type=int),
+                gp_historical_db_preflight_min_pass_ratio_parameter_name: ParameterValue(
+                    gp_historical_db_preflight_min_pass_ratio,
+                    value_type=float),
+                gp_historical_db_preflight_p95_max_distance_parameter_name: ParameterValue(
+                    gp_historical_db_preflight_p95_max_distance,
+                    value_type=float),
+                gp_historical_db_preflight_max_distance_parameter_name: ParameterValue(
+                    gp_historical_db_preflight_max_distance,
+                    value_type=float),
+                gp_historical_db_preflight_log_first_n_parameter_name: ParameterValue(
+                    gp_historical_db_preflight_log_first_n,
+                    value_type=int),
+                gp_disable_silent_hist_fallback_parameter_name: ParameterValue(
+                    gp_disable_silent_hist_fallback,
+                    value_type=bool),
                 gp_triple_weight_mode_parameter_name: ParameterValue(
                     gp_triple_weight_mode,
                     value_type=str),
