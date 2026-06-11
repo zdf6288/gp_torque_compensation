@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
 import math
-import tempfile
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, LogInfo, OpaqueFunction
@@ -11,24 +10,6 @@ from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
-
-
-def _positive_float_or_fallback(value_text, fallback_text, default_value=50.0):
-    try:
-        value = float(value_text)
-        if math.isfinite(value) and value > 0.0:
-            return value
-    except (TypeError, ValueError):
-        pass
-
-    try:
-        fallback = float(fallback_text)
-        if math.isfinite(fallback) and fallback > 0.0:
-            return fallback
-    except (TypeError, ValueError):
-        pass
-
-    return float(default_value)
 
 
 def _positive_float_or_raise(value_text, parameter_name):
@@ -113,54 +94,6 @@ def _guard_frequency_config(
                 f'allow_high_ros2_control_rate={str(allow_high_rate).lower()}.'
             )
         )
-    ]
-
-
-def _make_cpp_relayer_spawner(
-        context,
-        state_parameter_publish_rate,
-        control_frequency):
-    state_rate = _positive_float_or_fallback(
-        state_parameter_publish_rate.perform(context),
-        control_frequency.perform(context),
-    )
-    with tempfile.NamedTemporaryFile(
-        mode='w',
-        prefix='cpp_relayer_full_params_',
-        suffix='.yaml',
-        delete=False,
-    ) as param_file:
-        param_file.write('cpp_relayer:\n')
-        param_file.write('  ros__parameters:\n')
-        param_file.write('    type: cpp_relayer/CPPRelayer\n')
-        param_file.write('    arm_id: panda\n')
-        param_file.write('    command_timeout_sec: 0.2\n')
-        param_file.write('    require_fresh_command_on_activate: false\n')
-        param_file.write('    diagnostics_enabled: true\n')
-        param_file.write('    diagnostics_log_period_sec: 5.0\n')
-        param_file.write('    log_first_n_stale_events: 5\n')
-        param_file.write(f'    state_parameter_publish_rate: {state_rate:.6f}\n')
-        param_file_path = param_file.name
-
-    return [
-        LogInfo(
-            msg=(
-                'cpp_relayer full spawner param file with '
-                'require_fresh_command_on_activate=false, '
-                'command_timeout_sec=0.2, diagnostics enabled, '
-                'state_parameter_publish_rate override '
-                f'({state_rate:.3f} Hz)'
-            )
-        ),
-        Node(
-            package='controller_manager',
-            executable='spawner',
-            arguments=[
-                '--param-file', param_file_path,
-                'cpp_relayer',
-            ],
-            output='screen',
-        ),
     ]
 
 
@@ -932,12 +865,19 @@ def generate_launch_description():
                               }.items(),
         ),
 
-        OpaqueFunction(
-            function=_make_cpp_relayer_spawner,
-            args=[
-                state_parameter_publish_rate,
-                control_frequency,
-            ],
+        LogInfo(
+            msg=(
+                'cpp_relayer safety parameters are loaded from stable '
+                'new_bringup/config/controllers.yaml; no runtime spawner '
+                'param-file override is used. state_parameter_publish_rate is '
+                'currently fixed by controllers.yaml for L0 safety recovery.'
+            )
+        ),
+        Node(
+            package='controller_manager',
+            executable='spawner',
+            arguments=['cpp_relayer'],
+            output='screen',
         ),
         Node(
             package='py_controllers',
