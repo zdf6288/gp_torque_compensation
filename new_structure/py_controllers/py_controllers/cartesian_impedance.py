@@ -52,6 +52,14 @@ GOAL12_TIMING_FIELDS = [
     "gp_compensation_clip_nm",
     "gp_compensation_disable_joint7",
     "delay_steps",
+    "gp_prediction_stride",
+    "gp_prediction_updated_this_tick",
+    "gp_prediction_age_sec",
+    "gp_output_fresh",
+    "hist_db_query_stride",
+    "hist_db_query_updated_this_tick",
+    "future_trajectory_request_stride",
+    "future_trajectory_updated_this_tick",
     "local_gp_called",
     "cloud_like_gp_called",
     "add_point_count",
@@ -329,6 +337,12 @@ class CartesianImpedanceController(Node):
         self.gp_scaled_history = []
         self.gp_applied_history = []
         self.gp_clip_active_history = []
+        self.gp_prediction_stride_history = []
+        self.gp_prediction_updated_this_tick_history = []
+        self.gp_prediction_age_sec_history = []
+        self.gp_output_fresh_history = []
+        self.future_trajectory_request_stride_history = []
+        self.future_trajectory_updated_this_tick_history = []
         self.gp_shadow_historical_available_history = []
         self.gp_shadow_local_raw_history = []
         self.gp_shadow_cloud_raw_history = []
@@ -362,6 +376,7 @@ class CartesianImpedanceController(Node):
         self.hist_db_pred_history = []
         self.hist_db_gated_pred_history = []
         self.hist_db_query_stride_history = []
+        self.hist_db_query_updated_this_tick_history = []
         self.hist_db_query_reused_history = []
         self.hist_db_query_counter_history = []
         self.hist_soft_valid_history = []
@@ -398,6 +413,8 @@ class CartesianImpedanceController(Node):
         # compensation 默认关闭，避免 GP prediction 在未显式开启时影响最终 tau。
         self.declare_parameter("gp_prediction_enabled", True)
         self.declare_parameter("gp_online_update_enabled", True)
+        self.declare_parameter("gp_prediction_stride", 1)
+        self.declare_parameter("gp_output_timeout_sec", 0.5)
         self.declare_parameter("gp_model_dir", "./new_structure/gp/gp_models")
         self.declare_parameter("gp_compensation_enabled", False)
         self.declare_parameter("gp_compensation_source", "local")
@@ -429,6 +446,7 @@ class CartesianImpedanceController(Node):
         self.declare_parameter("gp_historical_soft_distance_threshold", 0.2)
         self.declare_parameter("gp_historical_soft_online_scale", 0.02)
         self.declare_parameter("gp_historical_soft_non_online_scale", 1.0)
+        self.declare_parameter("future_trajectory_request_stride", 1)
         self.declare_parameter("run_name", "")
         self.declare_parameter("data_output_dir", ".")
         self.declare_parameter("control_frequency", 50.0)
@@ -439,6 +457,12 @@ class CartesianImpedanceController(Node):
 
         self.gp_prediction_enabled = self._get_bool_parameter("gp_prediction_enabled")
         self.gp_online_update_enabled = self._get_bool_parameter("gp_online_update_enabled")
+        self.gp_prediction_stride = self._get_bounded_int_parameter(
+            "gp_prediction_stride", 1, 1, 1000000
+        )
+        self.gp_output_timeout_sec = self._get_positive_float_parameter(
+            "gp_output_timeout_sec", 0.5
+        )
         self.gp_model_dir = str(self.get_parameter("gp_model_dir").value)
         self.gp_compensation_enabled = self._get_bool_parameter("gp_compensation_enabled")
         self.gp_compensation_source = str(self.get_parameter("gp_compensation_source").value).strip().lower()
@@ -517,6 +541,9 @@ class CartesianImpedanceController(Node):
         )
         self.gp_historical_soft_non_online_scale = self._get_nonnegative_float_parameter(
             "gp_historical_soft_non_online_scale", 1.0
+        )
+        self.future_trajectory_request_stride = self._get_bounded_int_parameter(
+            "future_trajectory_request_stride", 1, 1, 1000000
         )
         self.run_name = str(self.get_parameter("run_name").value).strip()
         self.data_output_dir = str(self.get_parameter("data_output_dir").value).strip() or "."
@@ -633,6 +660,8 @@ class CartesianImpedanceController(Node):
             "[GP] Experiment controls: "
             f"gp_prediction_enabled={self.gp_prediction_enabled}, "
             f"gp_online_update_enabled={self.gp_online_update_enabled}, "
+            f"gp_prediction_stride={self.gp_prediction_stride}, "
+            f"gp_output_timeout_sec={self.gp_output_timeout_sec}, "
             f"gp_model_dir='{self.gp_model_dir}', "
             f"gp_compensation_enabled={self.gp_compensation_enabled}, "
             f"gp_compensation_source='{self.gp_compensation_source}', "
@@ -640,6 +669,7 @@ class CartesianImpedanceController(Node):
             f"gp_compensation_clip_nm={self.gp_compensation_clip_nm}, "
             f"gp_compensation_disable_joint7={self.gp_compensation_disable_joint7}, "
             f"delay_steps={self.delay_steps}, "
+            f"future_trajectory_request_stride={self.future_trajectory_request_stride}, "
             f"control_frequency={self.control_frequency}, "
             f"run_name='{self.run_name}', "
             f"data_output_dir='{self.data_output_dir}'"
@@ -684,6 +714,7 @@ class CartesianImpedanceController(Node):
                 f"loaded={self.gp_historical_db_loaded}, "
                 f"rows={self.gp_historical_db_row_count}, "
                 f"k={self.gp_historical_db_k}, "
+                f"query_stride={self.gp_historical_db_query_stride}, "
                 f"q_scale={self.gp_historical_db_q_scale}, "
                 f"dq_scale={self.gp_historical_db_dq_scale}, "
                 f"max_distance={self.gp_historical_db_max_distance}, "
@@ -734,8 +765,13 @@ class CartesianImpedanceController(Node):
         self._reset_gp_shadow_state()
         self._reset_historical_residual_db_shadow_state()
 
-        self.gp_stride = 1      # 每 10 个 state callback 做一次 GP（你可以调）
+        self.gp_stride = self.gp_prediction_stride
         self.gp_counter = 0
+        self._gp_prediction_updated_this_tick = 0
+        self._last_gp_prediction_time = None
+        self._last_valid_gp_prediction = False
+        self.gp_prediction_age_sec = 0.0
+        self.gp_output_fresh = 0
         self.cloud_counter = 0
         self.last_q = np.zeros(7)
         self.last_dq = np.zeros(7)
@@ -890,6 +926,10 @@ class CartesianImpedanceController(Node):
         self._latest_future_traj = None   # dict: {"x_des": np.array(6,), "dx_des": ..., "ddx_des": ...}
         self._future_traj_counter = 0
         self._future_traj_warned = False
+        self._future_trajectory_request_counter = 0
+        self._future_request_pending = False
+        self._last_future_trajectory_time = None
+        self._future_trajectory_updated_this_tick = 0
 
     def _get_bool_parameter(self, name):
         value = self.get_parameter(name).value
@@ -953,6 +993,14 @@ class CartesianImpedanceController(Node):
                 "local_gp_called": 0,
                 "cloud_like_gp_called": 0,
                 "add_point_count": 0,
+                "gp_prediction_stride": self.gp_prediction_stride,
+                "gp_prediction_updated_this_tick": 0,
+                "gp_prediction_age_sec": self.gp_prediction_age_sec,
+                "gp_output_fresh": int(self.gp_output_fresh),
+                "hist_db_query_stride": self.gp_historical_db_query_stride,
+                "hist_db_query_updated_this_tick": 0,
+                "future_trajectory_request_stride": self.future_trajectory_request_stride,
+                "future_trajectory_updated_this_tick": 0,
                 "exception_flag": 0,
             })
             return timing_row
@@ -981,6 +1029,14 @@ class CartesianImpedanceController(Node):
                 "gp_compensation_clip_nm": self.gp_compensation_clip_nm,
                 "gp_compensation_disable_joint7": int(bool(self.gp_compensation_disable_joint7)),
                 "delay_steps": self.delay_steps,
+                "gp_prediction_stride": self.gp_prediction_stride,
+                "gp_prediction_updated_this_tick": int(self._gp_prediction_updated_this_tick),
+                "gp_prediction_age_sec": self.gp_prediction_age_sec,
+                "gp_output_fresh": int(self.gp_output_fresh),
+                "hist_db_query_stride": self.gp_historical_db_query_stride,
+                "hist_db_query_updated_this_tick": int(self.hist_db_query_updated_this_tick),
+                "future_trajectory_request_stride": self.future_trajectory_request_stride,
+                "future_trajectory_updated_this_tick": int(self._future_trajectory_updated_this_tick),
             })
             self.timing_history.append(timing_row)
         except Exception as e:
@@ -1022,6 +1078,14 @@ class CartesianImpedanceController(Node):
                 "gp_compensation_clip_nm": self.gp_compensation_clip_nm,
                 "gp_compensation_disable_joint7": int(bool(self.gp_compensation_disable_joint7)),
                 "delay_steps": self.delay_steps,
+                "gp_prediction_stride": self.gp_prediction_stride,
+                "gp_prediction_updated_this_tick": int(self._gp_prediction_updated_this_tick),
+                "gp_prediction_age_sec": self.gp_prediction_age_sec,
+                "gp_output_fresh": int(self.gp_output_fresh),
+                "hist_db_query_stride": self.gp_historical_db_query_stride,
+                "hist_db_query_updated_this_tick": int(self.hist_db_query_updated_this_tick),
+                "future_trajectory_request_stride": self.future_trajectory_request_stride,
+                "future_trajectory_updated_this_tick": int(self._future_trajectory_updated_this_tick),
             })
             self.timing_history.append(timing_row)
         except Exception as e:
@@ -1164,6 +1228,126 @@ class CartesianImpedanceController(Node):
                 f"using default {default_value}"
             )
             return int(default_value)
+
+    def _begin_control_tick(self):
+        self._gp_prediction_updated_this_tick = 0
+        self.hist_db_query_updated_this_tick = 0
+        self._future_trajectory_updated_this_tick = 0
+
+    def _should_run_gp_prediction_this_tick(self):
+        self.gp_counter += 1
+        should_update = self.gp_counter % self.gp_prediction_stride == 0
+        self._gp_prediction_updated_this_tick = int(should_update)
+        return should_update
+
+    def _gp_outputs_are_valid(self):
+        vector_values = (
+            self.y_hat_local,
+            self.y_hat_cloud,
+            self.y_hat_combined,
+        )
+        variance_values = (
+            self.var_local,
+            self.var_cloud,
+        )
+
+        try:
+            for value in vector_values:
+                arr = np.asarray(value, dtype=float)
+                if arr.shape != (7,) or not np.all(np.isfinite(arr)):
+                    return False
+            for value in variance_values:
+                arr = np.asarray(value, dtype=float)
+                if (
+                    arr.shape != (7,)
+                    or not np.all(np.isfinite(arr))
+                    or np.any(arr <= 0.0)
+                ):
+                    return False
+        except (TypeError, ValueError):
+            return False
+
+        return True
+
+    def _mark_gp_prediction_result(self, t_now):
+        if self._gp_outputs_are_valid():
+            self._last_valid_gp_prediction = True
+            self._last_gp_prediction_time = t_now
+        else:
+            self._last_valid_gp_prediction = False
+            self._last_gp_prediction_time = None
+            self.y_hat_local = np.zeros(7, dtype=float)
+            self.y_hat_cloud = np.zeros(7, dtype=float)
+            self.y_hat_combined = np.zeros(7, dtype=float)
+            self.var_local = np.ones(7, dtype=float) * 1e6
+            self.var_cloud = np.ones(7, dtype=float) * 1e6
+
+        self._update_gp_output_freshness(t_now)
+
+    def _update_gp_output_freshness(self, t_now):
+        self.gp_prediction_age_sec = 0.0
+        self.gp_output_fresh = 0
+        if not self._last_valid_gp_prediction or self._last_gp_prediction_time is None:
+            return
+
+        try:
+            age_sec = (t_now - self._last_gp_prediction_time).nanoseconds / 1e9
+        except Exception:
+            age_sec = self.gp_output_timeout_sec + 1.0
+
+        if not np.isfinite(age_sec) or age_sec < 0.0:
+            age_sec = self.gp_output_timeout_sec + 1.0
+
+        self.gp_prediction_age_sec = float(age_sec)
+        self.gp_output_fresh = int(age_sec <= self.gp_output_timeout_sec)
+
+    def _future_trajectory_timeout_sec(self):
+        control_period = 1.0 / max(float(self.control_frequency), 1e-6)
+        return max(
+            0.1,
+            3.0 * float(self.future_trajectory_request_stride) * control_period,
+        )
+
+    def _get_latest_future_trajectory_if_fresh(self, t_now):
+        if self._latest_future_traj is None or self._last_future_trajectory_time is None:
+            return None
+
+        try:
+            age_sec = (t_now - self._last_future_trajectory_time).nanoseconds / 1e9
+        except Exception:
+            return None
+        if (
+            not np.isfinite(age_sec)
+            or age_sec < 0.0
+            or age_sec > self._future_trajectory_timeout_sec()
+        ):
+            return None
+
+        try:
+            x_f = np.asarray(self._latest_future_traj["x_des"], dtype=float)
+            dx_f = np.asarray(self._latest_future_traj["dx_des"], dtype=float)
+            ddx_f = np.asarray(self._latest_future_traj["ddx_des"], dtype=float)
+        except (KeyError, TypeError, ValueError):
+            return None
+
+        if (
+            x_f.ndim != 1
+            or dx_f.ndim != 1
+            or ddx_f.ndim != 1
+            or x_f.shape[0] < 3
+            or dx_f.shape[0] < 5
+            or ddx_f.shape[0] < 5
+            or not np.all(np.isfinite(x_f))
+            or not np.all(np.isfinite(dx_f))
+            or not np.all(np.isfinite(ddx_f))
+        ):
+            return None
+
+        return {
+            "x_des": x_f,
+            "dx_des": dx_f,
+            "ddx_des": ddx_f,
+        }
 
     def dls_dyn_pinv(self, J, M, lam):
         """
@@ -1311,62 +1495,68 @@ class CartesianImpedanceController(Node):
             "tau_res": self.tau_residual_filtered.copy(),
         })
 
-        self._reset_historical_residual_db_shadow_state()
-
         # joint reference mode 使用 message 里的 dq_des 作为 GP feature 的第二段；
         # 这不改变现有 Cartesian 分支的 GP 调用语义。
         if self.use_gp and self.gp_prediction_enabled:
-            gp_total_start = time.perf_counter() if timing_row is not None else None
-            y_hat_local, var_local = self._gp_predict_and_update(
-                q,
-                self.dq_des_joint,
-                self.ddq_des_joint,
-                self.tau_residual_filtered,
-                self.gp_models_small,
-                update=self.gp_online_update_enabled,
-                timing_label="local",
-                timing_row=timing_row
-            )
-            self.y_hat_local = y_hat_local
-            self.var_local = var_local
-            if (
-                self.gp_shadow_paper_fusion_logging_enabled
-                and self.gp_historical_shadow_enabled
-                and self.gp_historical_source_mode == "local_prediction_pool"
-            ):
-                self._gp_local_feature_shadow = self._build_gp_shadow_feature(
-                    q, self.dq_des_joint
+            if self._should_run_gp_prediction_this_tick():
+                gp_total_start = time.perf_counter() if timing_row is not None else None
+                y_hat_local, var_local = self._gp_predict_and_update(
+                    q,
+                    self.dq_des_joint,
+                    self.ddq_des_joint,
+                    self.tau_residual_filtered,
+                    self.gp_models_small,
+                    update=self.gp_online_update_enabled,
+                    timing_label="local",
+                    timing_row=timing_row
                 )
-                self._gp_local_prediction_sequence_shadow += 1
+                self.y_hat_local = y_hat_local
+                self.var_local = var_local
+                if (
+                    self.gp_shadow_paper_fusion_logging_enabled
+                    and self.gp_historical_shadow_enabled
+                    and self.gp_historical_source_mode == "local_prediction_pool"
+                ):
+                    self._gp_local_feature_shadow = self._build_gp_shadow_feature(
+                        q, self.dq_des_joint
+                    )
+                    self._gp_local_prediction_sequence_shadow += 1
 
-            y_hat_cloud_current, var_cloud_current = self._gp_predict_and_update(
-                q,
-                self.dq_des_joint,
-                self.ddq_des_joint,
-                self.tau_residual_filtered,
-                self.gp_models_big,
-                update=self.gp_online_update_enabled,
-                timing_label="cloud_like",
-                timing_row=timing_row
-            )
-            self.y_hat_cloud_current = y_hat_cloud_current.copy()
-            self.y_hat_cloud, self.var_cloud = self._delay_cloud_like_output(
-                y_hat_cloud_current,
-                var_cloud_current
-            )
+                y_hat_cloud_current, var_cloud_current = self._gp_predict_and_update(
+                    q,
+                    self.dq_des_joint,
+                    self.ddq_des_joint,
+                    self.tau_residual_filtered,
+                    self.gp_models_big,
+                    update=self.gp_online_update_enabled,
+                    timing_label="cloud_like",
+                    timing_row=timing_row
+                )
+                self.y_hat_cloud_current = y_hat_cloud_current.copy()
+                self.y_hat_cloud, self.var_cloud = self._delay_cloud_like_output(
+                    y_hat_cloud_current,
+                    var_cloud_current
+                )
 
-            eps = 1e-8
-            v_l = np.maximum(self.var_local, eps)
-            v_c = np.maximum(self.var_cloud, eps)
-            prec_l = 1.0 / v_l
-            prec_c = 1.0 / v_c
-            w_l = prec_l / (prec_l + prec_c)
-            self.y_hat_combined = w_l * self.y_hat_local + (1.0 - w_l) * self.y_hat_cloud
+                eps = 1e-8
+                v_l = np.maximum(self.var_local, eps)
+                v_c = np.maximum(self.var_cloud, eps)
+                prec_l = 1.0 / v_l
+                prec_c = 1.0 / v_c
+                w_l = prec_l / (prec_l + prec_c)
+                self.y_hat_combined = w_l * self.y_hat_local + (1.0 - w_l) * self.y_hat_cloud
+                self._mark_gp_prediction_result(t_now)
+                if gp_total_start is not None:
+                    self._timing_add_ms(timing_row, "gp_total_ms", gp_total_start)
+            else:
+                self._update_gp_output_freshness(t_now)
             self._update_historical_residual_db_shadow_state(q, dq)
-            if gp_total_start is not None:
-                self._timing_add_ms(timing_row, "gp_total_ms", gp_total_start)
+        else:
+            self._reset_historical_residual_db_shadow_state()
+            self._update_gp_output_freshness(t_now)
 
         self._update_gp_shadow_logging_state(q, self.dq_des_joint)
+        self._update_gp_output_freshness(t_now)
         self._tau_nominal = tau.copy()
         tau = self._apply_gp_compensation(tau)
         self._tau_final = tau.copy()
@@ -1378,35 +1568,76 @@ class CartesianImpedanceController(Node):
             res = future.result()
         except Exception as e:
             self.get_logger().error(f"[Controller] /future_task_space call failed: {e}")
+            self._future_request_pending = False
             return
 
-        x_f  = np.array(res.x_des, dtype=float)
-        dx_f = np.array(res.dx_des, dtype=float)
-        ddx_f = np.array(res.ddx_des, dtype=float)
+        try:
+            x_f  = np.array(res.x_des, dtype=float)
+            dx_f = np.array(res.dx_des, dtype=float)
+            ddx_f = np.array(res.ddx_des, dtype=float)
+        except (TypeError, ValueError):
+            self._future_request_pending = False
+            return
+        if (
+            x_f.ndim != 1
+            or dx_f.ndim != 1
+            or ddx_f.ndim != 1
+            or x_f.shape[0] < 3
+            or dx_f.shape[0] < 5
+            or ddx_f.shape[0] < 5
+            or not np.all(np.isfinite(x_f))
+            or not np.all(np.isfinite(dx_f))
+            or not np.all(np.isfinite(ddx_f))
+        ):
+            self._future_request_pending = False
+            return
 
         self._latest_future_traj = {
             "x_des": x_f,
             "dx_des": dx_f,
             "ddx_des": ddx_f,
         }
+        self._last_future_trajectory_time = self.get_clock().now()
+        self._future_request_pending = False
         # 调试时可以看看
         self.get_logger().debug(f"Got future traj: x={x_f[:3]}")
     
     def request_future_trajectory(self, t_delay):
         if not self.gp_prediction_enabled:
-            return
+            return False
+
+        self._future_trajectory_request_counter += 1
+        should_request = (
+            self._future_trajectory_request_counter
+            % self.future_trajectory_request_stride
+            == 0
+        )
+        if not should_request:
+            return False
+
+        if self._future_request_pending:
+            return False
 
         if not self.future_traj_client.service_is_ready():
             if not self._future_traj_warned:
                 self.get_logger().warn("/future_task_space service not ready")
                 self._future_traj_warned = True
-            return
+            return False
 
         req = GetFutureTrajectory.Request()
         req.t_delay = float(t_delay)
 
-        future = self.future_traj_client.call_async(req)
+        try:
+            future = self.future_traj_client.call_async(req)
+        except Exception as e:
+            self.get_logger().error(f"[Controller] /future_task_space request failed: {e}")
+            self._future_request_pending = False
+            return False
+
+        self._future_request_pending = True
+        self._future_trajectory_updated_this_tick = 1
         future.add_done_callback(self._future_traj_response_callback)
+        return True
 
     def gp_mode_callback(self, msg):
         self.gp_mode = msg.data
@@ -1463,6 +1694,7 @@ class CartesianImpedanceController(Node):
             # initialize t_initial, get t_elapsed, t_last and dt
             # initialize q_initial, get q, dq and ddq
             t_now = self.get_clock().now()
+            self._begin_control_tick()
             q = np.array(msg.position, dtype=float)
             self.q = q
 
@@ -1750,10 +1982,11 @@ class CartesianImpedanceController(Node):
                         future_request_start
                     )
 
-                if self._latest_future_traj is not None:
-                    x_f = np.array(self._latest_future_traj["x_des"], dtype=float)
-                    dx_f = np.array(self._latest_future_traj["dx_des"], dtype=float)
-                    ddx_f = np.array(self._latest_future_traj["ddx_des"], dtype=float)
+                future_traj = self._get_latest_future_trajectory_if_fresh(t_now)
+                if future_traj is not None:
+                    x_f = future_traj["x_des"]
+                    dx_f = future_traj["dx_des"]
+                    ddx_f = future_traj["ddx_des"]
                     dq_future_ref = jacobian_pinv @ dx_f[0:5]
                     ddq_future_ref = jacobian_pinv @ (ddx_f[0:5] - djacobian @ dq)
 
@@ -1801,68 +2034,72 @@ class CartesianImpedanceController(Node):
                 )
             # tau = tau
 
-            self._reset_historical_residual_db_shadow_state()
-
             # === 控制循环的最后：按节拍触发一次“GP 更新”（本地 + 云端） ===
             if self.gp_active and self.use_gp and self.gp_prediction_enabled:
-                gp_total_start = time.perf_counter() if timing_row is not None else None
-                self.gp_counter += 1
-                tick = (self.gp_counter % self.gp_stride == 0)
-                # # ---------------------------------------------------------
-                y_hat_local, var_local = self._gp_predict_and_update(
-                    self.q, dq, self.ddq_des_joint,
-                    self.tau_residual_filtered,
-                    self.gp_models_small,
-                    # True 保持原 online update；False 用于 frozen GP evaluation，不允许 add_point。
-                    update=self.gp_online_update_enabled,
-                    timing_label="local",
-                    timing_row=timing_row
-                )
-                self.y_hat_local = y_hat_local
-                self.var_local = var_local
-                if (
-                    self.gp_shadow_paper_fusion_logging_enabled
-                    and self.gp_historical_shadow_enabled
-                    and self.gp_historical_source_mode == "local_prediction_pool"
-                ):
-                    self._gp_local_feature_shadow = self._build_gp_shadow_feature(
-                        self.q, dq
+                if self._should_run_gp_prediction_this_tick():
+                    gp_total_start = time.perf_counter() if timing_row is not None else None
+                    # # ---------------------------------------------------------
+                    y_hat_local, var_local = self._gp_predict_and_update(
+                        self.q, dq, self.ddq_des_joint,
+                        self.tau_residual_filtered,
+                        self.gp_models_small,
+                        # True 保持原 online update；False 用于 frozen GP evaluation，不允许 add_point。
+                        update=self.gp_online_update_enabled,
+                        timing_label="local",
+                        timing_row=timing_row
                     )
-                    self._gp_local_prediction_sequence_shadow += 1
+                    self.y_hat_local = y_hat_local
+                    self.var_local = var_local
+                    if (
+                        self.gp_shadow_paper_fusion_logging_enabled
+                        and self.gp_historical_shadow_enabled
+                        and self.gp_historical_source_mode == "local_prediction_pool"
+                    ):
+                        self._gp_local_feature_shadow = self._build_gp_shadow_feature(
+                            self.q, dq
+                        )
+                        self._gp_local_prediction_sequence_shadow += 1
 
-                y_hat_cloud_current, var_cloud_current = self._gp_predict_and_update(
-                    q, dq_pred_next, ddq,
-                    self.tau_residual_filtered,
-                    self.gp_models_big,
-                    update=self.gp_online_update_enabled,
-                    timing_label="cloud_like",
-                    timing_row=timing_row
-                )
-                self.y_hat_cloud_current = y_hat_cloud_current.copy()
-                self.y_hat_cloud, self.var_cloud = self._delay_cloud_like_output(
-                    y_hat_cloud_current,
-                    var_cloud_current
-                )
-                
-                # ---------------------------------------------------------
-                # C) 每帧融合（不要只在 else 融合）
-                # ---------------------------------------------------------
-                eps = 1e-8
-                v_l = np.maximum(self.var_local, eps)
-                v_c = np.maximum(self.var_cloud, eps)
+                    y_hat_cloud_current, var_cloud_current = self._gp_predict_and_update(
+                        q, dq_pred_next, ddq,
+                        self.tau_residual_filtered,
+                        self.gp_models_big,
+                        update=self.gp_online_update_enabled,
+                        timing_label="cloud_like",
+                        timing_row=timing_row
+                    )
+                    self.y_hat_cloud_current = y_hat_cloud_current.copy()
+                    self.y_hat_cloud, self.var_cloud = self._delay_cloud_like_output(
+                        y_hat_cloud_current,
+                        var_cloud_current
+                    )
 
-                prec_l = 1.0 / v_l
-                prec_c = 1.0 / v_c
-                w_l = prec_l / (prec_l + prec_c)
+                    # ---------------------------------------------------------
+                    # C) stride tick 更新融合；non-stride tick hold latest output
+                    # ---------------------------------------------------------
+                    eps = 1e-8
+                    v_l = np.maximum(self.var_local, eps)
+                    v_c = np.maximum(self.var_cloud, eps)
 
-                self.y_hat_combined = w_l * self.y_hat_local + (1.0 - w_l) * self.y_hat_cloud
+                    prec_l = 1.0 / v_l
+                    prec_c = 1.0 / v_c
+                    w_l = prec_l / (prec_l + prec_c)
+
+                    self.y_hat_combined = w_l * self.y_hat_local + (1.0 - w_l) * self.y_hat_cloud
+                    self._mark_gp_prediction_result(t_now)
+                    if gp_total_start is not None:
+                        self._timing_add_ms(timing_row, "gp_total_ms", gp_total_start)
+                else:
+                    self._update_gp_output_freshness(t_now)
                 self._update_historical_residual_db_shadow_state(self.q, dq)
-                if gp_total_start is not None:
-                    self._timing_add_ms(timing_row, "gp_total_ms", gp_total_start)
+            else:
+                self._reset_historical_residual_db_shadow_state()
+                self._update_gp_output_freshness(t_now)
 
             # tau = tau - self.y_hat_local
             # 默认 compensation 关闭时返回原始 tau；开启后才按原注释方向补偿。
             self._update_gp_shadow_logging_state(self.q, dq)
+            self._update_gp_output_freshness(t_now)
             self._tau_nominal = tau.copy()
             tau = self._apply_gp_compensation(tau)
             self._tau_final = tau.copy()
@@ -1881,6 +2118,20 @@ class CartesianImpedanceController(Node):
                 self.gp_scaled_history.append(self._gp_scaled.tolist())
                 self.gp_applied_history.append(self._gp_applied.tolist())
                 self.gp_clip_active_history.append(self._gp_clip_active.tolist())
+                self.gp_prediction_stride_history.append(int(self.gp_prediction_stride))
+                self.gp_prediction_updated_this_tick_history.append(
+                    int(self._gp_prediction_updated_this_tick)
+                )
+                self.gp_prediction_age_sec_history.append(
+                    float(self.gp_prediction_age_sec)
+                )
+                self.gp_output_fresh_history.append(int(self.gp_output_fresh))
+                self.future_trajectory_request_stride_history.append(
+                    int(self.future_trajectory_request_stride)
+                )
+                self.future_trajectory_updated_this_tick_history.append(
+                    int(self._future_trajectory_updated_this_tick)
+                )
                 self.gp_shadow_historical_available_history.append(
                     int(self.gp_shadow_historical_available)
                 )
@@ -1939,6 +2190,9 @@ class CartesianImpedanceController(Node):
                 self.hist_db_gated_pred_history.append(self.hist_db_gated_pred.tolist())
                 self.hist_db_query_stride_history.append(
                     int(getattr(self, "gp_historical_db_query_stride", 1))
+                )
+                self.hist_db_query_updated_this_tick_history.append(
+                    int(getattr(self, "hist_db_query_updated_this_tick", 0))
                 )
                 self.hist_db_query_reused_history.append(
                     int(getattr(self, "hist_db_query_reused", 0))
@@ -2770,6 +3024,7 @@ class CartesianImpedanceController(Node):
         self.hist_db_pred = zero.copy()
         self.hist_db_gated_pred = zero.copy()
         self.hist_db_gated_source_code = 0
+        self.hist_db_query_updated_this_tick = 0
         self._reset_historical_soft_shadow_state()
 
     def _update_historical_residual_db_shadow_state(self, q, dq):
@@ -2797,6 +3052,7 @@ class CartesianImpedanceController(Node):
         )
 
         self.hist_db_query_reused = int(not should_query)
+        self.hist_db_query_updated_this_tick = int(should_query)
 
         if should_query:
             result = self._query_historical_residual_db_shadow(q, dq)
@@ -3248,6 +3504,7 @@ class CartesianImpedanceController(Node):
         if (
             not self.gp_shadow_paper_fusion_logging_enabled
             or not self.gp_prediction_enabled
+            or not self._gp_prediction_updated_this_tick
         ):
             return
 
@@ -3383,6 +3640,14 @@ class CartesianImpedanceController(Node):
         else:
             compensation = self.y_hat_local
             self._gp_source_code = 1
+
+        if self.gp_compensation_source != "hist_db" and not self.gp_output_fresh:
+            self._gp_source_code = 0
+            self._gp_selected_raw = np.zeros(7, dtype=float)
+            self._gp_scaled = np.zeros(7, dtype=float)
+            self._gp_applied = np.zeros(7, dtype=float)
+            self._gp_clip_active = np.zeros(7, dtype=int)
+            return tau
 
         # 先清洗成 finite 7D，再 scale / clip，避免 non-finite 进入 torque command。
         self._gp_selected_raw = self._as_finite_7d(compensation, 0.0).copy()
@@ -3663,6 +3928,12 @@ class CartesianImpedanceController(Node):
                 self.gp_scaled_history,
                 self.gp_applied_history,
                 self.gp_clip_active_history,
+                self.gp_prediction_stride_history,
+                self.gp_prediction_updated_this_tick_history,
+                self.gp_prediction_age_sec_history,
+                self.gp_output_fresh_history,
+                self.future_trajectory_request_stride_history,
+                self.future_trajectory_updated_this_tick_history,
                 self.gp_shadow_historical_available_history,
                 self.gp_shadow_local_raw_history,
                 self.gp_shadow_cloud_raw_history,
@@ -3695,6 +3966,10 @@ class CartesianImpedanceController(Node):
                 self.hist_db_gated_source_code_history,
                 self.hist_db_pred_history,
                 self.hist_db_gated_pred_history,
+                self.hist_db_query_stride_history,
+                self.hist_db_query_updated_this_tick_history,
+                self.hist_db_query_reused_history,
+                self.hist_db_query_counter_history,
                 self.hist_soft_valid_history,
                 self.hist_soft_nearest_distance_history,
                 self.hist_soft_raw_w_hist_history,
@@ -3755,6 +4030,12 @@ class CartesianImpedanceController(Node):
                     'gp_model_empty_or_prior_count',
                     'gp_model_cloud_uses_cloud_pkl',
                     'gp_model_cloud_uses_local_fallback',
+                    'gp_prediction_stride',
+                    'gp_prediction_updated_this_tick',
+                    'gp_prediction_age_sec',
+                    'gp_output_fresh',
+                    'future_trajectory_request_stride',
+                    'future_trajectory_updated_this_tick',
                 ])
                 header.extend([f'tau_nominal_{i+1}' for i in range(7)])
                 header.extend([f'tau_final_{i+1}' for i in range(7)])
@@ -3812,6 +4093,7 @@ class CartesianImpedanceController(Node):
                 header.extend([f'hist_db_gated_pred_{i+1}' for i in range(7)])
                 header.extend([
                     'hist_db_query_stride',
+                    'hist_db_query_updated_this_tick',
                     'hist_db_query_reused',
                     'hist_db_query_counter',
                 ])
@@ -3947,6 +4229,24 @@ class CartesianImpedanceController(Node):
                         self.gp_model_empty_or_prior_count,
                         self.gp_model_cloud_uses_cloud_pkl,
                         self.gp_model_cloud_uses_local_fallback,
+                        self.gp_prediction_stride_history[i]
+                        if i < len(self.gp_prediction_stride_history)
+                        else int(self.gp_prediction_stride),
+                        self.gp_prediction_updated_this_tick_history[i]
+                        if i < len(self.gp_prediction_updated_this_tick_history)
+                        else int(self._gp_prediction_updated_this_tick),
+                        self.gp_prediction_age_sec_history[i]
+                        if i < len(self.gp_prediction_age_sec_history)
+                        else float(self.gp_prediction_age_sec),
+                        self.gp_output_fresh_history[i]
+                        if i < len(self.gp_output_fresh_history)
+                        else int(self.gp_output_fresh),
+                        self.future_trajectory_request_stride_history[i]
+                        if i < len(self.future_trajectory_request_stride_history)
+                        else int(self.future_trajectory_request_stride),
+                        self.future_trajectory_updated_this_tick_history[i]
+                        if i < len(self.future_trajectory_updated_this_tick_history)
+                        else int(self._future_trajectory_updated_this_tick),
                     ])
 
                     if i < len(self.tau_nominal_history):
@@ -4188,6 +4488,9 @@ class CartesianImpedanceController(Node):
                         self.hist_db_query_stride_history[i]
                         if i < len(self.hist_db_query_stride_history)
                         else int(getattr(self, "gp_historical_db_query_stride", 1)),
+                        self.hist_db_query_updated_this_tick_history[i]
+                        if i < len(self.hist_db_query_updated_this_tick_history)
+                        else 0,
                         self.hist_db_query_reused_history[i]
                         if i < len(self.hist_db_query_reused_history)
                         else 0,

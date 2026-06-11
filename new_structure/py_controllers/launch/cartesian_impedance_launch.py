@@ -26,6 +26,8 @@ def generate_launch_description():
     # Stage 1: frozen GP / compensation experiment 参数，默认值保持安全。
     gp_prediction_enabled_parameter_name = 'gp_prediction_enabled'
     gp_online_update_enabled_parameter_name = 'gp_online_update_enabled'
+    gp_prediction_stride_parameter_name = 'gp_prediction_stride'
+    gp_output_timeout_sec_parameter_name = 'gp_output_timeout_sec'
     gp_model_dir_parameter_name = 'gp_model_dir'
     gp_compensation_enabled_parameter_name = 'gp_compensation_enabled'
     gp_compensation_source_parameter_name = 'gp_compensation_source'
@@ -61,6 +63,7 @@ def generate_launch_description():
     gp_historical_soft_non_online_scale_parameter_name = (
         'gp_historical_soft_non_online_scale'
     )
+    future_trajectory_request_stride_parameter_name = 'future_trajectory_request_stride'
     # Stage 3A trajectory 参数默认保持 planar_circle，只有显式传参才启用 z modulation。
     trajectory_mode_parameter_name = 'trajectory_mode'
     z_amplitude_parameter_name = 'z_amplitude'
@@ -81,6 +84,8 @@ def generate_launch_description():
     joint_space_command_topic = LaunchConfiguration(joint_space_command_topic_parameter_name)
     gp_prediction_enabled = LaunchConfiguration(gp_prediction_enabled_parameter_name)
     gp_online_update_enabled = LaunchConfiguration(gp_online_update_enabled_parameter_name)
+    gp_prediction_stride = LaunchConfiguration(gp_prediction_stride_parameter_name)
+    gp_output_timeout_sec = LaunchConfiguration(gp_output_timeout_sec_parameter_name)
     gp_model_dir = LaunchConfiguration(gp_model_dir_parameter_name)
     gp_compensation_enabled = LaunchConfiguration(gp_compensation_enabled_parameter_name)
     gp_compensation_source = LaunchConfiguration(gp_compensation_source_parameter_name)
@@ -127,6 +132,9 @@ def generate_launch_description():
     )
     gp_historical_soft_non_online_scale = LaunchConfiguration(
         gp_historical_soft_non_online_scale_parameter_name
+    )
+    future_trajectory_request_stride = LaunchConfiguration(
+        future_trajectory_request_stride_parameter_name
     )
     trajectory_mode = LaunchConfiguration(trajectory_mode_parameter_name)
     z_amplitude = LaunchConfiguration(z_amplitude_parameter_name)
@@ -199,6 +207,17 @@ def generate_launch_description():
             gp_online_update_enabled_parameter_name,
             default_value='true',
             description='Enable online GP model updates in the controller.'),
+        DeclareLaunchArgument(
+            gp_prediction_stride_parameter_name,
+            default_value='1',
+            description=(
+                'Run heavy GP predict/update once every N controller callbacks. '
+                '1 preserves per-callback GP updates.'
+            )),
+        DeclareLaunchArgument(
+            gp_output_timeout_sec_parameter_name,
+            default_value='0.5',
+            description='Maximum age in seconds for held GP output to enter active compensation.'),
         DeclareLaunchArgument(
             gp_model_dir_parameter_name,
             default_value='./new_structure/gp/gp_models',
@@ -328,6 +347,13 @@ def generate_launch_description():
                 'GOAL1 historical soft-shadow non-online historical scale for '
                 'validation logging only; no active torque compensation.'
             )),
+        DeclareLaunchArgument(
+            future_trajectory_request_stride_parameter_name,
+            default_value='1',
+            description=(
+                'Request future task-space trajectory once every N callbacks. '
+                '1 preserves per-callback request attempts; pending requests are not stacked.'
+            )),
         # Stage 3A launch defaults 保持 Stage 1 / Stage 2A 的平面圆轨迹行为。
         DeclareLaunchArgument(
             trajectory_mode_parameter_name,
@@ -386,6 +412,10 @@ def generate_launch_description():
                 joint_space_command_topic_parameter_name: joint_space_command_topic,
                 gp_prediction_enabled_parameter_name: gp_prediction_enabled,
                 gp_online_update_enabled_parameter_name: gp_online_update_enabled,
+                gp_prediction_stride_parameter_name: ParameterValue(
+                    gp_prediction_stride, value_type=int),
+                gp_output_timeout_sec_parameter_name: ParameterValue(
+                    gp_output_timeout_sec, value_type=float),
                 gp_model_dir_parameter_name: gp_model_dir,
                 gp_compensation_enabled_parameter_name: gp_compensation_enabled,
                 gp_compensation_source_parameter_name: gp_compensation_source,
@@ -448,6 +478,9 @@ def generate_launch_description():
                 gp_historical_soft_non_online_scale_parameter_name: ParameterValue(
                     gp_historical_soft_non_online_scale,
                     value_type=float),
+                future_trajectory_request_stride_parameter_name: ParameterValue(
+                    future_trajectory_request_stride,
+                    value_type=int),
             }]
         ),
         Node(
