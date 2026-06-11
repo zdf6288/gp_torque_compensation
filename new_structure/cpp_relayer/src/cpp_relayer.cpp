@@ -232,6 +232,7 @@ CallbackReturn CPPRelayer::on_activate(
   last_diagnostics_log_time_ = now;
   last_state_parameter_publish_time_ = rclcpp::Time();
   state_parameter_publish_count_ = 0;
+  last_diagnostics_state_parameter_publish_count_ = 0;
   last_state_parameter_publish_age_sec_ = 0.0;
   Vector7d command_to_write = Vector7d::Zero();
   bool has_command = false;
@@ -424,13 +425,21 @@ void CPPRelayer::maybeLogDiagnostics(const rclcpp::Time& now) {
     return;
   }
 
+  double observed_state_parameter_publish_rate = 0.0;
   if (last_diagnostics_log_time_.nanoseconds() != 0) {
     const auto elapsed = now - last_diagnostics_log_time_;
     if (elapsed.nanoseconds() >= 0 && elapsed.seconds() < diagnostics_log_period_sec_) {
       return;
     }
+    if (elapsed.nanoseconds() > 0) {
+      const auto published_since_last_log =
+          state_parameter_publish_count_ - last_diagnostics_state_parameter_publish_count_;
+      observed_state_parameter_publish_rate =
+          static_cast<double>(published_since_last_log) / elapsed.seconds();
+    }
   }
   last_diagnostics_log_time_ = now;
+  last_diagnostics_state_parameter_publish_count_ = state_parameter_publish_count_;
 
   RCLCPP_INFO(
       get_node()->get_logger(),
@@ -438,6 +447,7 @@ void CPPRelayer::maybeLogDiagnostics(const rclcpp::Time& now) {
       "stale_command_count=%llu, zero_fallback_count=%llu, "
       "last_command_age=%.6f s, max_command_age=%.6f s, timeout=%.6f s, "
       "state_parameter_publish_count=%llu, state_parameter_publish_rate=%.3f Hz, "
+      "observed_state_parameter_publish_rate=%.3f Hz, "
       "last_state_parameter_publish_age=%.6f s.",
       static_cast<unsigned long long>(update_count_),
       static_cast<unsigned long long>(received_command_count_),
@@ -446,6 +456,7 @@ void CPPRelayer::maybeLogDiagnostics(const rclcpp::Time& now) {
       last_command_age_sec_, max_command_age_sec_, command_timeout_sec_,
       static_cast<unsigned long long>(state_parameter_publish_count_),
       state_parameter_publish_rate_,
+      observed_state_parameter_publish_rate,
       last_state_parameter_publish_age_sec_);
 }
 

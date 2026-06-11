@@ -73,6 +73,7 @@ class CPPRelayer : public controller_interface::ControllerInterface {
   std::uint64_t zero_fallback_count_{0};
   std::uint64_t stale_event_log_count_{0};
   std::uint64_t state_parameter_publish_count_{0};
+  std::uint64_t last_diagnostics_state_parameter_publish_count_{0};
   double last_command_age_sec_{0.0};
   double max_command_age_sec_{0.0};
   double last_state_parameter_publish_age_sec_{0.0};
