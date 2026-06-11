@@ -115,7 +115,7 @@ CallbackReturn CPPRelayer::on_init() {
   try {
     auto_declare<std::string>("arm_id", "panda");
     auto_declare<double>("command_timeout_sec", kDefaultCommandTimeoutSec);
-    auto_declare<bool>("require_fresh_command_on_activate", true);
+    auto_declare<bool>("require_fresh_command_on_activate", false);
     auto_declare<bool>("diagnostics_enabled", true);
     auto_declare<double>("diagnostics_log_period_sec", 5.0);
     auto_declare<int>("log_first_n_stale_events", 5);
@@ -199,7 +199,7 @@ CallbackReturn CPPRelayer::on_configure(
     RCLCPP_DEBUG(get_node()->get_logger(), "configured successfully");
     RCLCPP_INFO(
         get_node()->get_logger(),
-        "cpp_relayer configured with command_timeout_sec=%.3f s, "
+        "cpp_relayer configured with final parameter values: command_timeout_sec=%.3f s, "
         "require_fresh_command_on_activate=%s; stale commands will be zeroed. "
         "diagnostics_enabled=%s, diagnostics_log_period_sec=%.3f, "
         "log_first_n_stale_events=%d, state_parameter_publish_rate=%.3f Hz.",

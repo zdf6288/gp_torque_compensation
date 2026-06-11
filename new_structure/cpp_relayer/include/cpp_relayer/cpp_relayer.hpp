@@ -35,7 +35,7 @@ class CPPRelayer : public controller_interface::ControllerInterface {
   std::string arm_id_;
   const int num_joints = 7;
   double command_timeout_sec_{0.2};
-  bool require_fresh_command_on_activate_{true};
+  bool require_fresh_command_on_activate_{false};
   bool diagnostics_enabled_{true};
   double diagnostics_log_period_sec_{5.0};
   int log_first_n_stale_events_{5};

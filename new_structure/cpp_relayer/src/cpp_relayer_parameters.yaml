@@ -9,7 +9,7 @@ cpp_relayer:
   }
   require_fresh_command_on_activate: {
     type: bool,
-    default_value: true,
+    default_value: false,
   }
   diagnostics_enabled: {
     type: bool,
