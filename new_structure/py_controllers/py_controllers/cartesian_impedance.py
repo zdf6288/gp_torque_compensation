@@ -644,50 +644,66 @@ class CartesianImpedanceController(Node):
             f"run_name='{self.run_name}', "
             f"data_output_dir='{self.data_output_dir}'"
         )
-        self.get_logger().info(
-            "[GP Shadow] Paper fusion logging controls: "
-            f"gp_shadow_paper_fusion_logging_enabled={self.gp_shadow_paper_fusion_logging_enabled}, "
-            f"gp_historical_shadow_enabled={self.gp_historical_shadow_enabled}, "
-            f"gp_historical_source_mode='{self.gp_historical_source_mode}', "
-            f"gp_shadow_variance_eps={self.gp_shadow_variance_eps}, "
-            f"gp_shadow_hist_fallback_variance={self.gp_shadow_hist_fallback_variance}"
+        if self.gp_shadow_paper_fusion_logging_enabled:
+            self.get_logger().info(
+                "[GP Shadow] Paper fusion logging controls: "
+                f"gp_shadow_paper_fusion_logging_enabled={self.gp_shadow_paper_fusion_logging_enabled}, "
+                f"gp_historical_shadow_enabled={self.gp_historical_shadow_enabled}, "
+                f"gp_historical_source_mode='{self.gp_historical_source_mode}', "
+                f"gp_shadow_variance_eps={self.gp_shadow_variance_eps}, "
+                f"gp_shadow_hist_fallback_variance={self.gp_shadow_hist_fallback_variance}"
+            )
+        else:
+            self.get_logger().debug("[GP Shadow] Paper fusion logging disabled")
+
+        if self.gp_historical_shadow_enabled:
+            self.get_logger().info(
+                "[GP Shadow] Historical source controls: "
+                f"enabled={self.gp_historical_shadow_enabled}, "
+                f"mode='{self.gp_historical_source_mode}', "
+                f"max_points={self.gp_historical_shadow_max_points}, "
+                f"min_points={self.gp_historical_shadow_min_points}, "
+                f"k={self.gp_historical_shadow_k}, "
+                f"max_distance={self.gp_historical_shadow_max_distance}, "
+                f"variance_floor={self.gp_historical_shadow_variance_floor}, "
+                f"distance_eps={self.gp_historical_shadow_distance_eps}; "
+                "shadow-only and does not enter tau_final"
+            )
+        else:
+            self.get_logger().debug("[GP Shadow] Historical source disabled")
+
+        hist_db_source_active = self.gp_compensation_source in (
+            "hist_db",
+            "triple",
+            "triple_dynamic",
         )
-        self.get_logger().info(
-            "[GP Shadow] Historical source controls: "
-            f"enabled={self.gp_historical_shadow_enabled}, "
-            f"mode='{self.gp_historical_source_mode}', "
-            f"max_points={self.gp_historical_shadow_max_points}, "
-            f"min_points={self.gp_historical_shadow_min_points}, "
-            f"k={self.gp_historical_shadow_k}, "
-            f"max_distance={self.gp_historical_shadow_max_distance}, "
-            f"variance_floor={self.gp_historical_shadow_variance_floor}, "
-            f"distance_eps={self.gp_historical_shadow_distance_eps}; "
-            "shadow-only and does not enter tau_final"
-        )
-        self.get_logger().info(
-            "[GP Hist DB] Persistent residual DB controls: "
-            f"enabled={self.gp_historical_db_enabled}, "
-            f"path='{self.gp_historical_db_path}', "
-            f"loaded={self.gp_historical_db_loaded}, "
-            f"rows={self.gp_historical_db_row_count}, "
-            f"k={self.gp_historical_db_k}, "
-            f"q_scale={self.gp_historical_db_q_scale}, "
-            f"dq_scale={self.gp_historical_db_dq_scale}, "
-            f"max_distance={self.gp_historical_db_max_distance}, "
-            "disable_when_online_update="
-            f"{self.gp_historical_db_disable_when_online_update}, "
-            f"fallback_source='{self.gp_historical_db_fallback_source}'; "
-            "shadow-only and does not enter tau_final"
-        )
-        self.get_logger().info(
-            "[GP Hist Soft] Soft-weight shadow logging controls: "
-            f"enabled={self.gp_historical_soft_shadow_enabled}, "
-            f"alpha={self.gp_historical_soft_alpha}, "
-            f"distance_threshold={self.gp_historical_soft_distance_threshold}, "
-            f"online_scale={self.gp_historical_soft_online_scale}, "
-            f"non_online_scale={self.gp_historical_soft_non_online_scale}; "
-            "shadow-only and does not enter tau_final"
-        )
+        if self.gp_historical_db_enabled or hist_db_source_active:
+            self.get_logger().info(
+                "[GP Hist DB] Persistent residual DB controls: "
+                f"enabled={self.gp_historical_db_enabled}, "
+                f"loaded={self.gp_historical_db_loaded}, "
+                f"rows={self.gp_historical_db_row_count}, "
+                f"k={self.gp_historical_db_k}, "
+                f"q_scale={self.gp_historical_db_q_scale}, "
+                f"dq_scale={self.gp_historical_db_dq_scale}, "
+                f"max_distance={self.gp_historical_db_max_distance}, "
+                f"fallback_source='{self.gp_historical_db_fallback_source}'"
+            )
+        else:
+            self.get_logger().debug("[GP Hist DB] Persistent residual DB disabled")
+
+        if self.gp_historical_soft_shadow_enabled:
+            self.get_logger().info(
+                "[GP Hist Soft] Soft-weight shadow logging controls: "
+                f"enabled={self.gp_historical_soft_shadow_enabled}, "
+                f"alpha={self.gp_historical_soft_alpha}, "
+                f"distance_threshold={self.gp_historical_soft_distance_threshold}, "
+                f"online_scale={self.gp_historical_soft_online_scale}, "
+                f"non_online_scale={self.gp_historical_soft_non_online_scale}; "
+                "shadow-only and does not enter tau_final"
+            )
+        else:
+            self.get_logger().debug("[GP Hist Soft] Soft-weight shadow logging disabled")
         if (
             self.gp_historical_db_enabled
             and self.gp_historical_db_disable_when_online_update
@@ -746,6 +762,8 @@ class CartesianImpedanceController(Node):
         self.y_hat_local = np.zeros(7)
         self.y_hat_local_history = []
         self.offline_limit = 0
+        self._gp_dynamic_sanity_warned = False
+        self._reset_gp_model_diagnostics()
 
         # ===== local GP history memory =====
         self.printer = 0
@@ -2208,7 +2226,7 @@ class CartesianImpedanceController(Node):
         self.gp_historical_db_y_residual = None
 
         if not self.gp_historical_db_enabled:
-            self.get_logger().info("[GP Hist DB] Disabled; persistent DB will not be loaded.")
+            self.get_logger().debug("[GP Hist DB] Disabled; persistent DB will not be loaded.")
             return
 
         if not self.gp_historical_db_path:
@@ -2276,6 +2294,182 @@ class CartesianImpedanceController(Node):
                 f"continuing with DB unavailable: {e}"
             )
 
+    def _reset_gp_model_diagnostics(self):
+        self.gp_model_local_loaded_count = 0
+        self.gp_model_cloud_loaded_count = 0
+        self.gp_model_cloud_fallback_count = 0
+        self.gp_model_empty_or_prior_count = 0
+        self.gp_model_cloud_uses_cloud_pkl = 0
+        self.gp_model_cloud_uses_local_fallback = 0
+        self.gp_model_local_files_by_joint = {}
+        self.gp_model_cloud_files_by_joint = {}
+
+    def _count_numeric_samples(self, value):
+        if value is None:
+            return None
+        try:
+            arr = np.asarray(value)
+            if arr.size == 0:
+                return 0
+            if arr.dtype.kind in ("b", "i", "u", "f"):
+                return int(np.sum(arr))
+        except Exception:
+            pass
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _model_sample_summary(self, model):
+        summary = {}
+        for attr in ("X_list", "Y_list", "y_list", "experts", "local_experts"):
+            value = getattr(model, attr, None)
+            if value is not None:
+                try:
+                    summary[f"{attr}_len"] = len(value)
+                except TypeError:
+                    summary[f"{attr}_len"] = "NA"
+
+        sample_count = None
+        for attr in ("localCount", "num_points", "N"):
+            count = self._count_numeric_samples(getattr(model, attr, None))
+            if count is not None:
+                summary[attr] = count
+                sample_count = count
+                break
+
+        if sample_count is None:
+            for attr in ("experts", "local_experts"):
+                experts = getattr(model, attr, None)
+                if experts is None:
+                    continue
+                total = 0
+                detected = False
+                try:
+                    for expert in experts:
+                        for count_attr in ("localCount", "num_points", "N"):
+                            count = self._count_numeric_samples(
+                                getattr(expert, count_attr, None)
+                            )
+                            if count is not None:
+                                total += count
+                                detected = True
+                                break
+                except TypeError:
+                    detected = False
+                if detected:
+                    summary[f"{attr}_sample_total"] = total
+                    sample_count = total
+                    break
+
+        x_list_len = summary.get("X_list_len")
+        empty_or_prior = (
+            x_list_len == 0
+            or sample_count is None
+            or sample_count <= 0
+        )
+        return sample_count, summary, empty_or_prior
+
+    def _format_gp_model_summary(self, summary):
+        if not summary:
+            return "no sample attributes detected"
+        return ", ".join(f"{key}={value}" for key, value in sorted(summary.items()))
+
+    def _apply_gp_model_runtime_cfg(self, model, joint, cfg):
+        try:
+            # 只有在模型里确实有这些属性时才改，避免旧版本崩溃。
+            if hasattr(model, "max_data_per_expert"):
+                model.max_data_per_expert = int(cfg["max_data_per_expert"])
+            if hasattr(model, "nearest_k"):
+                model.nearest_k = int(cfg["nearest_k"])
+            if hasattr(model, "max_experts"):
+                model.max_experts = int(cfg["max_experts"])
+            if hasattr(model, "timescale"):
+                model.timescale = float(cfg["timescale"])
+        except Exception as e:
+            self.get_logger().warn(
+                f"[GP] joint{joint}: override model params failed: {e}"
+            )
+
+    def _load_gp_model_pack(self, path, joint, role, cfg):
+        abs_path = os.path.abspath(path)
+        self.get_logger().debug(f"[GP] 尝试加载 {role} 模型: {abs_path}")
+
+        if not os.path.isfile(path):
+            self.get_logger().warn(f"[GP] {role} model file not found: {abs_path}")
+            return None
+
+        try:
+            with open(path, "rb") as f:
+                pack = pickle.load(f)
+
+            model = pack["model"]
+            stats = pack["stats"]   # (Xm, Xs, Ym, Ys)
+            Xm, Xs, Ym, Ys = stats
+            x_dim = int(len(Xm))    # 自动推断 14 或 21 维
+
+            self._apply_gp_model_runtime_cfg(model, joint, cfg)
+            sample_count, sample_summary, empty_or_prior = self._model_sample_summary(model)
+            if empty_or_prior:
+                self.gp_model_empty_or_prior_count += 1
+                self.get_logger().warn(
+                    "[GP Sanity] "
+                    f"joint{joint} {role} frozen model appears empty/prior-only; "
+                    "non-online prediction may be constant; "
+                    f"{self._format_gp_model_summary(sample_summary)}"
+                )
+
+            self.get_logger().debug(
+                f"[GP] joint{joint} {role} loaded: x_dim={x_dim}, "
+                f"file='{os.path.basename(path)}', "
+                f"sample_count={sample_count if sample_count is not None else 'unknown'}, "
+                f"max_data_per_expert={getattr(model, 'max_data_per_expert', 'NA')}, "
+                f"nearest_k={getattr(model, 'nearest_k', 'NA')}, "
+                f"max_experts={getattr(model, 'max_experts', 'NA')}, "
+                f"timescale={getattr(model, 'timescale', 'NA')}"
+            )
+
+            return {
+                "model": model,
+                "stats": stats,
+                "x_dim": x_dim,
+                "file_basename": os.path.basename(path),
+                "sample_count": sample_count,
+                "sample_summary": sample_summary,
+                "empty_or_prior": empty_or_prior,
+            }
+
+        except Exception as e:
+            self.get_logger().error(f"[GP] fail loading {abs_path}: {e}")
+            return None
+
+    def _format_gp_model_files_by_joint(self, files_by_joint):
+        parts = []
+        for joint in range(1, 8):
+            parts.append(f"joint{joint}:{files_by_joint.get(joint, 'missing')}")
+        return ", ".join(parts)
+
+    def _summarize_loaded_gp_models(self, dir_path):
+        self.get_logger().info(
+            "[GP] Model loading summary: "
+            f"gp_model_dir='{dir_path}', "
+            f"local_model_loaded_count={self.gp_model_local_loaded_count}, "
+            f"cloud_model_loaded_count={self.gp_model_cloud_loaded_count}, "
+            f"cloud_local_fallback_count={self.gp_model_cloud_fallback_count}, "
+            f"empty_or_prior_model_count={self.gp_model_empty_or_prior_count}, "
+            f"gp_online_update_enabled={self.gp_online_update_enabled}, "
+            f"gp_compensation_source='{self.gp_compensation_source}', "
+            f"delay_steps={self.delay_steps}"
+        )
+        self.get_logger().info(
+            "[GP] Local model file basenames per joint: "
+            f"{self._format_gp_model_files_by_joint(self.gp_model_local_files_by_joint)}"
+        )
+        self.get_logger().info(
+            "[GP] Cloud-like delayed GP model file basenames per joint: "
+            f"{self._format_gp_model_files_by_joint(self.gp_model_cloud_files_by_joint)}"
+        )
+
     def _load_gp_models(self, dir_path="./new_structure/gp/gp_models"):
         """加载离线训练好的每关节GP，支持高维输入（14或21）""" 
 
@@ -2286,161 +2480,100 @@ class CartesianImpedanceController(Node):
         abs_dir = os.path.abspath(dir_path)
         self.get_logger().info(f"[GP] 当前工作目录: {cwd}")
         self.get_logger().info(f"[GP] 模型目录绝对路径: {abs_dir}")
-        
-        # ===== 按关节定制 GP 参数（你可以自己改这些值） =====
-        # key = 关节号（1..6），"default" 为所有关节的默认配置
-        per_joint_cfg = {
+
+        self._reset_gp_model_diagnostics()
+
+        local_joint_cfg = {
             "default": dict(
                 max_data_per_expert=25,
                 nearest_k=1,
                 max_experts=1,
                 timescale=0.03,
             ),
-            # 举例：如果你想让 6 号关节忘得快一点、专家少一点，可以单独改：
             6: dict(
                 max_data_per_expert=25,
                 nearest_k=1,
                 max_experts=1,
+                timescale=0.05,
+            ),
+        }
+        cloud_joint_cfg = {
+            "default": dict(
+                max_data_per_expert=50,
+                nearest_k=2,
+                max_experts=10,
+                timescale=0.03,
+            ),
+            6: dict(
+                max_data_per_expert=50,
+                nearest_k=2,
+                max_experts=10,
                 timescale=0.05,
             ),
         }
 
         self.gp_models_small = {}
-        loaded = 0
-
-        # ==== 必须改成加载 1..7 ====
-        for j in range(1, 8):
-            p = os.path.join(dir_path, f"joint{j}_local.pkl")
-            abs_p = os.path.abspath(p)
-            self.get_logger().info(f"[GP] 尝试加载模型: {abs_p}")
-
-            if not os.path.isfile(p):
-                self.get_logger().warn(f"[GP] model file not found: {abs_p}")
-                continue
-
-            try:
-                with open(p, "rb") as f:
-                    pack = pickle.load(f)
-
-                model = pack["model"]
-                stats = pack["stats"]   # (Xm, Xs, Ym, Ys)
-                Xm, Xs, Ym, Ys = stats
-                x_dim = int(len(Xm))    # 自动推断 14 或 21 维
-
-                # ===== 在这里覆盖 SkyGP_rBCM 的参数 =====
-                cfg = per_joint_cfg.get(j, per_joint_cfg["default"])
-                try:
-                    # 只有在模型里确实有这些属性时才改，避免旧版本崩溃
-                    if hasattr(model, "max_data_per_expert"):
-                        model.max_data_per_expert = int(cfg["max_data_per_expert"])
-                    if hasattr(model, "nearest_k"):
-                        model.nearest_k = int(cfg["nearest_k"])
-                    if hasattr(model, "max_experts"):
-                        model.max_experts = int(cfg["max_experts"])
-                    if hasattr(model, "timescale"):
-                        model.timescale = float(cfg["timescale"])
-
-                    self.get_logger().info(
-                        f"[GP] joint{j} loaded: x_dim={x_dim}, "
-                        f"max_data_per_expert={getattr(model, 'max_data_per_expert', 'NA')}, "
-                        f"nearest_k={getattr(model, 'nearest_k', 'NA')}, "
-                        f"max_experts={getattr(model, 'max_experts', 'NA')}, "
-                        f"timescale={getattr(model, 'timescale', 'NA')}"
-                    )
-                except Exception as e:
-                    self.get_logger().warn(
-                        f"[GP] joint{j}: override model params failed: {e}"
-                    )
-
-                self.gp_models_small[j] = {
-                    "model": model,
-                    "stats": stats,
-                    "x_dim": x_dim
-                }
-
-                loaded += 1
-                self.get_logger().info(f"[GP] 成功加载关节{j}模型, x_dim={x_dim}")
-
-            except Exception as e:
-                self.get_logger().error(f"[GP] fail loading {abs_p}: {e}")
-        
-        per_joint_cfg = {
-            "default": dict(
-                max_data_per_expert=50,
-                nearest_k=2,
-                max_experts=10,
-                timescale=0.03,
-            ),
-            # 举例：如果你想让 6 号关节忘得快一点、专家少一点，可以单独改：
-            6: dict(
-                max_data_per_expert=50,
-                nearest_k=2,
-                max_experts=10,
-                timescale=0.05,
-            ),
-        }
-
         self.gp_models_big = {}
-        loaded = 0
 
-        # ==== 必须改成加载 1..7 ====
         for j in range(1, 8):
-            p = os.path.join(dir_path, f"joint{j}_local.pkl")
-            abs_p = os.path.abspath(p)
-            self.get_logger().info(f"[GP] 尝试加载模型: {abs_p}")
-
-            if not os.path.isfile(p):
-                self.get_logger().warn(f"[GP] model file not found: {abs_p}")
+            local_path = os.path.join(dir_path, f"joint{j}_local.pkl")
+            pack = self._load_gp_model_pack(
+                local_path,
+                j,
+                "local",
+                local_joint_cfg.get(j, local_joint_cfg["default"])
+            )
+            if pack is None:
                 continue
+            self.gp_models_small[j] = pack
+            self.gp_model_local_loaded_count += 1
+            self.gp_model_local_files_by_joint[j] = pack["file_basename"]
 
-            try:
-                with open(p, "rb") as f:
-                    pack = pickle.load(f)
+        for j in range(1, 8):
+            cloud_path = os.path.join(dir_path, f"joint{j}_cloud.pkl")
+            local_fallback_path = os.path.join(dir_path, f"joint{j}_local.pkl")
+            model_path = cloud_path
 
-                model = pack["model"]
-                stats = pack["stats"]   # (Xm, Xs, Ym, Ys)
-                Xm, Xs, Ym, Ys = stats
-                x_dim = int(len(Xm))    # 自动推断 14 或 21 维
-
-                # ===== 在这里覆盖 SkyGP_rBCM 的参数 =====
-                cfg = per_joint_cfg.get(j, per_joint_cfg["default"])
-                try:
-                    # 只有在模型里确实有这些属性时才改，避免旧版本崩溃
-                    if hasattr(model, "max_data_per_expert"):
-                        model.max_data_per_expert = int(cfg["max_data_per_expert"])
-                    if hasattr(model, "nearest_k"):
-                        model.nearest_k = int(cfg["nearest_k"])
-                    if hasattr(model, "max_experts"):
-                        model.max_experts = int(cfg["max_experts"])
-                    if hasattr(model, "timescale"):
-                        model.timescale = float(cfg["timescale"])
-
-                    self.get_logger().info(
-                        f"[GP] joint{j} loaded: x_dim={x_dim}, "
-                        f"max_data_per_expert={getattr(model, 'max_data_per_expert', 'NA')}, "
-                        f"nearest_k={getattr(model, 'nearest_k', 'NA')}, "
-                        f"max_experts={getattr(model, 'max_experts', 'NA')}, "
-                        f"timescale={getattr(model, 'timescale', 'NA')}"
-                    )
-                except Exception as e:
+            if not os.path.isfile(cloud_path):
+                if not os.path.isfile(local_fallback_path):
                     self.get_logger().warn(
-                        f"[GP] joint{j}: override model params failed: {e}"
+                        "[GP] cloud-like model file not found and no local fallback "
+                        f"exists for joint{j}: {os.path.abspath(cloud_path)}"
                     )
+                    continue
+                model_path = local_fallback_path
+                self.gp_model_cloud_fallback_count += 1
+                self.gp_model_cloud_uses_local_fallback = 1
+                self.get_logger().warn(
+                    "[GP] "
+                    f"joint{j}_cloud.pkl not found; using joint{j}_local.pkl as "
+                    "cloud-like local fallback. This is not an actual remote cloud "
+                    "model and must not be treated as a silent cloud model load."
+                )
+            else:
+                self.gp_model_cloud_uses_cloud_pkl = 1
 
-                self.gp_models_big[j] = {
-                    "model": model,
-                    "stats": stats,
-                    "x_dim": x_dim
-                }
+            pack = self._load_gp_model_pack(
+                model_path,
+                j,
+                "cloud-like",
+                cloud_joint_cfg.get(j, cloud_joint_cfg["default"])
+            )
+            if pack is None:
+                continue
+            self.gp_models_big[j] = pack
+            self.gp_model_cloud_loaded_count += 1
+            self.gp_model_cloud_files_by_joint[j] = pack["file_basename"]
 
-                loaded += 1
-                self.get_logger().info(f"[GP] 成功加载关节{j}模型, x_dim={x_dim}")
-
-            except Exception as e:
-                self.get_logger().error(f"[GP] fail loading {abs_p}: {e}")
-
-        self.gp_ready = (loaded > 0)
-        self.get_logger().info(f"[GP] 共加载 {loaded} 个模型，ready={self.gp_ready}")
+        self.gp_ready = (
+            self.gp_model_local_loaded_count > 0
+            or self.gp_model_cloud_loaded_count > 0
+        )
+        self._summarize_loaded_gp_models(dir_path)
+        self.get_logger().info(
+            f"[GP] 共加载 local={self.gp_model_local_loaded_count}, "
+            f"cloud-like={self.gp_model_cloud_loaded_count} 个模型，ready={self.gp_ready}"
+        )
 
     def _lowpass_vector(self, x_raw, x_prev, dt, cutoff_hz):
         """
@@ -3426,6 +3559,66 @@ class CartesianImpedanceController(Node):
         except Exception as e:
             self.get_logger().error(f"[GP] failed to import skygp from {skygp_path}: {e}")
             return False
+
+    def _gp_signal_constant_summary(self, name, history, min_rows=100):
+        if len(history) < min_rows:
+            return None
+
+        try:
+            arr = np.asarray(history, dtype=float)
+        except (TypeError, ValueError):
+            return None
+        if arr.ndim != 2 or arr.shape[1] != 7:
+            return None
+
+        finite_rows = np.all(np.isfinite(arr), axis=1)
+        arr = arr[finite_rows]
+        if arr.shape[0] < min_rows:
+            return None
+
+        ranges = np.ptp(arr, axis=0)
+        rounded = np.round(arr, decimals=9)
+        unique_counts = np.array([
+            len(np.unique(rounded[:, joint_idx]))
+            for joint_idx in range(7)
+        ])
+        max_range = float(np.max(ranges))
+        max_unique = int(np.max(unique_counts))
+        if max_range <= 1e-6 or max_unique <= 3:
+            return (
+                f"{name}(rows={arr.shape[0]}, "
+                f"max_range={max_range:.3e}, max_unique={max_unique})"
+            )
+        return None
+
+    def _warn_if_gp_dynamic_signal_constant(self):
+        if (
+            self._gp_dynamic_sanity_warned
+            or not self.gp_prediction_enabled
+            or self.gp_online_update_enabled
+        ):
+            return
+
+        constant_summaries = []
+        for name, history in (
+            ("y_hat_local", self.y_hat_local_history),
+            ("y_hat_cloud", self.y_hat_cloud_history),
+            ("gp_selected_raw", self.gp_selected_raw_history),
+            ("gp_applied", self.gp_applied_history),
+        ):
+            summary = self._gp_signal_constant_summary(name, history)
+            if summary is not None:
+                constant_summaries.append(summary)
+
+        if not constant_summaries:
+            return
+
+        self.get_logger().warn(
+            "[GP Sanity] frozen/non-online GP signal appears constant; "
+            "delay/module result may be inconclusive: "
+            + "; ".join(constant_summaries)
+        )
+        self._gp_dynamic_sanity_warned = True
     
     def save_data_to_file(self):
         """save data to CSV file"""
@@ -3519,6 +3712,7 @@ class CartesianImpedanceController(Node):
                 self.dq_pred_err_history,
             ]
             min_len = len(self.time_history)
+            self._warn_if_gp_dynamic_signal_constant()
 
             with open(filename, 'w', newline='') as csvfile:
                 writer = csv.writer(csvfile)
@@ -3555,6 +3749,12 @@ class CartesianImpedanceController(Node):
                     'gp_compensation_source_code',
                     'gp_compensation_scale',
                     'gp_compensation_clip_nm',
+                    'gp_model_local_loaded_count',
+                    'gp_model_cloud_loaded_count',
+                    'gp_model_cloud_fallback_count',
+                    'gp_model_empty_or_prior_count',
+                    'gp_model_cloud_uses_cloud_pkl',
+                    'gp_model_cloud_uses_local_fallback',
                 ])
                 header.extend([f'tau_nominal_{i+1}' for i in range(7)])
                 header.extend([f'tau_final_{i+1}' for i in range(7)])
@@ -3741,6 +3941,12 @@ class CartesianImpedanceController(Node):
                         gp_source_code,
                         self.gp_compensation_scale,
                         self.gp_compensation_clip_nm,
+                        self.gp_model_local_loaded_count,
+                        self.gp_model_cloud_loaded_count,
+                        self.gp_model_cloud_fallback_count,
+                        self.gp_model_empty_or_prior_count,
+                        self.gp_model_cloud_uses_cloud_pkl,
+                        self.gp_model_cloud_uses_local_fallback,
                     ])
 
                     if i < len(self.tau_nominal_history):
