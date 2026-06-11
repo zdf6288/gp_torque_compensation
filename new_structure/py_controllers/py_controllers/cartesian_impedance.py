@@ -717,6 +717,18 @@ class CartesianImpedanceController(Node):
         self.control_frequency = self._get_positive_float_parameter(
             "control_frequency", 50.0
         )
+        self.declare_parameter("ros2_control_update_rate", self.control_frequency)
+        self.declare_parameter("trajectory_publish_rate", self.control_frequency)
+        self.declare_parameter("state_parameter_publish_rate", self.control_frequency)
+        self.ros2_control_update_rate = self._get_positive_float_parameter(
+            "ros2_control_update_rate", self.control_frequency
+        )
+        self.trajectory_publish_rate = self._get_positive_float_parameter(
+            "trajectory_publish_rate", self.control_frequency
+        )
+        self.state_parameter_publish_rate = self._get_positive_float_parameter(
+            "state_parameter_publish_rate", self.control_frequency
+        )
         self.timing_logging_enabled = self._get_bool_parameter("timing_logging_enabled")
         self.timing_log_stride = self._get_bounded_int_parameter(
             "timing_log_stride", 1, 1, 1000000
@@ -896,6 +908,9 @@ class CartesianImpedanceController(Node):
             f"gp_output_timeout_sec={self.gp_output_timeout_sec}, "
             f"future_trajectory_request_stride={self.future_trajectory_request_stride}, "
             f"control_frequency={self.control_frequency}, "
+            f"ros2_control_update_rate={self.ros2_control_update_rate}, "
+            f"trajectory_publish_rate={self.trajectory_publish_rate}, "
+            f"state_parameter_publish_rate={self.state_parameter_publish_rate}, "
             f"run_name='{self.run_name}', "
             f"data_output_dir='{self.data_output_dir}'"
         )

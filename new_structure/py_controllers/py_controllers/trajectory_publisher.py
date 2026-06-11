@@ -25,14 +25,26 @@ class TrajectoryPublisher(Node):
             Bool, '/data_recording_enabled', 10)
 
         self.declare_parameter('control_frequency', 100.0)
-        self.control_frequency = float(self.get_parameter('control_frequency').value)
-        if self.control_frequency <= 0.0:
+        self.legacy_control_frequency = float(self.get_parameter('control_frequency').value)
+        if not np.isfinite(self.legacy_control_frequency) or self.legacy_control_frequency <= 0.0:
             self.get_logger().warning(
-                f'Invalid control_frequency={self.control_frequency}; falling back to 100.0 Hz.'
+                f'Invalid control_frequency={self.legacy_control_frequency}; falling back to 100.0 Hz.'
             )
-            self.control_frequency = 100.0
+            self.legacy_control_frequency = 100.0
 
-        self.timer = self.create_timer(1.0 / self.control_frequency, self.timer_callback)
+        self.declare_parameter('trajectory_publish_rate', self.legacy_control_frequency)
+        self.trajectory_publish_rate = float(
+            self.get_parameter('trajectory_publish_rate').value
+        )
+        if not np.isfinite(self.trajectory_publish_rate) or self.trajectory_publish_rate <= 0.0:
+            self.get_logger().warning(
+                f'Invalid trajectory_publish_rate={self.trajectory_publish_rate}; '
+                f'falling back to control_frequency={self.legacy_control_frequency} Hz.'
+            )
+            self.trajectory_publish_rate = self.legacy_control_frequency
+
+        self.control_frequency = self.trajectory_publish_rate
+        self.timer = self.create_timer(1.0 / self.trajectory_publish_rate, self.timer_callback)
 
         # subscribe to /state_parameter to get robot current state
         self.state_subscription = self.create_subscription(
@@ -187,7 +199,10 @@ class TrajectoryPublisher(Node):
 
 
         self.get_logger().info('Trajectory publisher node started')
-        self.get_logger().info(f'Publishing trajectory at {self.control_frequency:.1f} Hz')
+        self.get_logger().info(
+            f'Publishing trajectory at {self.trajectory_publish_rate:.1f} Hz '
+            f'(legacy control_frequency={self.legacy_control_frequency:.1f} Hz)'
+        )
         self.get_logger().info(f'Trajectory mode: {self.trajectory_mode}')
         self.get_logger().info(f'Circle radius: {self.radius} m, frequency: {self.frequency} Hz')
         self.get_logger().info(f'Circle center: ({self.center_x}, {self.center_y}, {self.center_z})')

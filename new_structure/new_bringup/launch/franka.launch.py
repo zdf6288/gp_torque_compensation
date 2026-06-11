@@ -17,7 +17,7 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, Shutdown
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, LogInfo, Shutdown
 from launch.conditions import IfCondition, UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import Command, FindExecutable, LaunchConfiguration, PathJoinSubstitution
@@ -33,6 +33,7 @@ def generate_launch_description():
     fake_sensor_commands_parameter_name = 'fake_sensor_commands'
     use_rviz_parameter_name = 'use_rviz'
     control_frequency_parameter_name = 'control_frequency'
+    ros2_control_update_rate_parameter_name = 'ros2_control_update_rate'
 
     robot_ip = LaunchConfiguration(robot_ip_parameter_name)
     load_gripper = LaunchConfiguration(load_gripper_parameter_name)
@@ -40,6 +41,7 @@ def generate_launch_description():
     fake_sensor_commands = LaunchConfiguration(fake_sensor_commands_parameter_name)
     use_rviz = LaunchConfiguration(use_rviz_parameter_name)
     control_frequency = LaunchConfiguration(control_frequency_parameter_name)
+    ros2_control_update_rate = LaunchConfiguration(ros2_control_update_rate_parameter_name)
 
     franka_xacro_file = os.path.join(get_package_share_directory('franka_description'), 'robots',
                                      'panda_arm.urdf.xacro')
@@ -84,7 +86,20 @@ def generate_launch_description():
         DeclareLaunchArgument(
             control_frequency_parameter_name,
             default_value='50',
+            description='Legacy umbrella frequency; used as fallback for ros2_control_update_rate.'),
+        DeclareLaunchArgument(
+            ros2_control_update_rate_parameter_name,
+            default_value=control_frequency,
             description='Controller manager update_rate override in Hz.'),
+        LogInfo(
+            msg=[
+                'Frequency config: control_frequency=',
+                control_frequency,
+                ', ros2_control_update_rate=',
+                ros2_control_update_rate,
+                ' Hz',
+            ]
+        ),
         Node(
             package='robot_state_publisher',
             executable='robot_state_publisher',
@@ -106,7 +121,7 @@ def generate_launch_description():
             parameters=[
                 {'robot_description': robot_description},
                 franka_controllers,
-                {'update_rate': ParameterValue(control_frequency, value_type=int)},
+                {'update_rate': ParameterValue(ros2_control_update_rate, value_type=int)},
             ],
             remappings=[('joint_states', 'franka/joint_states')],
             output={

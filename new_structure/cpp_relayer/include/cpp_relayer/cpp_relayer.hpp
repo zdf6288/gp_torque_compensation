@@ -39,6 +39,8 @@ class CPPRelayer : public controller_interface::ControllerInterface {
   bool diagnostics_enabled_{true};
   double diagnostics_log_period_sec_{5.0};
   int log_first_n_stale_events_{5};
+  double state_parameter_publish_rate_{50.0};
+  double state_parameter_publish_period_sec_{0.02};
   Vector7d q_;               // from state interface
   Vector7d dq_;              // from state interface
   Vector7d tau_measured_;    // from state interface
@@ -62,15 +64,20 @@ class CPPRelayer : public controller_interface::ControllerInterface {
   void effortCommandCallback(const custom_msgs::msg::EffortCommand::SharedPtr msg) ;
   void setZeroCommandInterfaces();
   bool isCommandFresh(const rclcpp::Time& now, const rclcpp::Time& last_command_time) const;
+  bool shouldPublishStateParameter(const rclcpp::Time& now);
+  void publishStateParameter(const rclcpp::Time& now);
   void maybeLogDiagnostics(const rclcpp::Time& now);
   std::uint64_t received_command_count_{0};
   std::uint64_t update_count_{0};
   std::uint64_t stale_command_count_{0};
   std::uint64_t zero_fallback_count_{0};
   std::uint64_t stale_event_log_count_{0};
+  std::uint64_t state_parameter_publish_count_{0};
   double last_command_age_sec_{0.0};
   double max_command_age_sec_{0.0};
+  double last_state_parameter_publish_age_sec_{0.0};
   rclcpp::Time last_diagnostics_log_time_;
+  rclcpp::Time last_state_parameter_publish_time_;
 
 
   // Publisher

@@ -1,13 +1,76 @@
 #!/usr/bin/env python3
 
+import math
+import tempfile
+
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, LogInfo, OpaqueFunction
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
+
+
+def _positive_float_or_fallback(value_text, fallback_text, default_value=50.0):
+    try:
+        value = float(value_text)
+        if math.isfinite(value) and value > 0.0:
+            return value
+    except (TypeError, ValueError):
+        pass
+
+    try:
+        fallback = float(fallback_text)
+        if math.isfinite(fallback) and fallback > 0.0:
+            return fallback
+    except (TypeError, ValueError):
+        pass
+
+    return float(default_value)
+
+
+def _make_cpp_relayer_spawner(
+        context,
+        state_parameter_publish_rate,
+        control_frequency,
+        cpp_relayer_base_param_file):
+    state_rate = _positive_float_or_fallback(
+        state_parameter_publish_rate.perform(context),
+        control_frequency.perform(context),
+    )
+    base_param_file_path = cpp_relayer_base_param_file.perform(context)
+    with tempfile.NamedTemporaryFile(
+        mode='w',
+        prefix='cpp_relayer_state_rate_',
+        suffix='.yaml',
+        delete=False,
+    ) as param_file:
+        param_file.write('cpp_relayer:\n')
+        param_file.write('  ros__parameters:\n')
+        param_file.write(f'    state_parameter_publish_rate: {state_rate:.9g}\n')
+        param_file_path = param_file.name
+
+    return [
+        LogInfo(
+            msg=(
+                'cpp_relayer param files: controllers.yaml + '
+                'state_parameter_publish_rate override '
+                f'({state_rate:.3f} Hz)'
+            )
+        ),
+        Node(
+            package='controller_manager',
+            executable='spawner',
+            arguments=[
+                '--param-file', base_param_file_path,
+                '--param-file', param_file_path,
+                'cpp_relayer',
+            ],
+            output='screen',
+        ),
+    ]
 
 
 def generate_launch_description():
@@ -19,6 +82,9 @@ def generate_launch_description():
     spawn_gp_server_parameter_name = 'spawn_gp_server'
     spawn_fake_state_parameter_publisher_parameter_name = 'spawn_fake_state_parameter_publisher'
     control_frequency_parameter_name = 'control_frequency'
+    ros2_control_update_rate_parameter_name = 'ros2_control_update_rate'
+    trajectory_publish_rate_parameter_name = 'trajectory_publish_rate'
+    state_parameter_publish_rate_parameter_name = 'state_parameter_publish_rate'
     run_name_parameter_name = 'run_name'
     data_output_dir_parameter_name = 'data_output_dir'
     reference_mode_parameter_name = 'reference_mode'
@@ -146,6 +212,12 @@ def generate_launch_description():
     use_rviz = LaunchConfiguration(use_rviz_parameter_name)
     spawn_gp_server = LaunchConfiguration(spawn_gp_server_parameter_name)
     control_frequency = LaunchConfiguration(control_frequency_parameter_name)
+    ros2_control_update_rate = LaunchConfiguration(ros2_control_update_rate_parameter_name)
+    trajectory_publish_rate = LaunchConfiguration(trajectory_publish_rate_parameter_name)
+    state_parameter_publish_rate = LaunchConfiguration(state_parameter_publish_rate_parameter_name)
+    cpp_relayer_base_param_file = PathJoinSubstitution([
+        FindPackageShare('new_bringup'), 'config', 'controllers.yaml'
+    ])
     run_name = LaunchConfiguration(run_name_parameter_name)
     data_output_dir = LaunchConfiguration(data_output_dir_parameter_name)
     reference_mode = LaunchConfiguration(reference_mode_parameter_name)
@@ -332,7 +404,35 @@ def generate_launch_description():
         DeclareLaunchArgument(
             control_frequency_parameter_name,
             default_value='50',
-            description='Controller manager, trajectory, and controller frequency in Hz.'),
+            description=(
+                'Legacy umbrella frequency in Hz; new rate-specific arguments '
+                'inherit this value unless explicitly set.'
+            )),
+        DeclareLaunchArgument(
+            ros2_control_update_rate_parameter_name,
+            default_value=control_frequency,
+            description='Controller manager / ros2_control update_rate in Hz.'),
+        DeclareLaunchArgument(
+            trajectory_publish_rate_parameter_name,
+            default_value=control_frequency,
+            description='trajectory_publisher timer rate in Hz.'),
+        DeclareLaunchArgument(
+            state_parameter_publish_rate_parameter_name,
+            default_value=control_frequency,
+            description='cpp_relayer /state_parameter publish rate in Hz.'),
+        LogInfo(
+            msg=[
+                'Frequency config: control_frequency=',
+                control_frequency,
+                ', ros2_control_update_rate=',
+                ros2_control_update_rate,
+                ', trajectory_publish_rate=',
+                trajectory_publish_rate,
+                ', state_parameter_publish_rate=',
+                state_parameter_publish_rate,
+                ' Hz',
+            ]
+        ),
         DeclareLaunchArgument(
             run_name_parameter_name,
             default_value='',
@@ -717,15 +817,18 @@ def generate_launch_description():
                               use_fake_hardware_parameter_name: use_fake_hardware,
                               fake_sensor_commands_parameter_name: fake_sensor_commands,
                               use_rviz_parameter_name: use_rviz,
-                              control_frequency_parameter_name: control_frequency
+                              control_frequency_parameter_name: control_frequency,
+                              ros2_control_update_rate_parameter_name: ros2_control_update_rate
                               }.items(),
         ),
 
-        Node(
-            package='controller_manager',
-            executable='spawner',
-            arguments=['cpp_relayer'],
-            output='screen',
+        OpaqueFunction(
+            function=_make_cpp_relayer_spawner,
+            args=[
+                state_parameter_publish_rate,
+                control_frequency,
+                cpp_relayer_base_param_file,
+            ],
         ),
         Node(
             package='py_controllers',
@@ -759,6 +862,12 @@ def generate_launch_description():
                     delay_steps, value_type=int),
                 control_frequency_parameter_name: ParameterValue(
                     control_frequency, value_type=float),
+                ros2_control_update_rate_parameter_name: ParameterValue(
+                    ros2_control_update_rate, value_type=float),
+                trajectory_publish_rate_parameter_name: ParameterValue(
+                    trajectory_publish_rate, value_type=float),
+                state_parameter_publish_rate_parameter_name: ParameterValue(
+                    state_parameter_publish_rate, value_type=float),
                 run_name_parameter_name: ParameterValue(run_name, value_type=str),
                 data_output_dir_parameter_name: ParameterValue(data_output_dir, value_type=str),
                 timing_logging_enabled_parameter_name: ParameterValue(
@@ -919,6 +1028,8 @@ def generate_launch_description():
             parameters=[{
                 control_frequency_parameter_name: ParameterValue(
                     control_frequency, value_type=float),
+                trajectory_publish_rate_parameter_name: ParameterValue(
+                    trajectory_publish_rate, value_type=float),
                 trajectory_mode_parameter_name: ParameterValue(trajectory_mode, value_type=str),
                 z_amplitude_parameter_name: ParameterValue(z_amplitude, value_type=float),
                 z_frequency_multiplier_parameter_name: ParameterValue(

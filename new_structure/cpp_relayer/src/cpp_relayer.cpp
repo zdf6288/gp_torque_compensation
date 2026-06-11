@@ -17,6 +17,7 @@ namespace cpp_relayer {
 
 namespace {
 constexpr double kDefaultCommandTimeoutSec = 0.2;
+constexpr double kDefaultStateParameterPublishRate = 50.0;
 constexpr int kWarningThrottleMs = 2000;
 }  // namespace
 
@@ -102,19 +103,9 @@ controller_interface::return_type CPPRelayer::update(
     }
   }
 
-  // publish state parameter
-  updateStateParam();
-  custom_msgs::msg::StateParameter state_param;
-  state_param.header.stamp = get_node()->now();
-  Eigen::Map<Eigen::VectorXd>(state_param.position.data(), num_joints) = q_;
-  Eigen::Map<Eigen::VectorXd>(state_param.velocity.data(), num_joints) = dq_;
-  Eigen::Map<Eigen::VectorXd>(state_param.effort_measured.data(), num_joints) = tau_measured_;
-  std::copy(o_t_f_.begin(), o_t_f_.end(), state_param.o_t_f.begin());
-  std::copy(mass_.begin(), mass_.end(), state_param.mass.begin());
-  std::copy(coriolis_.begin(), coriolis_.end(), state_param.coriolis.begin());
-  std::copy(zero_jacobian_flange_.begin(), zero_jacobian_flange_.end(), state_param.zero_jacobian_flange.begin());
-  std::copy(gravity_.begin(), gravity_.end(), state_param.gravity.begin());
-  state_param_pub_->publish(state_param);
+  if (shouldPublishStateParameter(now)) {
+    publishStateParameter(now);
+  }
   maybeLogDiagnostics(now);
 
   return controller_interface::return_type::OK;
@@ -128,6 +119,7 @@ CallbackReturn CPPRelayer::on_init() {
     auto_declare<bool>("diagnostics_enabled", true);
     auto_declare<double>("diagnostics_log_period_sec", 5.0);
     auto_declare<int>("log_first_n_stale_events", 5);
+    auto_declare<double>("state_parameter_publish_rate", kDefaultStateParameterPublishRate);
   } 
   catch (const std::exception& e) {
     fprintf(stderr, "Exception thrown during init stage with message: %s \n", e.what());
@@ -148,6 +140,8 @@ CallbackReturn CPPRelayer::on_configure(
         get_node()->get_parameter("diagnostics_log_period_sec").as_double();
     log_first_n_stale_events_ =
         get_node()->get_parameter("log_first_n_stale_events").as_int();
+    state_parameter_publish_rate_ =
+        get_node()->get_parameter("state_parameter_publish_rate").as_double();
     if (!std::isfinite(command_timeout_sec_) || command_timeout_sec_ <= 0.0) {
       RCLCPP_WARN(
           get_node()->get_logger(),
@@ -168,6 +162,18 @@ CallbackReturn CPPRelayer::on_configure(
           "Invalid log_first_n_stale_events %d. Falling back to 5.",
           log_first_n_stale_events_);
       log_first_n_stale_events_ = 5;
+    }
+    if (!std::isfinite(state_parameter_publish_rate_) ||
+        state_parameter_publish_rate_ <= 0.0) {
+      RCLCPP_WARN(
+          get_node()->get_logger(),
+          "Invalid state_parameter_publish_rate %.3f. Publishing /state_parameter "
+          "on every controller update as a compatibility fallback.",
+          state_parameter_publish_rate_);
+      state_parameter_publish_rate_ = 0.0;
+      state_parameter_publish_period_sec_ = 0.0;
+    } else {
+      state_parameter_publish_period_sec_ = 1.0 / state_parameter_publish_rate_;
     }
   } 
   catch (const std::exception& e) {
@@ -196,12 +202,13 @@ CallbackReturn CPPRelayer::on_configure(
         "cpp_relayer configured with command_timeout_sec=%.3f s, "
         "require_fresh_command_on_activate=%s; stale commands will be zeroed. "
         "diagnostics_enabled=%s, diagnostics_log_period_sec=%.3f, "
-        "log_first_n_stale_events=%d.",
+        "log_first_n_stale_events=%d, state_parameter_publish_rate=%.3f Hz.",
         command_timeout_sec_,
         require_fresh_command_on_activate_ ? "true" : "false",
         diagnostics_enabled_ ? "true" : "false",
         diagnostics_log_period_sec_,
-        log_first_n_stale_events_);
+        log_first_n_stale_events_,
+        state_parameter_publish_rate_);
     return CallbackReturn::SUCCESS;
   } 
   catch (const std::exception& e) {
@@ -223,6 +230,9 @@ CallbackReturn CPPRelayer::on_activate(
 
   const auto now = get_node()->get_clock()->now();
   last_diagnostics_log_time_ = now;
+  last_state_parameter_publish_time_ = rclcpp::Time();
+  state_parameter_publish_count_ = 0;
+  last_state_parameter_publish_age_sec_ = 0.0;
   Vector7d command_to_write = Vector7d::Zero();
   bool has_command = false;
   bool command_is_fresh = false;
@@ -368,6 +378,47 @@ bool CPPRelayer::isCommandFresh(
   return command_age.nanoseconds() >= 0 && command_age.seconds() <= command_timeout_sec_;
 }
 
+bool CPPRelayer::shouldPublishStateParameter(const rclcpp::Time& now) {
+  if (state_parameter_publish_period_sec_ <= 0.0) {
+    last_state_parameter_publish_age_sec_ = 0.0;
+    return true;
+  }
+
+  if (last_state_parameter_publish_time_.nanoseconds() == 0) {
+    last_state_parameter_publish_age_sec_ = 0.0;
+    return true;
+  }
+
+  const auto publish_age = now - last_state_parameter_publish_time_;
+  if (publish_age.nanoseconds() < 0) {
+    last_state_parameter_publish_age_sec_ = 0.0;
+    return true;
+  }
+
+  last_state_parameter_publish_age_sec_ = publish_age.seconds();
+  return last_state_parameter_publish_age_sec_ >= state_parameter_publish_period_sec_;
+}
+
+void CPPRelayer::publishStateParameter(const rclcpp::Time& now) {
+  // 解耦 controller_manager update rate 和 Python state callback rate：
+  // 1000 Hz update 仍写 torque interface，/state_parameter 只按配置频率发布。
+  updateStateParam();
+  custom_msgs::msg::StateParameter state_param;
+  state_param.header.stamp = now;
+  Eigen::Map<Eigen::VectorXd>(state_param.position.data(), num_joints) = q_;
+  Eigen::Map<Eigen::VectorXd>(state_param.velocity.data(), num_joints) = dq_;
+  Eigen::Map<Eigen::VectorXd>(state_param.effort_measured.data(), num_joints) = tau_measured_;
+  std::copy(o_t_f_.begin(), o_t_f_.end(), state_param.o_t_f.begin());
+  std::copy(mass_.begin(), mass_.end(), state_param.mass.begin());
+  std::copy(coriolis_.begin(), coriolis_.end(), state_param.coriolis.begin());
+  std::copy(zero_jacobian_flange_.begin(), zero_jacobian_flange_.end(), state_param.zero_jacobian_flange.begin());
+  std::copy(gravity_.begin(), gravity_.end(), state_param.gravity.begin());
+  state_param_pub_->publish(state_param);
+  last_state_parameter_publish_time_ = now;
+  last_state_parameter_publish_age_sec_ = 0.0;
+  ++state_parameter_publish_count_;
+}
+
 void CPPRelayer::maybeLogDiagnostics(const rclcpp::Time& now) {
   if (!diagnostics_enabled_) {
     return;
@@ -385,12 +436,17 @@ void CPPRelayer::maybeLogDiagnostics(const rclcpp::Time& now) {
       get_node()->get_logger(),
       "[CPPRelayerDiag] updates=%llu, received_effort_commands=%llu, "
       "stale_command_count=%llu, zero_fallback_count=%llu, "
-      "last_command_age=%.6f s, max_command_age=%.6f s, timeout=%.6f s.",
+      "last_command_age=%.6f s, max_command_age=%.6f s, timeout=%.6f s, "
+      "state_parameter_publish_count=%llu, state_parameter_publish_rate=%.3f Hz, "
+      "last_state_parameter_publish_age=%.6f s.",
       static_cast<unsigned long long>(update_count_),
       static_cast<unsigned long long>(received_command_count_),
       static_cast<unsigned long long>(stale_command_count_),
       static_cast<unsigned long long>(zero_fallback_count_),
-      last_command_age_sec_, max_command_age_sec_, command_timeout_sec_);
+      last_command_age_sec_, max_command_age_sec_, command_timeout_sec_,
+      static_cast<unsigned long long>(state_parameter_publish_count_),
+      state_parameter_publish_rate_,
+      last_state_parameter_publish_age_sec_);
 }
 
 void CPPRelayer::updateStateParam() {
