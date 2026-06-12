@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-INCLUDE_CLIP05_SHORT=0
+INCLUDE_LOCAL_CLIP10_SHORT=0
 INCLUDE_F100_SMOKE=0
 INCLUDE_F100_CLOUD_COMBINED=0
 
@@ -11,19 +11,24 @@ Usage:
   ./run_goal12_final_matrix_50hz_100hz_after_commfix_20260612.sh [options]
 
 Options:
-  --include-clip05-short        Add G12_F50_LOCAL_ONLINE_S1_C05_SHORT.
-  --include-f100-smoke          Add F100 smoke cases.
+  --include-local-clip10-short  Add G12_F50_LOCAL_ONLINE_S1_C10_SHORT.
+                                clip1.0 is only an upper-bound sanity check after
+                                clip0.5 is safe but visibly saturated; it is not
+                                part of the default main table.
+  --include-f100-smoke          Add F100 smoke cases. Explicit opt-in only.
   --include-f100-cloud-combined Add extra F100 cloud/combined smoke cases.
+                                Explicit opt-in only.
   -h, --help                    Show this help.
 
-Default runs only the F50 main matrix. Every case waits for manual confirmation.
+Default runs only the F50 / clip0.5 / online-update main matrix.
+Every case waits for manual confirmation.
 USAGE
 }
 
 while (($# > 0)); do
   case "$1" in
-    --include-clip05-short)
-      INCLUDE_CLIP05_SHORT=1
+    --include-local-clip10-short)
+      INCLUDE_LOCAL_CLIP10_SHORT=1
       ;;
     --include-f100-smoke)
       INCLUDE_F100_SMOKE=1
@@ -124,6 +129,7 @@ source_environment() {
 
 RUN_STAMP="$(date +%Y%m%d_%H%M%S)"
 OUTPUT_ROOT="outputs/goal12_final_matrix_after_commfix_20260612/${RUN_STAMP}"
+MANIFEST_PATH="${OUTPUT_ROOT}/manifest.csv"
 
 COMMON_ARGS=(
   "robot_ip:=172.16.0.4"
@@ -172,6 +178,53 @@ print_args() {
   done
 }
 
+arg_value() {
+  local key="$1"
+  shift
+  local arg
+  for arg in "$@"; do
+    if [[ "$arg" == "${key}:="* ]]; then
+      printf '%s' "${arg#*:=}"
+      return 0
+    fi
+  done
+  printf ''
+}
+
+init_manifest() {
+  mkdir -p "$OUTPUT_ROOT"
+  printf 'case_name,run_name,data_output_dir,control_frequency,trajectory_publish_rate,state_parameter_publish_rate,gp_prediction_enabled,gp_online_update_enabled,gp_compensation_enabled,gp_compensation_source,delay_steps,gp_compensation_scale,gp_compensation_clip_nm,gp_prediction_stride,future_trajectory_request_stride,torque_rate_limit_enabled,torque_rate_limit_nm_per_s,status\n' > "$MANIFEST_PATH"
+}
+
+append_manifest_row() {
+  local case_name="$1"
+  local run_name="$2"
+  local data_output_dir="$3"
+  local status="$4"
+  shift 4
+  local launch_args=("$@")
+
+  printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+    "$case_name" \
+    "$run_name" \
+    "$data_output_dir" \
+    "$(arg_value control_frequency "${launch_args[@]}")" \
+    "$(arg_value trajectory_publish_rate "${launch_args[@]}")" \
+    "$(arg_value state_parameter_publish_rate "${launch_args[@]}")" \
+    "$(arg_value gp_prediction_enabled "${launch_args[@]}")" \
+    "$(arg_value gp_online_update_enabled "${launch_args[@]}")" \
+    "$(arg_value gp_compensation_enabled "${launch_args[@]}")" \
+    "$(arg_value gp_compensation_source "${launch_args[@]}")" \
+    "$(arg_value delay_steps "${launch_args[@]}")" \
+    "$(arg_value gp_compensation_scale "${launch_args[@]}")" \
+    "$(arg_value gp_compensation_clip_nm "${launch_args[@]}")" \
+    "$(arg_value gp_prediction_stride "${launch_args[@]}")" \
+    "$(arg_value future_trajectory_request_stride "${launch_args[@]}")" \
+    "$(arg_value torque_rate_limit_enabled "${launch_args[@]}")" \
+    "$(arg_value torque_rate_limit_nm_per_s "${launch_args[@]}")" \
+    "$status" >> "$MANIFEST_PATH"
+}
+
 run_case() {
   local case_name="$1"
   local case_note="$2"
@@ -208,6 +261,7 @@ run_case() {
   echo "Note: $case_note"
   echo "run_name: $run_name"
   echo "data_output_dir: $data_output_dir"
+  echo "manifest: $MANIFEST_PATH"
   echo "Launch args:"
   print_args launch_args
   echo "========================================================================"
@@ -216,7 +270,9 @@ run_case() {
   read -r -p "Press Enter to START this case, or Ctrl+C to stop."
 
   mkdir -p "$data_output_dir"
+  append_manifest_row "$case_name" "$run_name" "$data_output_dir" "pending_manual_run" "${launch_args[@]}"
   ros2 launch py_controllers cartesian_impedance_launch.py "${launch_args[@]}"
+  append_manifest_row "$case_name" "$run_name" "$data_output_dir" "ros2_launch_exited" "${launch_args[@]}"
 
   echo
   echo "Case exited: $case_name"
@@ -234,16 +290,10 @@ add_f50_main_cases() {
     "gp_prediction_enabled:=false" \
     "gp_online_update_enabled:=false" \
     "gp_compensation_enabled:=false" \
-    "delay_steps:=0"
-
-  run_case \
-    "G12_F50_PRED_FROZEN_LOCALCLOUD" \
-    "F50 diagnostic only: frozen prediction path; not a main compensation result." \
-    "F50" \
-    "gp_prediction_enabled:=true" \
-    "gp_online_update_enabled:=false" \
-    "gp_compensation_enabled:=false" \
-    "delay_steps:=0"
+    "gp_compensation_source:=local" \
+    "delay_steps:=0" \
+    "gp_compensation_scale:=0.0" \
+    "gp_compensation_clip_nm:=0.5"
 
   run_case \
     "G12_F50_PRED_ONLINE_ONLY" \
@@ -252,42 +302,45 @@ add_f50_main_cases() {
     "gp_prediction_enabled:=true" \
     "gp_online_update_enabled:=true" \
     "gp_compensation_enabled:=false" \
-    "delay_steps:=0"
+    "gp_compensation_source:=local" \
+    "delay_steps:=0" \
+    "gp_compensation_scale:=0.0" \
+    "gp_compensation_clip_nm:=0.5"
 
   run_case \
-    "G12_F50_LOCAL_ONLINE_S1_C02" \
-    "F50 main table: local online GP compensation, scale 1.0, clip 0.2." \
+    "G12_F50_LOCAL_ONLINE_S1_C05" \
+    "F50 main table: local online GP compensation, scale 1.0, clip 0.5." \
     "F50" \
     "gp_prediction_enabled:=true" \
     "gp_online_update_enabled:=true" \
     "gp_compensation_enabled:=true" \
     "gp_compensation_source:=local" \
     "gp_compensation_scale:=1.0" \
-    "gp_compensation_clip_nm:=0.2" \
+    "gp_compensation_clip_nm:=0.5" \
     "delay_steps:=0"
 
   run_case \
-    "G12_F50_CLOUD_ONLINE_S1_C02_D2" \
-    "F50 main table: cloud-like online GP compensation; D2 is about 40 ms at 50 Hz." \
+    "G12_F50_CLOUD_ONLINE_S1_C05_D2" \
+    "F50 main table: cloud-like online GP compensation, scale 1.0, clip 0.5; D2 is about 40 ms at 50 Hz." \
     "F50" \
     "gp_prediction_enabled:=true" \
     "gp_online_update_enabled:=true" \
     "gp_compensation_enabled:=true" \
     "gp_compensation_source:=cloud" \
     "gp_compensation_scale:=1.0" \
-    "gp_compensation_clip_nm:=0.2" \
+    "gp_compensation_clip_nm:=0.5" \
     "delay_steps:=2"
 
   run_case \
-    "G12_F50_COMBINED_ONLINE_S1_C02_D2" \
-    "F50 main table: combined online GP compensation; D2 is about 40 ms at 50 Hz." \
+    "G12_F50_COMBINED_ONLINE_S1_C05_D2" \
+    "F50 main table: combined online GP compensation, scale 1.0, clip 0.5; D2 is about 40 ms at 50 Hz." \
     "F50" \
     "gp_prediction_enabled:=true" \
     "gp_online_update_enabled:=true" \
     "gp_compensation_enabled:=true" \
     "gp_compensation_source:=combined" \
     "gp_compensation_scale:=1.0" \
-    "gp_compensation_clip_nm:=0.2" \
+    "gp_compensation_clip_nm:=0.5" \
     "delay_steps:=2"
 
   run_case \
@@ -297,20 +350,23 @@ add_f50_main_cases() {
     "gp_prediction_enabled:=false" \
     "gp_online_update_enabled:=false" \
     "gp_compensation_enabled:=false" \
-    "delay_steps:=0"
+    "gp_compensation_source:=local" \
+    "delay_steps:=0" \
+    "gp_compensation_scale:=0.0" \
+    "gp_compensation_clip_nm:=0.5"
 }
 
-add_clip05_short_case() {
+add_local_clip10_short_case() {
   run_case \
-    "G12_F50_LOCAL_ONLINE_S1_C05_SHORT" \
-    "OPTIONAL short sanity only, not main table: local online GP compensation, clip 0.5." \
+    "G12_F50_LOCAL_ONLINE_S1_C10_SHORT" \
+    "OPTIONAL upper-bound sanity only, not main table: local online GP compensation, clip 1.0. Use only after clip0.5 is safe but visibly saturated." \
     "F50" \
     "gp_prediction_enabled:=true" \
     "gp_online_update_enabled:=true" \
     "gp_compensation_enabled:=true" \
     "gp_compensation_source:=local" \
     "gp_compensation_scale:=1.0" \
-    "gp_compensation_clip_nm:=0.5" \
+    "gp_compensation_clip_nm:=1.0" \
     "delay_steps:=0"
 }
 
@@ -334,21 +390,21 @@ add_f100_smoke_cases() {
     "delay_steps:=0"
 
   run_case \
-    "G12_F100_LOCAL_ONLINE_S1_C02_SHORT" \
-    "OPTIONAL F100 short smoke only: local online GP compensation, clip 0.2." \
+    "G12_F100_LOCAL_ONLINE_S1_C05_SHORT" \
+    "OPTIONAL F100 short smoke only: local online GP compensation, clip 0.5." \
     "F100" \
     "gp_prediction_enabled:=true" \
     "gp_online_update_enabled:=true" \
     "gp_compensation_enabled:=true" \
     "gp_compensation_source:=local" \
     "gp_compensation_scale:=1.0" \
-    "gp_compensation_clip_nm:=0.2" \
+    "gp_compensation_clip_nm:=0.5" \
     "delay_steps:=0"
 }
 
 add_f100_cloud_combined_cases() {
   run_case \
-    "G12_F100_CLOUD_ONLINE_S1_C02_D4_SHORT" \
+    "G12_F100_CLOUD_ONLINE_S1_C05_D4_SHORT" \
     "EXTRA F100 smoke only: cloud online GP compensation; D4 is about 40 ms at 100 Hz." \
     "F100" \
     "gp_prediction_enabled:=true" \
@@ -356,11 +412,11 @@ add_f100_cloud_combined_cases() {
     "gp_compensation_enabled:=true" \
     "gp_compensation_source:=cloud" \
     "gp_compensation_scale:=1.0" \
-    "gp_compensation_clip_nm:=0.2" \
+    "gp_compensation_clip_nm:=0.5" \
     "delay_steps:=4"
 
   run_case \
-    "G12_F100_COMBINED_ONLINE_S1_C02_D4_SHORT" \
+    "G12_F100_COMBINED_ONLINE_S1_C05_D4_SHORT" \
     "EXTRA F100 smoke only: combined online GP compensation; D4 is about 40 ms at 100 Hz." \
     "F100" \
     "gp_prediction_enabled:=true" \
@@ -368,7 +424,7 @@ add_f100_cloud_combined_cases() {
     "gp_compensation_enabled:=true" \
     "gp_compensation_source:=combined" \
     "gp_compensation_scale:=1.0" \
-    "gp_compensation_clip_nm:=0.2" \
+    "gp_compensation_clip_nm:=0.5" \
     "delay_steps:=4"
 }
 
@@ -380,16 +436,18 @@ main() {
   source_environment
 
   echo "Output root: $OUTPUT_ROOT"
-  echo "Default matrix: F50 main table only."
-  echo "include_clip05_short=$INCLUDE_CLIP05_SHORT"
+  echo "Manifest: $MANIFEST_PATH"
+  echo "Default matrix: F50 / clip0.5 / online-update main table only."
+  echo "include_local_clip10_short=$INCLUDE_LOCAL_CLIP10_SHORT"
   echo "include_f100_smoke=$INCLUDE_F100_SMOKE"
   echo "include_f100_cloud_combined=$INCLUDE_F100_CLOUD_COMBINED"
   echo
 
+  init_manifest
   add_f50_main_cases
 
-  if ((INCLUDE_CLIP05_SHORT)); then
-    add_clip05_short_case
+  if ((INCLUDE_LOCAL_CLIP10_SHORT)); then
+    add_local_clip10_short_case
   fi
 
   if ((INCLUDE_F100_SMOKE)); then
