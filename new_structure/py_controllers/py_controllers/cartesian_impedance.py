@@ -2064,6 +2064,7 @@ class CartesianImpedanceController(Node):
 
     def shutdown_callback(self, msg):
         if msg.data:
+            self._signal_handled = True
             self.get_logger().info("[Controller] Received shutdown signal — stopping robot, saving data & exiting.")
 
             # ------------------------------------------
@@ -2104,7 +2105,9 @@ class CartesianImpedanceController(Node):
             # ------------------------------------------
             # 4) 安全退出
             # ------------------------------------------
-            rclpy.shutdown()
+            # Avoid rclpy.shutdown() here: it can block this executor callback
+            # before os._exit(), preventing the launch on_exit shutdown path.
+            time.sleep(0.2)
             os._exit(0)
     
 
@@ -3061,7 +3064,8 @@ class CartesianImpedanceController(Node):
             pass
 
         # 3. 停止节点
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
         # 4. 直接退出程序
         os._exit(0)
@@ -6485,8 +6489,12 @@ def main(args=None):
                 
         except Exception as e:
             cartesian_impedance_node.get_logger().error(f'Error when saving data: {str(e)}')
-        cartesian_impedance_node.destroy_node()
-        rclpy.shutdown()
+        try:
+            cartesian_impedance_node.destroy_node()
+        except Exception:
+            pass
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

@@ -96,9 +96,13 @@ validate_options() {
 source_environment() {
   echo "== Environment =="
   # shellcheck source=/opt/ros/humble/setup.bash
+  set +u
   source /opt/ros/humble/setup.bash
+  set -u
   # shellcheck source=/dev/null
+  set +u
   source install/setup.bash
+  set -u
 
   export PYTHONDONTWRITEBYTECODE=1
   export PYTHONPATH="/home/mirmi_ros2_2/dongfa/tt_dgp/new_structure/gp:${PYTHONPATH:-}"

@@ -4,7 +4,7 @@ import math
 import tempfile
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, LogInfo, OpaqueFunction
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, LogInfo, OpaqueFunction, Shutdown
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
@@ -1066,6 +1066,7 @@ def generate_launch_description():
             executable='cartesian_impedance',
             name='cartesian_impedance',
             output='screen',
+            on_exit=Shutdown(reason='cartesian_impedance exited; shutting down GOAL12 launch'),
             parameters=[{
                 reference_mode_parameter_name: ParameterValue(reference_mode, value_type=str),
                 joint_space_command_topic_parameter_name: joint_space_command_topic,

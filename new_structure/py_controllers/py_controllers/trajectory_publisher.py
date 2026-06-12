@@ -636,7 +636,8 @@ class TrajectoryPublisher(Node):
                 shutdown_msg.data = True
                 self.shutdown_pub.publish(shutdown_msg)
 
-                rclpy.shutdown()
+                if rclpy.ok():
+                    rclpy.shutdown()
                 return
 
 
@@ -713,8 +714,12 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
-        trajectory_publisher_node.destroy_node()
-        rclpy.shutdown()
+        try:
+            trajectory_publisher_node.destroy_node()
+        except Exception:
+            pass
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':
