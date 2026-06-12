@@ -222,6 +222,12 @@ def generate_launch_description():
     gp_compensation_scale_parameter_name = 'gp_compensation_scale'
     gp_compensation_clip_nm_parameter_name = 'gp_compensation_clip_nm'
     gp_compensation_disable_joint7_parameter_name = 'gp_compensation_disable_joint7'
+    torque_rate_limit_enabled_parameter_name = 'torque_rate_limit_enabled'
+    torque_rate_limit_nm_per_s_parameter_name = 'torque_rate_limit_nm_per_s'
+    torque_rate_limit_log_first_n_parameter_name = 'torque_rate_limit_log_first_n'
+    torque_rate_limit_reset_on_first_command_parameter_name = (
+        'torque_rate_limit_reset_on_first_command'
+    )
     delay_steps_parameter_name = 'delay_steps'
     timing_logging_enabled_parameter_name = 'timing_logging_enabled'
     timing_log_stride_parameter_name = 'timing_log_stride'
@@ -361,6 +367,18 @@ def generate_launch_description():
     gp_compensation_clip_nm = LaunchConfiguration(gp_compensation_clip_nm_parameter_name)
     gp_compensation_disable_joint7 = LaunchConfiguration(
         gp_compensation_disable_joint7_parameter_name
+    )
+    torque_rate_limit_enabled = LaunchConfiguration(
+        torque_rate_limit_enabled_parameter_name
+    )
+    torque_rate_limit_nm_per_s = LaunchConfiguration(
+        torque_rate_limit_nm_per_s_parameter_name
+    )
+    torque_rate_limit_log_first_n = LaunchConfiguration(
+        torque_rate_limit_log_first_n_parameter_name
+    )
+    torque_rate_limit_reset_on_first_command = LaunchConfiguration(
+        torque_rate_limit_reset_on_first_command_parameter_name
     )
     delay_steps = LaunchConfiguration(delay_steps_parameter_name)
     timing_logging_enabled = LaunchConfiguration(timing_logging_enabled_parameter_name)
@@ -677,6 +695,22 @@ def generate_launch_description():
             gp_compensation_disable_joint7_parameter_name,
             default_value='false',
             description='Disable active GP applied torque on joint7 only when explicitly true.'),
+        DeclareLaunchArgument(
+            torque_rate_limit_enabled_parameter_name,
+            default_value='false',
+            description='Enable optional per-joint torque slew-rate limiting before /effort_command publish.'),
+        DeclareLaunchArgument(
+            torque_rate_limit_nm_per_s_parameter_name,
+            default_value='80.0',
+            description='Scalar per-joint torque slew-rate limit in Nm/s.'),
+        DeclareLaunchArgument(
+            torque_rate_limit_log_first_n_parameter_name,
+            default_value='5',
+            description='Log only the first N torque rate-limit clipping events.'),
+        DeclareLaunchArgument(
+            torque_rate_limit_reset_on_first_command_parameter_name,
+            default_value='true',
+            description='Initialize limiter state from the first command instead of slewing from zero.'),
         DeclareLaunchArgument(
             delay_steps_parameter_name,
             default_value='0',
@@ -1041,6 +1075,14 @@ def generate_launch_description():
                 gp_compensation_scale_parameter_name: gp_compensation_scale,
                 gp_compensation_clip_nm_parameter_name: gp_compensation_clip_nm,
                 gp_compensation_disable_joint7_parameter_name: gp_compensation_disable_joint7,
+                torque_rate_limit_enabled_parameter_name: ParameterValue(
+                    torque_rate_limit_enabled, value_type=bool),
+                torque_rate_limit_nm_per_s_parameter_name: ParameterValue(
+                    torque_rate_limit_nm_per_s, value_type=float),
+                torque_rate_limit_log_first_n_parameter_name: ParameterValue(
+                    torque_rate_limit_log_first_n, value_type=int),
+                torque_rate_limit_reset_on_first_command_parameter_name: ParameterValue(
+                    torque_rate_limit_reset_on_first_command, value_type=bool),
                 delay_steps_parameter_name: ParameterValue(
                     delay_steps, value_type=int),
                 control_frequency_parameter_name: ParameterValue(

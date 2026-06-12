@@ -342,7 +342,12 @@ class CartesianImpedanceController(Node):
         self.dq_des_joint_history = []   # desired joint velocity
         self.ddq_des_joint_history = []  # desired joint acceleration
         self.tau_nominal_history = []
+        self.tau_final_raw_history = []
         self.tau_final_history = []
+        self.tau_rate_limited_history = []
+        self.torque_rate_limit_active_history = []
+        self.torque_rate_limit_max_delta_history = []
+        self.torque_rate_limit_dt_history = []
         self.gp_source_code_history = []
         self.gp_selected_raw_history = []
         self.gp_scaled_history = []
@@ -435,7 +440,9 @@ class CartesianImpedanceController(Node):
         self.tau_residual = np.zeros(7)
         self.tau_memory = np.zeros(7)
         self._tau_nominal = np.zeros(7, dtype=float)
+        self._tau_final_raw = np.zeros(7, dtype=float)
         self._tau_final = np.zeros(7, dtype=float)
+        self._tau_rate_limited = np.zeros(7, dtype=float)
         self._gp_source_code = 0
         self._gp_selected_raw = np.zeros(7, dtype=float)
         self._gp_scaled = np.zeros(7, dtype=float)
@@ -512,6 +519,10 @@ class CartesianImpedanceController(Node):
         self.declare_parameter("run_name", "")
         self.declare_parameter("data_output_dir", ".")
         self.declare_parameter("control_frequency", 50.0)
+        self.declare_parameter("torque_rate_limit_enabled", False)
+        self.declare_parameter("torque_rate_limit_nm_per_s", 80.0)
+        self.declare_parameter("torque_rate_limit_log_first_n", 5)
+        self.declare_parameter("torque_rate_limit_reset_on_first_command", True)
         self.declare_parameter("timing_logging_enabled", False)
         self.declare_parameter("timing_log_stride", 1)
         self.declare_parameter("timing_output_dir", "outputs/goal12_controller_timing")
@@ -729,6 +740,18 @@ class CartesianImpedanceController(Node):
         self.state_parameter_publish_rate = self._get_positive_float_parameter(
             "state_parameter_publish_rate", self.control_frequency
         )
+        self.torque_rate_limit_enabled = self._get_bool_parameter(
+            "torque_rate_limit_enabled"
+        )
+        self.torque_rate_limit_nm_per_s = self._get_positive_float_parameter(
+            "torque_rate_limit_nm_per_s", 80.0
+        )
+        self.torque_rate_limit_log_first_n = self._get_bounded_int_parameter(
+            "torque_rate_limit_log_first_n", 5, 0, 1000000
+        )
+        self.torque_rate_limit_reset_on_first_command = self._get_bool_parameter(
+            "torque_rate_limit_reset_on_first_command"
+        )
         self.timing_logging_enabled = self._get_bool_parameter("timing_logging_enabled")
         self.timing_log_stride = self._get_bounded_int_parameter(
             "timing_log_stride", 1, 1, 1000000
@@ -911,9 +934,26 @@ class CartesianImpedanceController(Node):
             f"ros2_control_update_rate={self.ros2_control_update_rate}, "
             f"trajectory_publish_rate={self.trajectory_publish_rate}, "
             f"state_parameter_publish_rate={self.state_parameter_publish_rate}, "
+            f"torque_rate_limit_enabled={self.torque_rate_limit_enabled}, "
+            f"torque_rate_limit_nm_per_s={self.torque_rate_limit_nm_per_s}, "
+            f"torque_rate_limit_log_first_n={self.torque_rate_limit_log_first_n}, "
+            "torque_rate_limit_reset_on_first_command="
+            f"{self.torque_rate_limit_reset_on_first_command}, "
             f"run_name='{self.run_name}', "
             f"data_output_dir='{self.data_output_dir}'"
         )
+        if self.torque_rate_limit_enabled:
+            self.get_logger().warn(
+                "[TorqueRateLimit] ENABLED before /effort_command publish: "
+                f"limit={self.torque_rate_limit_nm_per_s:.3f} Nm/s, "
+                f"dt clamp=[{0.5 / self.control_frequency:.6f}, "
+                f"{2.0 / self.control_frequency:.6f}] s, "
+                "first command initializes limiter state."
+            )
+        else:
+            self.get_logger().info(
+                "[TorqueRateLimit] disabled; tau_final is published without slew limiting."
+            )
         self.get_logger().info(
             "[GP Shadow] Paper fusion logging controls: "
             f"gp_shadow_paper_fusion_logging_enabled={self.gp_shadow_paper_fusion_logging_enabled}, "
@@ -1144,6 +1184,12 @@ class CartesianImpedanceController(Node):
         self.callback_wall_over_50ms_count = 0
         self.callback_wall_over_100ms_count = 0
         self._effort_gap_diag_callback_count = 0
+        self._torque_rate_limit_prev_tau = None
+        self._torque_rate_limit_prev_time = None
+        self._torque_rate_limit_log_count = 0
+        self._torque_rate_limit_active = 0
+        self._torque_rate_limit_max_delta = 0.0
+        self._torque_rate_limit_dt = 0.0
 
         # simulated future trajectory request delay
         self.future_delay = self.declare_parameter(
@@ -1348,6 +1394,14 @@ class CartesianImpedanceController(Node):
     def _mark_effort_publish_skipped(self, reason):
         if not self._effort_published_this_tick and not self._effort_publish_skip_reason:
             self._effort_publish_skip_reason = reason
+        self._reset_torque_rate_limit_state()
+
+    def _reset_torque_rate_limit_state(self):
+        self._torque_rate_limit_prev_tau = None
+        self._torque_rate_limit_prev_time = None
+        self._torque_rate_limit_active = 0
+        self._torque_rate_limit_max_delta = 0.0
+        self._torque_rate_limit_dt = 0.0
 
     @staticmethod
     def _percentile(sorted_values, fraction):
@@ -1894,7 +1948,9 @@ class CartesianImpedanceController(Node):
 
         self._update_gp_shadow_logging_state(q, self.dq_des_joint)
         self._tau_nominal = tau.copy()
-        tau = self._apply_gp_compensation(tau)
+        tau_after_gp = self._apply_gp_compensation(tau)
+        self._tau_final_raw = tau_after_gp.copy()
+        tau = self._apply_torque_rate_limit(tau_after_gp, t_now)
         self._tau_final = tau.copy()
         self.effort_msg.efforts = tau.tolist()
         self._publish_effort(self.effort_msg)
@@ -2440,7 +2496,9 @@ class CartesianImpedanceController(Node):
             # 默认 compensation 关闭时返回原始 tau；开启后才按原注释方向补偿。
             self._update_gp_shadow_logging_state(self.q, dq)
             self._tau_nominal = tau.copy()
-            tau = self._apply_gp_compensation(tau)
+            tau_after_gp = self._apply_gp_compensation(tau)
+            self._tau_final_raw = tau_after_gp.copy()
+            tau = self._apply_torque_rate_limit(tau_after_gp, t_now)
             self._tau_final = tau.copy()
             # publish on topic /effort_command
             self.effort_msg.efforts = tau.tolist()
@@ -2451,7 +2509,18 @@ class CartesianImpedanceController(Node):
                 csv_append_start = time.perf_counter() if timing_row is not None else None
                 self.tau_history.append(tau.tolist())
                 self.tau_nominal_history.append(self._tau_nominal.tolist())
+                self.tau_final_raw_history.append(self._tau_final_raw.tolist())
                 self.tau_final_history.append(self._tau_final.tolist())
+                self.tau_rate_limited_history.append(self._tau_rate_limited.tolist())
+                self.torque_rate_limit_active_history.append(
+                    int(self._torque_rate_limit_active)
+                )
+                self.torque_rate_limit_max_delta_history.append(
+                    float(self._torque_rate_limit_max_delta)
+                )
+                self.torque_rate_limit_dt_history.append(
+                    float(self._torque_rate_limit_dt)
+                )
                 self.gp_source_code_history.append(int(self._gp_source_code))
                 self.gp_selected_raw_history.append(self._gp_selected_raw.tolist())
                 self.gp_scaled_history.append(self._gp_scaled.tolist())
@@ -2812,6 +2881,72 @@ class CartesianImpedanceController(Node):
     def friction_compensation(self, dq):
         dq = np.asarray(dq, dtype=float)
         return self.Fc * np.tanh(dq / self.v_eps) + self.Bv * dq
+
+    def _apply_torque_rate_limit(self, tau_raw, t_now):
+        fallback_dt = 1.0 / max(float(self.control_frequency), 1e-6)
+        min_dt = 0.5 * fallback_dt
+        max_dt = 2.0 * fallback_dt
+
+        try:
+            tau_raw = np.asarray(tau_raw, dtype=float)
+        except (TypeError, ValueError):
+            self._reset_torque_rate_limit_state()
+            return tau_raw
+
+        self._tau_final_raw = tau_raw.copy()
+        self._tau_rate_limited = tau_raw.copy()
+
+        if tau_raw.shape != (7,) or not np.all(np.isfinite(tau_raw)):
+            self._reset_torque_rate_limit_state()
+            return tau_raw
+
+        dt = fallback_dt
+        if self._torque_rate_limit_prev_time is not None:
+            try:
+                measured_dt = (t_now - self._torque_rate_limit_prev_time).nanoseconds / 1e9
+                if np.isfinite(measured_dt) and measured_dt > 0.0:
+                    dt = measured_dt
+            except Exception:
+                dt = fallback_dt
+        dt = float(np.clip(dt, min_dt, max_dt))
+        max_delta = float(self.torque_rate_limit_nm_per_s * dt)
+        self._torque_rate_limit_dt = dt
+        self._torque_rate_limit_max_delta = max_delta
+
+        if not self.torque_rate_limit_enabled:
+            self._torque_rate_limit_active = 0
+            return tau_raw
+
+        prev_tau = self._torque_rate_limit_prev_tau
+        if prev_tau is None or not np.all(np.isfinite(prev_tau)):
+            if self.torque_rate_limit_reset_on_first_command:
+                self._torque_rate_limit_prev_tau = tau_raw.copy()
+                self._torque_rate_limit_prev_time = t_now
+                self._torque_rate_limit_active = 0
+                return tau_raw
+            prev_tau = np.zeros(7, dtype=float)
+
+        raw_delta = tau_raw - prev_tau
+        limited_delta = np.clip(raw_delta, -max_delta, max_delta)
+        tau_limited = prev_tau + limited_delta
+        clipped = bool(np.any(np.abs(raw_delta - limited_delta) > 1e-12))
+
+        self._torque_rate_limit_active = int(clipped)
+        self._tau_rate_limited = tau_limited.copy()
+        self._torque_rate_limit_prev_tau = tau_limited.copy()
+        self._torque_rate_limit_prev_time = t_now
+
+        if clipped and self._torque_rate_limit_log_count < self.torque_rate_limit_log_first_n:
+            self._torque_rate_limit_log_count += 1
+            self.get_logger().warn(
+                "[TorqueRateLimit] clipped command: "
+                f"max_raw_delta={float(np.max(np.abs(raw_delta))):.6f} Nm, "
+                f"max_allowed_delta={max_delta:.6f} Nm, "
+                f"dt={dt:.6f} s, "
+                f"limit={self.torque_rate_limit_nm_per_s:.3f} Nm/s"
+            )
+
+        return tau_limited
 
     def start_trajectory(self):
         """start trajectory by calling the joint position adjust service"""
@@ -5323,7 +5458,12 @@ class CartesianImpedanceController(Node):
                 self.tau_residual_history,
                 self.tau_residual_raw_history,
                 self.tau_nominal_history,
+                self.tau_final_raw_history,
                 self.tau_final_history,
+                self.tau_rate_limited_history,
+                self.torque_rate_limit_active_history,
+                self.torque_rate_limit_max_delta_history,
+                self.torque_rate_limit_dt_history,
                 self.gp_source_code_history,
                 self.gp_selected_raw_history,
                 self.gp_scaled_history,
@@ -5462,7 +5602,16 @@ class CartesianImpedanceController(Node):
                     'future_trajectory_updated_this_tick',
                 ])
                 header.extend([f'tau_nominal_{i+1}' for i in range(7)])
+                header.extend([f'tau_final_raw_{i+1}' for i in range(7)])
                 header.extend([f'tau_final_{i+1}' for i in range(7)])
+                header.extend([f'tau_rate_limited_{i+1}' for i in range(7)])
+                header.extend([
+                    'torque_rate_limit_enabled',
+                    'torque_rate_limit_nm_per_s',
+                    'torque_rate_limit_active',
+                    'torque_rate_limit_max_delta',
+                    'torque_rate_limit_dt',
+                ])
                 header.extend([f'gp_selected_raw_{i+1}' for i in range(7)])
                 header.extend([f'gp_scaled_{i+1}' for i in range(7)])
                 header.extend([f'gp_applied_{i+1}' for i in range(7)])
@@ -5707,10 +5856,34 @@ class CartesianImpedanceController(Node):
                     else:
                         row.extend([0.0] * 7)
 
+                    if i < len(self.tau_final_raw_history):
+                        row.extend(self.tau_final_raw_history[i])
+                    else:
+                        row.extend([0.0] * 7)
+
                     if i < len(self.tau_final_history):
                         row.extend(self.tau_final_history[i])
                     else:
                         row.extend([0.0] * 7)
+
+                    if i < len(self.tau_rate_limited_history):
+                        row.extend(self.tau_rate_limited_history[i])
+                    else:
+                        row.extend([0.0] * 7)
+
+                    row.extend([
+                        int(bool(self.torque_rate_limit_enabled)),
+                        float(self.torque_rate_limit_nm_per_s),
+                        self.torque_rate_limit_active_history[i]
+                        if i < len(self.torque_rate_limit_active_history)
+                        else 0,
+                        self.torque_rate_limit_max_delta_history[i]
+                        if i < len(self.torque_rate_limit_max_delta_history)
+                        else 0.0,
+                        self.torque_rate_limit_dt_history[i]
+                        if i < len(self.torque_rate_limit_dt_history)
+                        else 0.0,
+                    ])
 
                     if i < len(self.gp_selected_raw_history):
                         row.extend(self.gp_selected_raw_history[i])
