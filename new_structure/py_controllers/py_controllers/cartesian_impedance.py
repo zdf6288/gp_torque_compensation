@@ -516,9 +516,13 @@ class CartesianImpedanceController(Node):
         self.declare_parameter("gp_historical_soft_distance_threshold", 0.2)
         self.declare_parameter("gp_historical_soft_online_scale", 0.02)
         self.declare_parameter("gp_historical_soft_non_online_scale", 1.0)
+        self.declare_parameter("csv_output_profile", "full")
         self.declare_parameter("run_name", "")
         self.declare_parameter("data_output_dir", ".")
         self.declare_parameter("control_frequency", 50.0)
+        self.declare_parameter("trajectory_mode", "")
+        self.declare_parameter("circle_frequency", 0.0)
+        self.declare_parameter("transition_duration", 0.0)
         self.declare_parameter("torque_rate_limit_enabled", False)
         self.declare_parameter("torque_rate_limit_nm_per_s", 80.0)
         self.declare_parameter("torque_rate_limit_log_first_n", 5)
@@ -723,10 +727,20 @@ class CartesianImpedanceController(Node):
         self.gp_historical_soft_non_online_scale = self._get_nonnegative_float_parameter(
             "gp_historical_soft_non_online_scale", 1.0
         )
+        self.csv_output_profile = str(
+            self.get_parameter("csv_output_profile").value
+        ).strip().lower()
         self.run_name = str(self.get_parameter("run_name").value).strip()
         self.data_output_dir = str(self.get_parameter("data_output_dir").value).strip() or "."
         self.control_frequency = self._get_positive_float_parameter(
             "control_frequency", 50.0
+        )
+        self.trajectory_mode = str(self.get_parameter("trajectory_mode").value).strip()
+        self.circle_frequency = self._get_nonnegative_float_parameter(
+            "circle_frequency", 0.0
+        )
+        self.transition_duration = self._get_nonnegative_float_parameter(
+            "transition_duration", 0.0
         )
         self.declare_parameter("ros2_control_update_rate", self.control_frequency)
         self.declare_parameter("trajectory_publish_rate", self.control_frequency)
@@ -863,6 +877,13 @@ class CartesianImpedanceController(Node):
         }[self.gp_triple_fallback_source]
         self.gp_triple_weights = self._compute_gp_triple_weights()
 
+        if self.csv_output_profile not in ("full", "final"):
+            self.get_logger().warn(
+                f"[CSV] Invalid csv_output_profile='{self.csv_output_profile}', "
+                "falling back to 'full'"
+            )
+            self.csv_output_profile = "full"
+
         if self.gp_historical_shadow_min_points > self.gp_historical_shadow_max_points:
             self.get_logger().warn(
                 "[GP Shadow] gp_historical_shadow_min_points exceeds max_points; "
@@ -930,6 +951,7 @@ class CartesianImpedanceController(Node):
             f"gp_prediction_stride={self.gp_prediction_stride}, "
             f"gp_output_timeout_sec={self.gp_output_timeout_sec}, "
             f"future_trajectory_request_stride={self.future_trajectory_request_stride}, "
+            f"csv_output_profile='{self.csv_output_profile}', "
             f"control_frequency={self.control_frequency}, "
             f"ros2_control_update_rate={self.ros2_control_update_rate}, "
             f"trajectory_publish_rate={self.trajectory_publish_rate}, "
@@ -954,80 +976,97 @@ class CartesianImpedanceController(Node):
             self.get_logger().info(
                 "[TorqueRateLimit] disabled; tau_final is published without slew limiting."
             )
-        self.get_logger().info(
-            "[GP Shadow] Paper fusion logging controls: "
-            f"gp_shadow_paper_fusion_logging_enabled={self.gp_shadow_paper_fusion_logging_enabled}, "
-            f"gp_historical_shadow_enabled={self.gp_historical_shadow_enabled}, "
-            f"gp_historical_source_mode='{self.gp_historical_source_mode}', "
-            f"gp_shadow_variance_eps={self.gp_shadow_variance_eps}, "
-            f"gp_shadow_hist_fallback_variance={self.gp_shadow_hist_fallback_variance}"
-        )
-        self.get_logger().info(
-            "[GP Shadow] Historical source controls: "
-            f"enabled={self.gp_historical_shadow_enabled}, "
-            f"mode='{self.gp_historical_source_mode}', "
-            f"max_points={self.gp_historical_shadow_max_points}, "
-            f"min_points={self.gp_historical_shadow_min_points}, "
-            f"k={self.gp_historical_shadow_k}, "
-            f"max_distance={self.gp_historical_shadow_max_distance}, "
-            f"variance_floor={self.gp_historical_shadow_variance_floor}, "
-            f"distance_eps={self.gp_historical_shadow_distance_eps}; "
-            "shadow-only and does not enter tau_final"
-        )
-        self.get_logger().info(
-            "[GP Hist DB] Persistent residual DB controls: "
-            f"enabled={self.gp_historical_db_enabled}, "
-            f"path='{self.gp_historical_db_path}', "
-            f"loaded={self.gp_historical_db_loaded}, "
-            f"rows={self.gp_historical_db_row_count}, "
-            f"k={self.gp_historical_db_k}, "
-            f"q_scale={self.gp_historical_db_q_scale}, "
-            f"dq_scale={self.gp_historical_db_dq_scale}, "
-            f"max_distance={self.gp_historical_db_max_distance}, "
-            "disable_when_online_update="
-            f"{self.gp_historical_db_disable_when_online_update}, "
-            f"fallback_source='{self.gp_historical_db_fallback_source}'; "
-            f"preflight_enabled={self.gp_historical_db_preflight_enabled}, "
-            f"preflight_required={self.gp_historical_db_preflight_required}, "
-            f"preflight_mode='{self.gp_historical_db_preflight_mode}', "
-            f"disable_silent_fallback={self.gp_disable_silent_hist_fallback}; "
-            "active only with explicit hist_db/triple/triple_dynamic source"
-        )
-        self.get_logger().info(
-            "[GP Triple] Fusion controls: "
-            f"mode='{self.gp_triple_weight_mode}', "
-            f"weights=({self.gp_triple_weights[0]:.6f}, "
-            f"{self.gp_triple_weights[1]:.6f}, "
-            f"{self.gp_triple_weights[2]:.6f}), "
-            f"fixed_weights=({self.gp_triple_weight_local_param}, "
-            f"{self.gp_triple_weight_cloud_param}, "
-            f"{self.gp_triple_weight_hist_param}), "
-            f"rmse=({self.gp_triple_rmse_local}, "
-            f"{self.gp_triple_rmse_cloud}, "
-            f"{self.gp_triple_rmse_hist}), "
-            f"dynamic_distance_scale={self.gp_triple_hist_distance_scale}, "
-            f"dynamic_distance_power={self.gp_triple_hist_distance_power}, "
-            f"dynamic_eps={self.gp_triple_dynamic_eps}, "
-            f"hist_weight_cap={self.gp_triple_hist_weight_cap}, "
-            f"hist_min_weight={self.gp_triple_hist_min_weight}, "
-            f"min_weight_local={self.gp_triple_min_weight_local}, "
-            f"min_weight_cloud={self.gp_triple_min_weight_cloud}, "
-            f"require_hist_available={self.gp_triple_require_hist_available}, "
-            f"fallback_source='{self.gp_triple_fallback_source}', "
-            f"debug_safety_log_enabled={self.gp_triple_debug_safety_log_enabled}, "
-            f"debug_safety_log_first_n={self.gp_triple_debug_safety_log_first_n}; "
-            "active only with gp_compensation_source='triple' or 'triple_dynamic' "
-            "and compensation enabled"
-        )
-        self.get_logger().info(
-            "[GP Hist Soft] Soft-weight shadow logging controls: "
-            f"enabled={self.gp_historical_soft_shadow_enabled}, "
-            f"alpha={self.gp_historical_soft_alpha}, "
-            f"distance_threshold={self.gp_historical_soft_distance_threshold}, "
-            f"online_scale={self.gp_historical_soft_online_scale}, "
-            f"non_online_scale={self.gp_historical_soft_non_online_scale}; "
-            "shadow-only and does not enter tau_final"
-        )
+        if (
+            self._csv_profile_is_full()
+            or self.gp_shadow_paper_fusion_logging_enabled
+            or self.gp_historical_shadow_enabled
+        ):
+            self.get_logger().info(
+                "[GP Shadow] Paper fusion logging controls: "
+                f"gp_shadow_paper_fusion_logging_enabled={self.gp_shadow_paper_fusion_logging_enabled}, "
+                f"gp_historical_shadow_enabled={self.gp_historical_shadow_enabled}, "
+                f"gp_historical_source_mode='{self.gp_historical_source_mode}', "
+                f"gp_shadow_variance_eps={self.gp_shadow_variance_eps}, "
+                f"gp_shadow_hist_fallback_variance={self.gp_shadow_hist_fallback_variance}"
+            )
+            self.get_logger().info(
+                "[GP Shadow] Historical source controls: "
+                f"enabled={self.gp_historical_shadow_enabled}, "
+                f"mode='{self.gp_historical_source_mode}', "
+                f"max_points={self.gp_historical_shadow_max_points}, "
+                f"min_points={self.gp_historical_shadow_min_points}, "
+                f"k={self.gp_historical_shadow_k}, "
+                f"max_distance={self.gp_historical_shadow_max_distance}, "
+                f"variance_floor={self.gp_historical_shadow_variance_floor}, "
+                f"distance_eps={self.gp_historical_shadow_distance_eps}; "
+                "shadow-only and does not enter tau_final"
+            )
+        if (
+            self._csv_profile_is_full()
+            or self.gp_historical_db_enabled
+            or self.gp_historical_db_loaded
+            or self.gp_historical_db_preflight_enabled
+            or self.gp_compensation_source in ("hist_db", "triple", "triple_dynamic")
+        ):
+            self.get_logger().info(
+                "[GP Hist DB] Persistent residual DB controls: "
+                f"enabled={self.gp_historical_db_enabled}, "
+                f"path='{self.gp_historical_db_path}', "
+                f"loaded={self.gp_historical_db_loaded}, "
+                f"rows={self.gp_historical_db_row_count}, "
+                f"k={self.gp_historical_db_k}, "
+                f"q_scale={self.gp_historical_db_q_scale}, "
+                f"dq_scale={self.gp_historical_db_dq_scale}, "
+                f"max_distance={self.gp_historical_db_max_distance}, "
+                "disable_when_online_update="
+                f"{self.gp_historical_db_disable_when_online_update}, "
+                f"fallback_source='{self.gp_historical_db_fallback_source}'; "
+                f"preflight_enabled={self.gp_historical_db_preflight_enabled}, "
+                f"preflight_required={self.gp_historical_db_preflight_required}, "
+                f"preflight_mode='{self.gp_historical_db_preflight_mode}', "
+                f"disable_silent_fallback={self.gp_disable_silent_hist_fallback}; "
+                "active only with explicit hist_db/triple/triple_dynamic source"
+            )
+        if self._csv_profile_is_full() or self.gp_compensation_source in (
+            "triple",
+            "triple_dynamic",
+        ):
+            self.get_logger().info(
+                "[GP Triple] Fusion controls: "
+                f"mode='{self.gp_triple_weight_mode}', "
+                f"weights=({self.gp_triple_weights[0]:.6f}, "
+                f"{self.gp_triple_weights[1]:.6f}, "
+                f"{self.gp_triple_weights[2]:.6f}), "
+                f"fixed_weights=({self.gp_triple_weight_local_param}, "
+                f"{self.gp_triple_weight_cloud_param}, "
+                f"{self.gp_triple_weight_hist_param}), "
+                f"rmse=({self.gp_triple_rmse_local}, "
+                f"{self.gp_triple_rmse_cloud}, "
+                f"{self.gp_triple_rmse_hist}), "
+                f"dynamic_distance_scale={self.gp_triple_hist_distance_scale}, "
+                f"dynamic_distance_power={self.gp_triple_hist_distance_power}, "
+                f"dynamic_eps={self.gp_triple_dynamic_eps}, "
+                f"hist_weight_cap={self.gp_triple_hist_weight_cap}, "
+                f"hist_min_weight={self.gp_triple_hist_min_weight}, "
+                f"min_weight_local={self.gp_triple_min_weight_local}, "
+                f"min_weight_cloud={self.gp_triple_min_weight_cloud}, "
+                f"require_hist_available={self.gp_triple_require_hist_available}, "
+                f"fallback_source='{self.gp_triple_fallback_source}', "
+                f"debug_safety_log_enabled={self.gp_triple_debug_safety_log_enabled}, "
+                f"debug_safety_log_first_n={self.gp_triple_debug_safety_log_first_n}; "
+                "active only with gp_compensation_source='triple' or 'triple_dynamic' "
+                "and compensation enabled"
+            )
+        if self._csv_profile_is_full() or self.gp_historical_soft_shadow_enabled:
+            self.get_logger().info(
+                "[GP Hist Soft] Soft-weight shadow logging controls: "
+                f"enabled={self.gp_historical_soft_shadow_enabled}, "
+                f"alpha={self.gp_historical_soft_alpha}, "
+                f"distance_threshold={self.gp_historical_soft_distance_threshold}, "
+                f"online_scale={self.gp_historical_soft_online_scale}, "
+                f"non_online_scale={self.gp_historical_soft_non_online_scale}; "
+                "shadow-only and does not enter tau_final"
+            )
         if (
             self.gp_historical_db_enabled
             and self.gp_historical_db_disable_when_online_update
@@ -5420,6 +5459,95 @@ class CartesianImpedanceController(Node):
         except Exception as e:
             self.get_logger().error(f"[GP] failed to import skygp from {skygp_path}: {e}")
             return False
+
+    def _csv_profile_is_full(self):
+        return self.csv_output_profile == "full"
+
+    def _is_final_csv_profile(self):
+        return self.csv_output_profile == "final"
+
+    def _final_csv_extra_header(self):
+        return [
+            "ros2_control_update_rate",
+            "trajectory_publish_rate",
+            "state_parameter_publish_rate",
+            "trajectory_mode",
+            "circle_frequency",
+            "transition_duration",
+            "gp_compensation_disable_joint7",
+        ]
+
+    def _final_csv_extra_row(self):
+        return [
+            self.ros2_control_update_rate,
+            self.trajectory_publish_rate,
+            self.state_parameter_publish_rate,
+            self.trajectory_mode,
+            self.circle_frequency,
+            self.transition_duration,
+            int(bool(self.gp_compensation_disable_joint7)),
+        ]
+
+    def _final_csv_column_names(self):
+        columns = [
+            "Time(s)",
+            "PredTime(s)",
+            "run_name",
+            "control_frequency",
+            "ros2_control_update_rate",
+            "trajectory_publish_rate",
+            "state_parameter_publish_rate",
+            "trajectory_mode",
+            "circle_frequency",
+            "transition_duration",
+            "delay_steps",
+        ]
+        columns.extend([f"joint_pos_{i+1}" for i in range(7)])
+        columns.extend([f"joint_vel_{i+1}" for i in range(7)])
+        columns.extend(["x_actual", "y_actual", "z_actual"])
+        columns.extend(["x_desired", "y_desired", "z_desired"])
+        columns.extend(["dx_actual", "dy_actual", "dz_actual"])
+        columns.extend(["dx_desired", "dy_desired", "dz_desired"])
+        columns.extend([f"tau_final_{i+1}" for i in range(7)])
+        columns.extend([f"tau_final_raw_{i+1}" for i in range(7)])
+        columns.extend([f"tau_rate_limited_{i+1}" for i in range(7)])
+        columns.extend([
+            "gp_prediction_enabled",
+            "gp_online_update_enabled",
+            "gp_compensation_enabled",
+            "gp_compensation_source_code",
+            "gp_compensation_scale",
+            "gp_compensation_clip_nm",
+            "gp_compensation_disable_joint7",
+        ])
+        columns.extend([f"y_hat_local_{i+1}" for i in range(7)])
+        columns.extend([f"y_hat_cloud_{i+1}" for i in range(7)])
+        columns.extend([f"gp_applied_{i+1}" for i in range(7)])
+        columns.extend([f"gp_clip_active_{i+1}" for i in range(7)])
+        columns.extend([
+            "torque_rate_limit_enabled",
+            "torque_rate_limit_nm_per_s",
+            "torque_rate_limit_active",
+            "torque_rate_limit_max_delta",
+            "torque_rate_limit_dt",
+        ])
+        return columns
+
+    def _final_csv_indices(self, header):
+        header_index = {name: index for index, name in enumerate(header)}
+        missing = [
+            name for name in self._final_csv_column_names()
+            if name not in header_index
+        ]
+        if missing:
+            self.get_logger().warn(
+                "[CSV] final profile missing requested columns: " + ", ".join(missing)
+            )
+        return [
+            header_index[name]
+            for name in self._final_csv_column_names()
+            if name in header_index
+        ]
     
     def save_data_to_file(self):
         """save data to CSV file"""
@@ -5723,7 +5851,13 @@ class CartesianImpedanceController(Node):
                     'delay_steps',
                     'data_output_dir',
                 ])
-                writer.writerow(header)
+                final_csv_indices = None
+                if self._is_final_csv_profile():
+                    final_source_header = header + self._final_csv_extra_header()
+                    final_csv_indices = self._final_csv_indices(final_source_header)
+                    writer.writerow([final_source_header[j] for j in final_csv_indices])
+                else:
+                    writer.writerow(header)
 
                 for i in range(min_len):
                     row = [self.time_history[i]]
@@ -6314,6 +6448,10 @@ class CartesianImpedanceController(Node):
                             f"CSV row length mismatch at row {i}: "
                             f"header={len(header)}, row={len(row)}"
                         )
+
+                    if final_csv_indices is not None:
+                        final_source_row = row + self._final_csv_extra_row()
+                        row = [final_source_row[j] for j in final_csv_indices]
 
                     writer.writerow(row)
 

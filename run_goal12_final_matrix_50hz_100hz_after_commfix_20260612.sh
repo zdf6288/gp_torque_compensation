@@ -132,6 +132,7 @@ COMMON_ARGS=(
   "trajectory_start_distance_warn_m:=0.003"
   "trajectory_start_distance_refuse_m:=0.02"
   "gp_model_dir:=/home/mirmi_ros2_2/dongfa/tt_dgp/new_structure/gp/gp_models"
+  "csv_output_profile:=final"
   "gp_compensation_disable_joint7:=true"
   "gp_output_timeout_sec:=0.5"
   "timing_logging_enabled:=false"

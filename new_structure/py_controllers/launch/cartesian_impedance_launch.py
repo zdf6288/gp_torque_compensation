@@ -208,6 +208,7 @@ def generate_launch_description():
     state_parameter_publish_rate_parameter_name = 'state_parameter_publish_rate'
     run_name_parameter_name = 'run_name'
     data_output_dir_parameter_name = 'data_output_dir'
+    csv_output_profile_parameter_name = 'csv_output_profile'
     reference_mode_parameter_name = 'reference_mode'
     joint_space_command_topic_parameter_name = 'joint_space_command_topic'
     # Stage 1: frozen GP / compensation experiment 参数，默认值保持安全。
@@ -353,6 +354,7 @@ def generate_launch_description():
     state_parameter_publish_rate = LaunchConfiguration(state_parameter_publish_rate_parameter_name)
     run_name = LaunchConfiguration(run_name_parameter_name)
     data_output_dir = LaunchConfiguration(data_output_dir_parameter_name)
+    csv_output_profile = LaunchConfiguration(csv_output_profile_parameter_name)
     reference_mode = LaunchConfiguration(reference_mode_parameter_name)
     joint_space_command_topic = LaunchConfiguration(joint_space_command_topic_parameter_name)
     gp_prediction_enabled = LaunchConfiguration(gp_prediction_enabled_parameter_name)
@@ -635,6 +637,10 @@ def generate_launch_description():
             data_output_dir_parameter_name,
             default_value='.',
             description='Directory for controller data CSV output.'),
+        DeclareLaunchArgument(
+            csv_output_profile_parameter_name,
+            default_value='full',
+            description='Controller CSV output profile: full or final.'),
         DeclareLaunchArgument(
             load_gripper_parameter_name,
             default_value='true',
@@ -1095,6 +1101,14 @@ def generate_launch_description():
                     state_parameter_publish_rate, value_type=float),
                 run_name_parameter_name: ParameterValue(run_name, value_type=str),
                 data_output_dir_parameter_name: ParameterValue(data_output_dir, value_type=str),
+                csv_output_profile_parameter_name: ParameterValue(
+                    csv_output_profile, value_type=str),
+                trajectory_mode_parameter_name: ParameterValue(
+                    trajectory_mode, value_type=str),
+                circle_frequency_parameter_name: ParameterValue(
+                    circle_frequency, value_type=float),
+                transition_duration_parameter_name: ParameterValue(
+                    transition_duration, value_type=float),
                 timing_logging_enabled_parameter_name: ParameterValue(
                     timing_logging_enabled, value_type=bool),
                 timing_log_stride_parameter_name: ParameterValue(
