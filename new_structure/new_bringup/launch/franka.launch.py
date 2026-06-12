@@ -27,6 +27,9 @@ from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
 
+CONTROLLER_MANAGER_PARAM_KEY = 'controller_manager'
+
+
 def _positive_int_or_fallback(value_text, fallback_text, default_value=50):
     try:
         value = float(value_text)
@@ -71,6 +74,25 @@ def _bool_or_raise(value_text, parameter_name):
     )
 
 
+def _controller_manager_update_rate_yaml_text(update_rate):
+    return (
+        f'{CONTROLLER_MANAGER_PARAM_KEY}:\n'
+        '  ros__parameters:\n'
+        f'    update_rate: {update_rate}\n'
+    )
+
+
+def _write_controller_manager_update_rate_override(update_rate):
+    with tempfile.NamedTemporaryFile(
+        mode='w',
+        prefix='controller_manager_update_rate_',
+        suffix='.yaml',
+        delete=False,
+    ) as param_file:
+        param_file.write(_controller_manager_update_rate_yaml_text(update_rate))
+        return param_file.name
+
+
 def _make_ros2_control_node(
         context,
         robot_description,
@@ -98,16 +120,7 @@ def _make_ros2_control_node(
         ros2_control_rate,
         control_rate,
     )
-    with tempfile.NamedTemporaryFile(
-        mode='w',
-        prefix='controller_manager_update_rate_',
-        suffix='.yaml',
-        delete=False,
-    ) as param_file:
-        param_file.write('/controller_manager:\n')
-        param_file.write('  ros__parameters:\n')
-        param_file.write(f'    update_rate: {update_rate}\n')
-        update_rate_param_file = param_file.name
+    update_rate_param_file = _write_controller_manager_update_rate_override(update_rate)
 
     return [
         LogInfo(
@@ -119,8 +132,11 @@ def _make_ros2_control_node(
         ),
         LogInfo(
             msg=(
-                'controller_manager update_rate override param file after '
-                f'controllers.yaml: {update_rate} Hz'
+                'Requested controller_manager update_rate override: '
+                f'{update_rate} Hz. Temp YAML key is '
+                f"'{CONTROLLER_MANAGER_PARAM_KEY}' and the temp file is appended "
+                'after controllers.yaml. Confirm actual runtime rate from the '
+                "'controller_manager: update rate is ...' log."
             )
         ),
         Node(
