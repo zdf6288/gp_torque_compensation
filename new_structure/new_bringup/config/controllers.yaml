@@ -5,6 +5,9 @@ controller_manager:
     cpp_relayer:
       type: cpp_relayer/CPPRelayer
 
+    update_rate_diagnostic:
+      type: cpp_relayer/UpdateRateDiagnosticController
+
     joint_state_broadcaster:
       type: joint_state_broadcaster/JointStateBroadcaster
     
@@ -30,3 +33,12 @@ cpp_relayer:
     diagnostics_enabled: true
     diagnostics_log_period_sec: 5.0
     log_first_n_stale_events: 5
+
+update_rate_diagnostic:
+  ros__parameters:
+    diagnostics_enabled: true
+    diagnostics_log_period_sec: 5.0
+    expected_update_rate_hz: 1000.0
+    expected_publish_rate_hz: 50.0
+    warn_ratio_low: 0.8
+    warn_ratio_high: 1.2

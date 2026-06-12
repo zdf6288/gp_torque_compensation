@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import math
+import tempfile
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, LogInfo, OpaqueFunction
@@ -44,7 +45,10 @@ def _guard_frequency_config(
         ros2_control_update_rate,
         trajectory_publish_rate,
         state_parameter_publish_rate,
-        allow_high_ros2_control_rate):
+        allow_high_ros2_control_rate,
+        use_fake_hardware,
+        spawn_cpp_relayer,
+        spawn_update_rate_diagnostic):
     control_rate = _positive_float_or_raise(
         control_frequency.perform(context), 'control_frequency')
     ros2_control_rate = _positive_float_or_raise(
@@ -55,6 +59,37 @@ def _guard_frequency_config(
         state_parameter_publish_rate.perform(context), 'state_parameter_publish_rate')
     allow_high_rate = _bool_or_raise(
         allow_high_ros2_control_rate.perform(context), 'allow_high_ros2_control_rate')
+    fake_hardware = _bool_or_raise(
+        use_fake_hardware.perform(context), 'use_fake_hardware')
+    spawn_cpp_relayer_enabled = _bool_or_raise(
+        spawn_cpp_relayer.perform(context), 'spawn_cpp_relayer')
+    spawn_update_rate_diagnostic_enabled = _bool_or_raise(
+        spawn_update_rate_diagnostic.perform(context), 'spawn_update_rate_diagnostic')
+
+    actions = []
+
+    if spawn_update_rate_diagnostic_enabled and not fake_hardware:
+        raise RuntimeError(
+            'update_rate_diagnostic is fake-only and requires '
+            'use_fake_hardware:=true.'
+        )
+
+    if spawn_update_rate_diagnostic_enabled and spawn_cpp_relayer_enabled:
+        raise RuntimeError(
+            'update_rate_diagnostic fake validation requires '
+            'spawn_cpp_relayer:=false so cpp_relayer is not activated.'
+        )
+
+    if spawn_update_rate_diagnostic_enabled:
+        actions.append(
+            LogInfo(
+                msg=(
+                    'Fake-only update_rate_diagnostic requested. It declares no '
+                    'command interfaces, no state interfaces, and does not validate '
+                    'real cpp_relayer or real robot safety.'
+                )
+            )
+        )
 
     if ros2_control_rate > control_rate and not allow_high_rate:
         raise RuntimeError(
@@ -66,7 +101,7 @@ def _guard_frequency_config(
         )
 
     if ros2_control_rate > control_rate:
-        return [
+        actions.append(
             LogInfo(
                 msg=(
                     'WARNING: high-rate ros2_control communication is experimental. '
@@ -81,9 +116,10 @@ def _guard_frequency_config(
                     'gp_compensation_enabled:=false.'
                 )
             )
-        ]
+        )
+        return actions
 
-    return [
+    actions.append(
         LogInfo(
             msg=(
                 'High-rate communication mode disabled or inactive; '
@@ -94,6 +130,62 @@ def _guard_frequency_config(
                 f'allow_high_ros2_control_rate={str(allow_high_rate).lower()}.'
             )
         )
+    )
+    return actions
+
+
+def _write_update_rate_diagnostic_params(expected_update_rate_hz, diagnostics_log_period_sec):
+    with tempfile.NamedTemporaryFile(
+        mode='w',
+        prefix='update_rate_diagnostic_',
+        suffix='.yaml',
+        delete=False,
+    ) as param_file:
+        param_file.write(
+            'update_rate_diagnostic:\n'
+            '  ros__parameters:\n'
+            '    diagnostics_enabled: true\n'
+            f'    diagnostics_log_period_sec: {diagnostics_log_period_sec:.6f}\n'
+            f'    expected_update_rate_hz: {expected_update_rate_hz:.6f}\n'
+            '    expected_publish_rate_hz: 50.0\n'
+            '    warn_ratio_low: 0.8\n'
+            '    warn_ratio_high: 1.2\n'
+        )
+        return param_file.name
+
+
+def _make_update_rate_diagnostic_spawner(
+        context,
+        update_rate_diagnostic_expected_rate,
+        update_rate_diagnostic_log_period_sec):
+    expected_update_rate_hz = _positive_float_or_raise(
+        update_rate_diagnostic_expected_rate.perform(context),
+        'update_rate_diagnostic_expected_rate')
+    diagnostics_log_period_sec = _positive_float_or_raise(
+        update_rate_diagnostic_log_period_sec.perform(context),
+        'update_rate_diagnostic_log_period_sec')
+    param_file = _write_update_rate_diagnostic_params(
+        expected_update_rate_hz,
+        diagnostics_log_period_sec)
+
+    return [
+        LogInfo(
+            msg=(
+                'Spawning fake-only update_rate_diagnostic with '
+                f'expected_update_rate_hz={expected_update_rate_hz:.3f}, '
+                f'diagnostics_log_period_sec={diagnostics_log_period_sec:.3f}.'
+            )
+        ),
+        Node(
+            package='controller_manager',
+            executable='spawner',
+            arguments=[
+                '--param-file',
+                param_file,
+                'update_rate_diagnostic',
+            ],
+            output='screen',
+        ),
     ]
 
 
@@ -105,6 +197,10 @@ def generate_launch_description():
     use_rviz_parameter_name = 'use_rviz'
     spawn_gp_server_parameter_name = 'spawn_gp_server'
     spawn_fake_state_parameter_publisher_parameter_name = 'spawn_fake_state_parameter_publisher'
+    spawn_cpp_relayer_parameter_name = 'spawn_cpp_relayer'
+    spawn_update_rate_diagnostic_parameter_name = 'spawn_update_rate_diagnostic'
+    update_rate_diagnostic_expected_rate_parameter_name = 'update_rate_diagnostic_expected_rate'
+    update_rate_diagnostic_log_period_sec_parameter_name = 'update_rate_diagnostic_log_period_sec'
     control_frequency_parameter_name = 'control_frequency'
     allow_high_ros2_control_rate_parameter_name = 'allow_high_ros2_control_rate'
     ros2_control_update_rate_parameter_name = 'ros2_control_update_rate'
@@ -236,6 +332,13 @@ def generate_launch_description():
     fake_sensor_commands = LaunchConfiguration(fake_sensor_commands_parameter_name)
     use_rviz = LaunchConfiguration(use_rviz_parameter_name)
     spawn_gp_server = LaunchConfiguration(spawn_gp_server_parameter_name)
+    spawn_cpp_relayer = LaunchConfiguration(spawn_cpp_relayer_parameter_name)
+    spawn_update_rate_diagnostic = LaunchConfiguration(
+        spawn_update_rate_diagnostic_parameter_name)
+    update_rate_diagnostic_expected_rate = LaunchConfiguration(
+        update_rate_diagnostic_expected_rate_parameter_name)
+    update_rate_diagnostic_log_period_sec = LaunchConfiguration(
+        update_rate_diagnostic_log_period_sec_parameter_name)
     control_frequency = LaunchConfiguration(control_frequency_parameter_name)
     allow_high_ros2_control_rate = LaunchConfiguration(
         allow_high_ros2_control_rate_parameter_name)
@@ -411,12 +514,40 @@ def generate_launch_description():
             default_value='false',
             description='Visualize the robot in Rviz'),
         DeclareLaunchArgument(
+            use_fake_hardware_parameter_name,
+            default_value='false',
+            description='Use fake hardware'),
+        DeclareLaunchArgument(
+            fake_sensor_commands_parameter_name,
+            default_value='false',
+            description="Fake sensor commands. Only valid when '{}' is true".format(
+                use_fake_hardware_parameter_name)),
+        DeclareLaunchArgument(
             spawn_gp_server_parameter_name,
             default_value='false',
             description=(
                 'Start standalone gp_server only when explicitly requested; '
                 'default false for GOAL1 real shadow validation.'
             )),
+        DeclareLaunchArgument(
+            spawn_cpp_relayer_parameter_name,
+            default_value='true',
+            description='Spawn cpp_relayer controller unless explicitly disabled.'),
+        DeclareLaunchArgument(
+            spawn_update_rate_diagnostic_parameter_name,
+            default_value='false',
+            description=(
+                'Spawn fake-only update_rate_diagnostic controller. Requires '
+                'use_fake_hardware:=true and spawn_cpp_relayer:=false.'
+            )),
+        DeclareLaunchArgument(
+            update_rate_diagnostic_expected_rate_parameter_name,
+            default_value='1000.0',
+            description='Expected controller_manager update rate for update_rate_diagnostic.'),
+        DeclareLaunchArgument(
+            update_rate_diagnostic_log_period_sec_parameter_name,
+            default_value='5.0',
+            description='Log period for update_rate_diagnostic summary output.'),
         DeclareLaunchArgument(
             spawn_fake_state_parameter_publisher_parameter_name,
             default_value='false',
@@ -473,6 +604,9 @@ def generate_launch_description():
                 trajectory_publish_rate,
                 state_parameter_publish_rate,
                 allow_high_ros2_control_rate,
+                use_fake_hardware,
+                spawn_cpp_relayer,
+                spawn_update_rate_diagnostic,
             ],
         ),
         DeclareLaunchArgument(
@@ -483,15 +617,6 @@ def generate_launch_description():
             data_output_dir_parameter_name,
             default_value='.',
             description='Directory for controller data CSV output.'),
-        DeclareLaunchArgument(
-            use_fake_hardware_parameter_name,
-            default_value='false',
-            description='Use fake hardware'),
-        DeclareLaunchArgument(
-            fake_sensor_commands_parameter_name,
-            default_value='false',
-            description="Fake sensor commands. Only valid when '{}' is true".format(
-                use_fake_hardware_parameter_name)),
         DeclareLaunchArgument(
             load_gripper_parameter_name,
             default_value='true',
@@ -878,6 +1003,15 @@ def generate_launch_description():
             executable='spawner',
             arguments=['cpp_relayer'],
             output='screen',
+            condition=IfCondition(spawn_cpp_relayer),
+        ),
+        OpaqueFunction(
+            function=_make_update_rate_diagnostic_spawner,
+            args=[
+                update_rate_diagnostic_expected_rate,
+                update_rate_diagnostic_log_period_sec,
+            ],
+            condition=IfCondition(spawn_update_rate_diagnostic),
         ),
         Node(
             package='py_controllers',

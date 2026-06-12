@@ -5,4 +5,10 @@
             A parameter and command relayer coded in C++.
         </description>
     </class>
+    <class name="cpp_relayer/UpdateRateDiagnosticController"
+           type="cpp_relayer::UpdateRateDiagnosticController" base_class_type="controller_interface::ControllerInterface">
+        <description>
+            A fake-only log diagnostic controller for controller_manager update rate checks.
+        </description>
+    </class>
 </library>
