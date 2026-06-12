@@ -13,60 +13,176 @@ from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
 
-def _positive_float_or_fallback(value_text, fallback_text, default_value=50.0):
+def _positive_float_or_raise(value_text, parameter_name):
     try:
         value = float(value_text)
-        if math.isfinite(value) and value > 0.0:
-            return value
-    except (TypeError, ValueError):
-        pass
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            f'{parameter_name} must be positive and finite; got {value_text!r}.'
+        ) from exc
 
-    try:
-        fallback = float(fallback_text)
-        if math.isfinite(fallback) and fallback > 0.0:
-            return fallback
-    except (TypeError, ValueError):
-        pass
-
-    return float(default_value)
+    if not math.isfinite(value) or value <= 0.0:
+        raise RuntimeError(
+            f'{parameter_name} must be positive and finite; got {value_text!r}.'
+        )
+    return value
 
 
-def _make_cpp_relayer_spawner(
-        context,
-        state_parameter_publish_rate,
-        control_frequency,
-        cpp_relayer_base_param_file):
-    state_rate = _positive_float_or_fallback(
-        state_parameter_publish_rate.perform(context),
-        control_frequency.perform(context),
+def _bool_or_raise(value_text, parameter_name):
+    normalized = str(value_text).strip().lower()
+    if normalized in ('true', '1', 'yes', 'on'):
+        return True
+    if normalized in ('false', '0', 'no', 'off'):
+        return False
+    raise RuntimeError(
+        f'{parameter_name} must be a boolean value; got {value_text!r}.'
     )
-    base_param_file_path = cpp_relayer_base_param_file.perform(context)
+
+
+def _guard_frequency_config(
+        context,
+        control_frequency,
+        ros2_control_update_rate,
+        trajectory_publish_rate,
+        state_parameter_publish_rate,
+        allow_high_ros2_control_rate,
+        use_fake_hardware,
+        spawn_cpp_relayer,
+        spawn_update_rate_diagnostic):
+    control_rate = _positive_float_or_raise(
+        control_frequency.perform(context), 'control_frequency')
+    ros2_control_rate = _positive_float_or_raise(
+        ros2_control_update_rate.perform(context), 'ros2_control_update_rate')
+    trajectory_rate = _positive_float_or_raise(
+        trajectory_publish_rate.perform(context), 'trajectory_publish_rate')
+    state_rate = _positive_float_or_raise(
+        state_parameter_publish_rate.perform(context), 'state_parameter_publish_rate')
+    allow_high_rate = _bool_or_raise(
+        allow_high_ros2_control_rate.perform(context), 'allow_high_ros2_control_rate')
+    fake_hardware = _bool_or_raise(
+        use_fake_hardware.perform(context), 'use_fake_hardware')
+    spawn_cpp_relayer_enabled = _bool_or_raise(
+        spawn_cpp_relayer.perform(context), 'spawn_cpp_relayer')
+    spawn_update_rate_diagnostic_enabled = _bool_or_raise(
+        spawn_update_rate_diagnostic.perform(context), 'spawn_update_rate_diagnostic')
+
+    actions = []
+
+    if spawn_update_rate_diagnostic_enabled and not fake_hardware:
+        raise RuntimeError(
+            'update_rate_diagnostic is fake-only and requires '
+            'use_fake_hardware:=true.'
+        )
+
+    if spawn_update_rate_diagnostic_enabled and spawn_cpp_relayer_enabled:
+        raise RuntimeError(
+            'update_rate_diagnostic fake validation requires '
+            'spawn_cpp_relayer:=false so cpp_relayer is not activated.'
+        )
+
+    if spawn_update_rate_diagnostic_enabled:
+        actions.append(
+            LogInfo(
+                msg=(
+                    'Fake-only update_rate_diagnostic requested. It declares no '
+                    'command interfaces, no state interfaces, and does not validate '
+                    'real cpp_relayer or real robot safety.'
+                )
+            )
+        )
+
+    if ros2_control_rate > control_rate and not allow_high_rate:
+        raise RuntimeError(
+            'High-rate communication mode blocked: '
+            'ros2_control_update_rate > control_frequency requires '
+            'allow_high_ros2_control_rate:=true '
+            f'(control_frequency={control_rate:.3f}, '
+            f'ros2_control_update_rate={ros2_control_rate:.3f}).'
+        )
+
+    if ros2_control_rate > control_rate:
+        actions.append(
+            LogInfo(
+                msg=(
+                    'WARNING: high-rate ros2_control communication is experimental. '
+                    f'ros2_control_update_rate={ros2_control_rate:.3f} Hz, '
+                    f'control_frequency={control_rate:.3f} Hz, '
+                    f'Python command update remains at '
+                    f'state_parameter_publish_rate={state_rate:.3f} Hz, '
+                    f'trajectory update remains at '
+                    f'trajectory_publish_rate={trajectory_rate:.3f} Hz. '
+                    'First validation must use gp_prediction_enabled:=false, '
+                    'gp_online_update_enabled:=false, '
+                    'gp_compensation_enabled:=false.'
+                )
+            )
+        )
+        return actions
+
+    actions.append(
+        LogInfo(
+            msg=(
+                'High-rate communication mode disabled or inactive; '
+                f'legacy-safe guard passed with control_frequency={control_rate:.3f} Hz, '
+                f'ros2_control_update_rate={ros2_control_rate:.3f} Hz, '
+                f'trajectory_publish_rate={trajectory_rate:.3f} Hz, '
+                f'state_parameter_publish_rate={state_rate:.3f} Hz, '
+                f'allow_high_ros2_control_rate={str(allow_high_rate).lower()}.'
+            )
+        )
+    )
+    return actions
+
+
+def _write_update_rate_diagnostic_params(expected_update_rate_hz, diagnostics_log_period_sec):
     with tempfile.NamedTemporaryFile(
         mode='w',
-        prefix='cpp_relayer_state_rate_',
+        prefix='update_rate_diagnostic_',
         suffix='.yaml',
         delete=False,
     ) as param_file:
-        param_file.write('cpp_relayer:\n')
-        param_file.write('  ros__parameters:\n')
-        param_file.write(f'    state_parameter_publish_rate: {state_rate:.9g}\n')
-        param_file_path = param_file.name
+        param_file.write(
+            'update_rate_diagnostic:\n'
+            '  ros__parameters:\n'
+            '    diagnostics_enabled: true\n'
+            f'    diagnostics_log_period_sec: {diagnostics_log_period_sec:.6f}\n'
+            f'    expected_update_rate_hz: {expected_update_rate_hz:.6f}\n'
+            '    expected_publish_rate_hz: 50.0\n'
+            '    warn_ratio_low: 0.8\n'
+            '    warn_ratio_high: 1.2\n'
+        )
+        return param_file.name
+
+
+def _make_update_rate_diagnostic_spawner(
+        context,
+        update_rate_diagnostic_expected_rate,
+        update_rate_diagnostic_log_period_sec):
+    expected_update_rate_hz = _positive_float_or_raise(
+        update_rate_diagnostic_expected_rate.perform(context),
+        'update_rate_diagnostic_expected_rate')
+    diagnostics_log_period_sec = _positive_float_or_raise(
+        update_rate_diagnostic_log_period_sec.perform(context),
+        'update_rate_diagnostic_log_period_sec')
+    param_file = _write_update_rate_diagnostic_params(
+        expected_update_rate_hz,
+        diagnostics_log_period_sec)
 
     return [
         LogInfo(
             msg=(
-                'cpp_relayer param files: controllers.yaml + '
-                'state_parameter_publish_rate override '
-                f'({state_rate:.3f} Hz)'
+                'Spawning fake-only update_rate_diagnostic with '
+                f'expected_update_rate_hz={expected_update_rate_hz:.3f}, '
+                f'diagnostics_log_period_sec={diagnostics_log_period_sec:.3f}.'
             )
         ),
         Node(
             package='controller_manager',
             executable='spawner',
             arguments=[
-                '--param-file', base_param_file_path,
-                '--param-file', param_file_path,
-                'cpp_relayer',
+                '--param-file',
+                param_file,
+                'update_rate_diagnostic',
             ],
             output='screen',
         ),
@@ -81,7 +197,12 @@ def generate_launch_description():
     use_rviz_parameter_name = 'use_rviz'
     spawn_gp_server_parameter_name = 'spawn_gp_server'
     spawn_fake_state_parameter_publisher_parameter_name = 'spawn_fake_state_parameter_publisher'
+    spawn_cpp_relayer_parameter_name = 'spawn_cpp_relayer'
+    spawn_update_rate_diagnostic_parameter_name = 'spawn_update_rate_diagnostic'
+    update_rate_diagnostic_expected_rate_parameter_name = 'update_rate_diagnostic_expected_rate'
+    update_rate_diagnostic_log_period_sec_parameter_name = 'update_rate_diagnostic_log_period_sec'
     control_frequency_parameter_name = 'control_frequency'
+    allow_high_ros2_control_rate_parameter_name = 'allow_high_ros2_control_rate'
     ros2_control_update_rate_parameter_name = 'ros2_control_update_rate'
     trajectory_publish_rate_parameter_name = 'trajectory_publish_rate'
     state_parameter_publish_rate_parameter_name = 'state_parameter_publish_rate'
@@ -101,6 +222,12 @@ def generate_launch_description():
     gp_compensation_scale_parameter_name = 'gp_compensation_scale'
     gp_compensation_clip_nm_parameter_name = 'gp_compensation_clip_nm'
     gp_compensation_disable_joint7_parameter_name = 'gp_compensation_disable_joint7'
+    torque_rate_limit_enabled_parameter_name = 'torque_rate_limit_enabled'
+    torque_rate_limit_nm_per_s_parameter_name = 'torque_rate_limit_nm_per_s'
+    torque_rate_limit_log_first_n_parameter_name = 'torque_rate_limit_log_first_n'
+    torque_rate_limit_reset_on_first_command_parameter_name = (
+        'torque_rate_limit_reset_on_first_command'
+    )
     delay_steps_parameter_name = 'delay_steps'
     timing_logging_enabled_parameter_name = 'timing_logging_enabled'
     timing_log_stride_parameter_name = 'timing_log_stride'
@@ -211,13 +338,19 @@ def generate_launch_description():
     fake_sensor_commands = LaunchConfiguration(fake_sensor_commands_parameter_name)
     use_rviz = LaunchConfiguration(use_rviz_parameter_name)
     spawn_gp_server = LaunchConfiguration(spawn_gp_server_parameter_name)
+    spawn_cpp_relayer = LaunchConfiguration(spawn_cpp_relayer_parameter_name)
+    spawn_update_rate_diagnostic = LaunchConfiguration(
+        spawn_update_rate_diagnostic_parameter_name)
+    update_rate_diagnostic_expected_rate = LaunchConfiguration(
+        update_rate_diagnostic_expected_rate_parameter_name)
+    update_rate_diagnostic_log_period_sec = LaunchConfiguration(
+        update_rate_diagnostic_log_period_sec_parameter_name)
     control_frequency = LaunchConfiguration(control_frequency_parameter_name)
+    allow_high_ros2_control_rate = LaunchConfiguration(
+        allow_high_ros2_control_rate_parameter_name)
     ros2_control_update_rate = LaunchConfiguration(ros2_control_update_rate_parameter_name)
     trajectory_publish_rate = LaunchConfiguration(trajectory_publish_rate_parameter_name)
     state_parameter_publish_rate = LaunchConfiguration(state_parameter_publish_rate_parameter_name)
-    cpp_relayer_base_param_file = PathJoinSubstitution([
-        FindPackageShare('new_bringup'), 'config', 'controllers.yaml'
-    ])
     run_name = LaunchConfiguration(run_name_parameter_name)
     data_output_dir = LaunchConfiguration(data_output_dir_parameter_name)
     reference_mode = LaunchConfiguration(reference_mode_parameter_name)
@@ -234,6 +367,18 @@ def generate_launch_description():
     gp_compensation_clip_nm = LaunchConfiguration(gp_compensation_clip_nm_parameter_name)
     gp_compensation_disable_joint7 = LaunchConfiguration(
         gp_compensation_disable_joint7_parameter_name
+    )
+    torque_rate_limit_enabled = LaunchConfiguration(
+        torque_rate_limit_enabled_parameter_name
+    )
+    torque_rate_limit_nm_per_s = LaunchConfiguration(
+        torque_rate_limit_nm_per_s_parameter_name
+    )
+    torque_rate_limit_log_first_n = LaunchConfiguration(
+        torque_rate_limit_log_first_n_parameter_name
+    )
+    torque_rate_limit_reset_on_first_command = LaunchConfiguration(
+        torque_rate_limit_reset_on_first_command_parameter_name
     )
     delay_steps = LaunchConfiguration(delay_steps_parameter_name)
     timing_logging_enabled = LaunchConfiguration(timing_logging_enabled_parameter_name)
@@ -387,12 +532,40 @@ def generate_launch_description():
             default_value='false',
             description='Visualize the robot in Rviz'),
         DeclareLaunchArgument(
+            use_fake_hardware_parameter_name,
+            default_value='false',
+            description='Use fake hardware'),
+        DeclareLaunchArgument(
+            fake_sensor_commands_parameter_name,
+            default_value='false',
+            description="Fake sensor commands. Only valid when '{}' is true".format(
+                use_fake_hardware_parameter_name)),
+        DeclareLaunchArgument(
             spawn_gp_server_parameter_name,
             default_value='false',
             description=(
                 'Start standalone gp_server only when explicitly requested; '
                 'default false for GOAL1 real shadow validation.'
             )),
+        DeclareLaunchArgument(
+            spawn_cpp_relayer_parameter_name,
+            default_value='true',
+            description='Spawn cpp_relayer controller unless explicitly disabled.'),
+        DeclareLaunchArgument(
+            spawn_update_rate_diagnostic_parameter_name,
+            default_value='false',
+            description=(
+                'Spawn fake-only update_rate_diagnostic controller. Requires '
+                'use_fake_hardware:=true and spawn_cpp_relayer:=false.'
+            )),
+        DeclareLaunchArgument(
+            update_rate_diagnostic_expected_rate_parameter_name,
+            default_value='1000.0',
+            description='Expected controller_manager update rate for update_rate_diagnostic.'),
+        DeclareLaunchArgument(
+            update_rate_diagnostic_log_period_sec_parameter_name,
+            default_value='5.0',
+            description='Log period for update_rate_diagnostic summary output.'),
         DeclareLaunchArgument(
             spawn_fake_state_parameter_publisher_parameter_name,
             default_value='false',
@@ -407,6 +580,12 @@ def generate_launch_description():
             description=(
                 'Legacy umbrella frequency in Hz; new rate-specific arguments '
                 'inherit this value unless explicitly set.'
+            )),
+        DeclareLaunchArgument(
+            allow_high_ros2_control_rate_parameter_name,
+            default_value='false',
+            description=(
+                'Hard opt-in for ros2_control update rates above control_frequency.'
             )),
         DeclareLaunchArgument(
             ros2_control_update_rate_parameter_name,
@@ -424,6 +603,8 @@ def generate_launch_description():
             msg=[
                 'Frequency config: control_frequency=',
                 control_frequency,
+                ', allow_high_ros2_control_rate=',
+                allow_high_ros2_control_rate,
                 ', ros2_control_update_rate=',
                 ros2_control_update_rate,
                 ', trajectory_publish_rate=',
@@ -433,6 +614,19 @@ def generate_launch_description():
                 ' Hz',
             ]
         ),
+        OpaqueFunction(
+            function=_guard_frequency_config,
+            args=[
+                control_frequency,
+                ros2_control_update_rate,
+                trajectory_publish_rate,
+                state_parameter_publish_rate,
+                allow_high_ros2_control_rate,
+                use_fake_hardware,
+                spawn_cpp_relayer,
+                spawn_update_rate_diagnostic,
+            ],
+        ),
         DeclareLaunchArgument(
             run_name_parameter_name,
             default_value='',
@@ -441,15 +635,6 @@ def generate_launch_description():
             data_output_dir_parameter_name,
             default_value='.',
             description='Directory for controller data CSV output.'),
-        DeclareLaunchArgument(
-            use_fake_hardware_parameter_name,
-            default_value='false',
-            description='Use fake hardware'),
-        DeclareLaunchArgument(
-            fake_sensor_commands_parameter_name,
-            default_value='false',
-            description="Fake sensor commands. Only valid when '{}' is true".format(
-                use_fake_hardware_parameter_name)),
         DeclareLaunchArgument(
             load_gripper_parameter_name,
             default_value='true',
@@ -510,6 +695,22 @@ def generate_launch_description():
             gp_compensation_disable_joint7_parameter_name,
             default_value='false',
             description='Disable active GP applied torque on joint7 only when explicitly true.'),
+        DeclareLaunchArgument(
+            torque_rate_limit_enabled_parameter_name,
+            default_value='false',
+            description='Enable optional per-joint torque slew-rate limiting before /effort_command publish.'),
+        DeclareLaunchArgument(
+            torque_rate_limit_nm_per_s_parameter_name,
+            default_value='80.0',
+            description='Scalar per-joint torque slew-rate limit in Nm/s.'),
+        DeclareLaunchArgument(
+            torque_rate_limit_log_first_n_parameter_name,
+            default_value='5',
+            description='Log only the first N torque rate-limit clipping events.'),
+        DeclareLaunchArgument(
+            torque_rate_limit_reset_on_first_command_parameter_name,
+            default_value='true',
+            description='Initialize limiter state from the first command instead of slewing from zero.'),
         DeclareLaunchArgument(
             delay_steps_parameter_name,
             default_value='0',
@@ -818,17 +1019,33 @@ def generate_launch_description():
                               fake_sensor_commands_parameter_name: fake_sensor_commands,
                               use_rviz_parameter_name: use_rviz,
                               control_frequency_parameter_name: control_frequency,
+                              allow_high_ros2_control_rate_parameter_name: allow_high_ros2_control_rate,
                               ros2_control_update_rate_parameter_name: ros2_control_update_rate
                               }.items(),
         ),
 
+        LogInfo(
+            msg=(
+                'cpp_relayer safety parameters are loaded from stable '
+                'new_bringup/config/controllers.yaml; no runtime spawner '
+                'param-file override is used. state_parameter_publish_rate is '
+                'currently fixed by controllers.yaml for L0 safety recovery.'
+            )
+        ),
+        Node(
+            package='controller_manager',
+            executable='spawner',
+            arguments=['cpp_relayer'],
+            output='screen',
+            condition=IfCondition(spawn_cpp_relayer),
+        ),
         OpaqueFunction(
-            function=_make_cpp_relayer_spawner,
+            function=_make_update_rate_diagnostic_spawner,
             args=[
-                state_parameter_publish_rate,
-                control_frequency,
-                cpp_relayer_base_param_file,
+                update_rate_diagnostic_expected_rate,
+                update_rate_diagnostic_log_period_sec,
             ],
+            condition=IfCondition(spawn_update_rate_diagnostic),
         ),
         Node(
             package='py_controllers',
@@ -858,6 +1075,14 @@ def generate_launch_description():
                 gp_compensation_scale_parameter_name: gp_compensation_scale,
                 gp_compensation_clip_nm_parameter_name: gp_compensation_clip_nm,
                 gp_compensation_disable_joint7_parameter_name: gp_compensation_disable_joint7,
+                torque_rate_limit_enabled_parameter_name: ParameterValue(
+                    torque_rate_limit_enabled, value_type=bool),
+                torque_rate_limit_nm_per_s_parameter_name: ParameterValue(
+                    torque_rate_limit_nm_per_s, value_type=float),
+                torque_rate_limit_log_first_n_parameter_name: ParameterValue(
+                    torque_rate_limit_log_first_n, value_type=int),
+                torque_rate_limit_reset_on_first_command_parameter_name: ParameterValue(
+                    torque_rate_limit_reset_on_first_command, value_type=bool),
                 delay_steps_parameter_name: ParameterValue(
                     delay_steps, value_type=int),
                 control_frequency_parameter_name: ParameterValue(

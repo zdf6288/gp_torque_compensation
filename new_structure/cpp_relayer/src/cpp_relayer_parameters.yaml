@@ -7,9 +7,13 @@ cpp_relayer:
     type: double,
     default_value: 0.2,
   }
+  negative_command_age_tolerance_sec: {
+    type: double,
+    default_value: 0.002,
+  }
   require_fresh_command_on_activate: {
     type: bool,
-    default_value: true,
+    default_value: false,
   }
   diagnostics_enabled: {
     type: bool,

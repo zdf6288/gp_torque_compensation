@@ -30,7 +30,8 @@ find_package(generate_parameter_library REQUIRED)
 add_library(
         ${PROJECT_NAME}
         SHARED
-        src/cpp_relayer.cpp)
+        src/cpp_relayer.cpp
+        src/update_rate_diagnostic_controller.cpp)
 
 target_include_directories(
         ${PROJECT_NAME}

@@ -35,7 +35,8 @@ class CPPRelayer : public controller_interface::ControllerInterface {
   std::string arm_id_;
   const int num_joints = 7;
   double command_timeout_sec_{0.2};
-  bool require_fresh_command_on_activate_{true};
+  double negative_command_age_tolerance_sec_{0.002};
+  bool require_fresh_command_on_activate_{false};
   bool diagnostics_enabled_{true};
   double diagnostics_log_period_sec_{5.0};
   int log_first_n_stale_events_{5};
@@ -63,7 +64,7 @@ class CPPRelayer : public controller_interface::ControllerInterface {
   std::mutex command_mutex_;
   void effortCommandCallback(const custom_msgs::msg::EffortCommand::SharedPtr msg) ;
   void setZeroCommandInterfaces();
-  bool isCommandFresh(const rclcpp::Time& now, const rclcpp::Time& last_command_time) const;
+  bool isCommandFresh(double effective_command_age_sec) const;
   bool shouldPublishStateParameter(const rclcpp::Time& now);
   void publishStateParameter(const rclcpp::Time& now);
   void maybeLogDiagnostics(const rclcpp::Time& now);
@@ -72,9 +73,14 @@ class CPPRelayer : public controller_interface::ControllerInterface {
   std::uint64_t stale_command_count_{0};
   std::uint64_t zero_fallback_count_{0};
   std::uint64_t stale_event_log_count_{0};
+  std::uint64_t negative_command_age_anomaly_count_{0};
+  std::uint64_t negative_command_age_event_log_count_{0};
   std::uint64_t state_parameter_publish_count_{0};
+  std::uint64_t last_diagnostics_state_parameter_publish_count_{0};
   double last_command_age_sec_{0.0};
   double max_command_age_sec_{0.0};
+  double min_command_age_sec_{0.0};
+  double last_negative_command_age_sec_{0.0};
   double last_state_parameter_publish_age_sec_{0.0};
   rclcpp::Time last_diagnostics_log_time_;
   rclcpp::Time last_state_parameter_publish_time_;

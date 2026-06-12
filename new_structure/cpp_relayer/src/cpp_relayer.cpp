@@ -17,6 +17,7 @@ namespace cpp_relayer {
 
 namespace {
 constexpr double kDefaultCommandTimeoutSec = 0.2;
+constexpr double kDefaultNegativeCommandAgeToleranceSec = 0.002;
 constexpr double kDefaultStateParameterPublishRate = 50.0;
 constexpr int kWarningThrottleMs = 2000;
 }  // namespace
@@ -50,20 +51,43 @@ controller_interface::return_type CPPRelayer::update(
     const rclcpp::Time& /*time*/,
     const rclcpp::Duration& /*period*/) {
 
-  const auto now = get_node()->get_clock()->now();
   ++update_count_;
+  rclcpp::Time now;
   Vector7d command_to_write = Vector7d::Zero();
   bool has_command = false;
   bool command_is_fresh = false;
+  bool small_negative_command_age = false;
+  bool large_negative_command_age = false;
+  double raw_command_age_sec = 0.0;
   double command_age_sec = 0.0;
 
   {
     std::lock_guard<std::mutex> lock(command_mutex_);
+    // A 50 Hz Python /effort_command stream is expected to feed a 1 kHz
+    // ros2_control update loop. Snapshot the command timestamp and now while
+    // holding the same mutex, then intentionally hold the last valid command
+    // across multiple hardware updates until it is genuinely stale. Tiny
+    // timestamp-ordering anomalies must not create a single-sample zero torque.
+    now = get_node()->get_clock()->now();
     has_command = received_effort_command_;
     if (has_command) {
       const auto command_age = now - last_command_time_;
-      command_age_sec = command_age.seconds();
-      command_is_fresh = isCommandFresh(now, last_command_time_);
+      raw_command_age_sec = command_age.seconds();
+      command_age_sec = raw_command_age_sec;
+      if (raw_command_age_sec < min_command_age_sec_) {
+        min_command_age_sec_ = raw_command_age_sec;
+      }
+      if (raw_command_age_sec < 0.0) {
+        ++negative_command_age_anomaly_count_;
+        last_negative_command_age_sec_ = raw_command_age_sec;
+        if (std::abs(raw_command_age_sec) <= negative_command_age_tolerance_sec_) {
+          small_negative_command_age = true;
+          command_age_sec = 0.0;
+        } else {
+          large_negative_command_age = true;
+        }
+      }
+      command_is_fresh = isCommandFresh(command_age_sec);
       last_command_age_sec_ = command_age_sec;
       if (command_age_sec > max_command_age_sec_) {
         max_command_age_sec_ = command_age_sec;
@@ -75,6 +99,19 @@ controller_interface::return_type CPPRelayer::update(
   }
 
   if (command_is_fresh) {
+    if (small_negative_command_age && diagnostics_enabled_ &&
+        negative_command_age_event_log_count_ <
+            static_cast<std::uint64_t>(log_first_n_stale_events_)) {
+      ++negative_command_age_event_log_count_;
+      RCLCPP_WARN(
+          get_node()->get_logger(),
+          "[CPPRelayerDiag] small negative command_age %.9f s observed "
+          "(tolerance %.9f s); treating as fresh and holding last valid command. "
+          "update_count=%llu, received_command_count=%llu.",
+          raw_command_age_sec, negative_command_age_tolerance_sec_,
+          static_cast<unsigned long long>(update_count_),
+          static_cast<unsigned long long>(received_command_count_));
+    }
     for (int i = 0; i < num_joints; ++i) {
       command_interfaces_[i].set_value(command_to_write(i));
     }
@@ -96,10 +133,18 @@ controller_interface::return_type CPPRelayer::update(
             static_cast<unsigned long long>(update_count_),
             static_cast<unsigned long long>(received_command_count_));
       }
-      RCLCPP_WARN_THROTTLE(
-          get_node()->get_logger(), *get_node()->get_clock(), kWarningThrottleMs,
-          "Refusing stale EffortCommand: age %.3f s, timeout %.3f s. Writing zero.",
-          command_age_sec, command_timeout_sec_);
+      if (large_negative_command_age) {
+        RCLCPP_WARN_THROTTLE(
+            get_node()->get_logger(), *get_node()->get_clock(), kWarningThrottleMs,
+            "Refusing EffortCommand with large negative age %.6f s beyond tolerance %.6f s. "
+            "Writing zero.",
+            raw_command_age_sec, negative_command_age_tolerance_sec_);
+      } else {
+        RCLCPP_WARN_THROTTLE(
+            get_node()->get_logger(), *get_node()->get_clock(), kWarningThrottleMs,
+            "Refusing stale EffortCommand: age %.3f s, timeout %.3f s. Writing zero.",
+            command_age_sec, command_timeout_sec_);
+      }
     }
   }
 
@@ -115,7 +160,9 @@ CallbackReturn CPPRelayer::on_init() {
   try {
     auto_declare<std::string>("arm_id", "panda");
     auto_declare<double>("command_timeout_sec", kDefaultCommandTimeoutSec);
-    auto_declare<bool>("require_fresh_command_on_activate", true);
+    auto_declare<double>(
+        "negative_command_age_tolerance_sec", kDefaultNegativeCommandAgeToleranceSec);
+    auto_declare<bool>("require_fresh_command_on_activate", false);
     auto_declare<bool>("diagnostics_enabled", true);
     auto_declare<double>("diagnostics_log_period_sec", 5.0);
     auto_declare<int>("log_first_n_stale_events", 5);
@@ -133,6 +180,8 @@ CallbackReturn CPPRelayer::on_configure(
   try {
     arm_id_ = get_node()->get_parameter("arm_id").as_string();
     command_timeout_sec_ = get_node()->get_parameter("command_timeout_sec").as_double();
+    negative_command_age_tolerance_sec_ =
+        get_node()->get_parameter("negative_command_age_tolerance_sec").as_double();
     require_fresh_command_on_activate_ =
         get_node()->get_parameter("require_fresh_command_on_activate").as_bool();
     diagnostics_enabled_ = get_node()->get_parameter("diagnostics_enabled").as_bool();
@@ -148,6 +197,14 @@ CallbackReturn CPPRelayer::on_configure(
           "Invalid command_timeout_sec %.3f. Falling back to safe default %.3f s.",
           command_timeout_sec_, kDefaultCommandTimeoutSec);
       command_timeout_sec_ = kDefaultCommandTimeoutSec;
+    }
+    if (!std::isfinite(negative_command_age_tolerance_sec_) ||
+        negative_command_age_tolerance_sec_ < 0.0) {
+      RCLCPP_WARN(
+          get_node()->get_logger(),
+          "Invalid negative_command_age_tolerance_sec %.6f. Falling back to %.6f s.",
+          negative_command_age_tolerance_sec_, kDefaultNegativeCommandAgeToleranceSec);
+      negative_command_age_tolerance_sec_ = kDefaultNegativeCommandAgeToleranceSec;
     }
     if (!std::isfinite(diagnostics_log_period_sec_) || diagnostics_log_period_sec_ <= 0.0) {
       RCLCPP_WARN(
@@ -199,11 +256,13 @@ CallbackReturn CPPRelayer::on_configure(
     RCLCPP_DEBUG(get_node()->get_logger(), "configured successfully");
     RCLCPP_INFO(
         get_node()->get_logger(),
-        "cpp_relayer configured with command_timeout_sec=%.3f s, "
+        "cpp_relayer configured with final parameter values: command_timeout_sec=%.3f s, "
+        "negative_command_age_tolerance_sec=%.6f s, "
         "require_fresh_command_on_activate=%s; stale commands will be zeroed. "
         "diagnostics_enabled=%s, diagnostics_log_period_sec=%.3f, "
         "log_first_n_stale_events=%d, state_parameter_publish_rate=%.3f Hz.",
         command_timeout_sec_,
+        negative_command_age_tolerance_sec_,
         require_fresh_command_on_activate_ ? "true" : "false",
         diagnostics_enabled_ ? "true" : "false",
         diagnostics_log_period_sec_,
@@ -228,10 +287,11 @@ CallbackReturn CPPRelayer::on_activate(
   zero_jacobian_flange_.fill(0.0);
   gravity_.fill(0.0);
 
-  const auto now = get_node()->get_clock()->now();
+  auto now = get_node()->get_clock()->now();
   last_diagnostics_log_time_ = now;
   last_state_parameter_publish_time_ = rclcpp::Time();
   state_parameter_publish_count_ = 0;
+  last_diagnostics_state_parameter_publish_count_ = 0;
   last_state_parameter_publish_age_sec_ = 0.0;
   Vector7d command_to_write = Vector7d::Zero();
   bool has_command = false;
@@ -242,11 +302,16 @@ CallbackReturn CPPRelayer::on_activate(
   if (require_fresh_command_on_activate_) {
     {
       std::lock_guard<std::mutex> lock(command_mutex_);
+      now = get_node()->get_clock()->now();
       has_command = received_effort_command_;
       if (has_command) {
         const auto command_age = now - last_command_time_;
         command_age_sec = command_age.seconds();
-        command_is_fresh = isCommandFresh(now, last_command_time_);
+        if (command_age_sec < 0.0 &&
+            std::abs(command_age_sec) <= negative_command_age_tolerance_sec_) {
+          command_age_sec = 0.0;
+        }
+        command_is_fresh = isCommandFresh(command_age_sec);
         command_values_are_finite = tau_d_received_.allFinite();
         if (command_is_fresh && command_values_are_finite) {
           command_to_write = tau_d_received_;
@@ -372,10 +437,9 @@ void CPPRelayer::setZeroCommandInterfaces() {
   }
 }
 
-bool CPPRelayer::isCommandFresh(
-    const rclcpp::Time& now, const rclcpp::Time& last_command_time) const {
-  const auto command_age = now - last_command_time;
-  return command_age.nanoseconds() >= 0 && command_age.seconds() <= command_timeout_sec_;
+bool CPPRelayer::isCommandFresh(double effective_command_age_sec) const {
+  return effective_command_age_sec >= 0.0 &&
+         effective_command_age_sec <= command_timeout_sec_;
 }
 
 bool CPPRelayer::shouldPublishStateParameter(const rclcpp::Time& now) {
@@ -424,28 +488,43 @@ void CPPRelayer::maybeLogDiagnostics(const rclcpp::Time& now) {
     return;
   }
 
+  double observed_state_parameter_publish_rate = 0.0;
   if (last_diagnostics_log_time_.nanoseconds() != 0) {
     const auto elapsed = now - last_diagnostics_log_time_;
     if (elapsed.nanoseconds() >= 0 && elapsed.seconds() < diagnostics_log_period_sec_) {
       return;
     }
+    if (elapsed.nanoseconds() > 0) {
+      const auto published_since_last_log =
+          state_parameter_publish_count_ - last_diagnostics_state_parameter_publish_count_;
+      observed_state_parameter_publish_rate =
+          static_cast<double>(published_since_last_log) / elapsed.seconds();
+    }
   }
   last_diagnostics_log_time_ = now;
+  last_diagnostics_state_parameter_publish_count_ = state_parameter_publish_count_;
 
   RCLCPP_INFO(
       get_node()->get_logger(),
       "[CPPRelayerDiag] updates=%llu, received_effort_commands=%llu, "
       "stale_command_count=%llu, zero_fallback_count=%llu, "
       "last_command_age=%.6f s, max_command_age=%.6f s, timeout=%.6f s, "
+      "negative_command_age_anomaly_count=%llu, last_negative_command_age=%.9f s, "
+      "min_command_age=%.9f s, negative_command_age_tolerance=%.9f s, "
       "state_parameter_publish_count=%llu, state_parameter_publish_rate=%.3f Hz, "
+      "observed_state_parameter_publish_rate=%.3f Hz, "
       "last_state_parameter_publish_age=%.6f s.",
       static_cast<unsigned long long>(update_count_),
       static_cast<unsigned long long>(received_command_count_),
       static_cast<unsigned long long>(stale_command_count_),
       static_cast<unsigned long long>(zero_fallback_count_),
       last_command_age_sec_, max_command_age_sec_, command_timeout_sec_,
+      static_cast<unsigned long long>(negative_command_age_anomaly_count_),
+      last_negative_command_age_sec_, min_command_age_sec_,
+      negative_command_age_tolerance_sec_,
       static_cast<unsigned long long>(state_parameter_publish_count_),
       state_parameter_publish_rate_,
+      observed_state_parameter_publish_rate,
       last_state_parameter_publish_age_sec_);
 }
 
