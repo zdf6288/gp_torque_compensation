@@ -427,6 +427,18 @@ class CartesianImpedanceController(Node):
         self.gp_triple_dynamic_distance_ratio_history = []
         self.gp_triple_dynamic_hist_penalty_history = []
         self.gp_triple_dynamic_mode_code_history = []
+        self.gp_triple_combined_base_shadow_raw_history = []
+        self.gp_triple_combined_base_shadow_enabled_history = []
+        self.gp_triple_combined_base_shadow_available_history = []
+        self.gp_triple_combined_base_shadow_used_fallback_history = []
+        self.gp_triple_combined_base_shadow_w_hist_history = []
+        self.gp_triple_combined_base_shadow_hist_weight_cap_history = []
+        self.gp_triple_combined_base_shadow_ramp_factor_history = []
+        self.gp_triple_combined_base_shadow_distance_ratio_history = []
+        self.gp_triple_combined_base_shadow_hist_penalty_history = []
+        self.gp_triple_combined_base_shadow_norm_history = []
+        self.gp_triple_combined_base_shadow_delta_from_combined_norm_history = []
+        self.gp_triple_combined_base_shadow_delta_from_legacy_triple_norm_history = []
         # set signal handler
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
@@ -511,6 +523,9 @@ class CartesianImpedanceController(Node):
         self.declare_parameter("gp_triple_fallback_source", "combined")
         self.declare_parameter("gp_triple_debug_safety_log_enabled", True)
         self.declare_parameter("gp_triple_debug_safety_log_first_n", 5)
+        self.declare_parameter("gp_triple_combined_base_shadow_enabled", False)
+        self.declare_parameter("gp_triple_combined_base_hist_weight_cap", 0.50)
+        self.declare_parameter("gp_triple_combined_base_hist_weight_ramp_sec", 0.0)
         self.declare_parameter("gp_historical_soft_shadow_enabled", False)
         self.declare_parameter("gp_historical_soft_alpha", 1.0)
         self.declare_parameter("gp_historical_soft_distance_threshold", 0.2)
@@ -712,6 +727,17 @@ class CartesianImpedanceController(Node):
         self.gp_triple_debug_safety_log_first_n = self._get_bounded_int_parameter(
             "gp_triple_debug_safety_log_first_n", 5, 0, 1000000
         )
+        self.gp_triple_combined_base_shadow_enabled = self._get_bool_parameter(
+            "gp_triple_combined_base_shadow_enabled"
+        )
+        self.gp_triple_combined_base_hist_weight_cap = self._get_bounded_float_parameter(
+            "gp_triple_combined_base_hist_weight_cap", 0.50, 0.0, 1.0
+        )
+        self.gp_triple_combined_base_hist_weight_ramp_sec = (
+            self._get_nonnegative_float_parameter(
+                "gp_triple_combined_base_hist_weight_ramp_sec", 0.0
+            )
+        )
         self.gp_historical_soft_shadow_enabled = self._get_bool_parameter(
             "gp_historical_soft_shadow_enabled"
         )
@@ -905,6 +931,8 @@ class CartesianImpedanceController(Node):
         self._gp_local_prediction_sequence_shadow = 0
         self._gp_hist_last_appended_sequence_shadow = 0
         self._reset_gp_triple_state()
+        self._gp_triple_combined_base_shadow_start_time = None
+        self._reset_gp_triple_combined_base_shadow_state()
 
         # Persistent residual DB is separate from runtime prediction-pool paper fusion.
         # It enters active torque only through explicit hist_db/triple/triple_dynamic source selection.
@@ -1056,6 +1084,14 @@ class CartesianImpedanceController(Node):
                 f"debug_safety_log_first_n={self.gp_triple_debug_safety_log_first_n}; "
                 "active only with gp_compensation_source='triple' or 'triple_dynamic' "
                 "and compensation enabled"
+            )
+        if self._csv_profile_is_full() or self.gp_triple_combined_base_shadow_enabled:
+            self.get_logger().info(
+                "[GP Triple Combined Base Shadow] Controls: "
+                f"enabled={self.gp_triple_combined_base_shadow_enabled}, "
+                f"hist_weight_cap={self.gp_triple_combined_base_hist_weight_cap}, "
+                f"hist_weight_ramp_sec={self.gp_triple_combined_base_hist_weight_ramp_sec}; "
+                "shadow-only and does not enter tau_final"
             )
         if self._csv_profile_is_full() or self.gp_historical_soft_shadow_enabled:
             self.get_logger().info(
@@ -2610,6 +2646,46 @@ class CartesianImpedanceController(Node):
                 self.gp_triple_dynamic_mode_code_history.append(
                     int(self.gp_triple_dynamic_mode_code)
                 )
+                self.gp_triple_combined_base_shadow_raw_history.append(
+                    self.gp_triple_combined_base_shadow_raw.tolist()
+                )
+                self.gp_triple_combined_base_shadow_enabled_history.append(
+                    int(bool(self.gp_triple_combined_base_shadow_enabled))
+                )
+                self.gp_triple_combined_base_shadow_available_history.append(
+                    int(self.gp_triple_combined_base_shadow_available)
+                )
+                self.gp_triple_combined_base_shadow_used_fallback_history.append(
+                    int(self.gp_triple_combined_base_shadow_used_fallback)
+                )
+                self.gp_triple_combined_base_shadow_w_hist_history.append(
+                    float(self.gp_triple_combined_base_shadow_w_hist)
+                )
+                self.gp_triple_combined_base_shadow_hist_weight_cap_history.append(
+                    float(self.gp_triple_combined_base_shadow_hist_weight_cap)
+                )
+                self.gp_triple_combined_base_shadow_ramp_factor_history.append(
+                    float(self.gp_triple_combined_base_shadow_ramp_factor)
+                )
+                self.gp_triple_combined_base_shadow_distance_ratio_history.append(
+                    float(self.gp_triple_combined_base_shadow_distance_ratio)
+                )
+                self.gp_triple_combined_base_shadow_hist_penalty_history.append(
+                    float(self.gp_triple_combined_base_shadow_hist_penalty)
+                )
+                self.gp_triple_combined_base_shadow_norm_history.append(
+                    float(self.gp_triple_combined_base_shadow_norm)
+                )
+                self.gp_triple_combined_base_shadow_delta_from_combined_norm_history.append(
+                    float(
+                        self.gp_triple_combined_base_shadow_delta_from_combined_norm
+                    )
+                )
+                self.gp_triple_combined_base_shadow_delta_from_legacy_triple_norm_history.append(
+                    float(
+                        self.gp_triple_combined_base_shadow_delta_from_legacy_triple_norm
+                    )
+                )
                 self.gp_shadow_historical_available_history.append(
                     int(self.gp_shadow_historical_available)
                 )
@@ -4074,6 +4150,7 @@ class CartesianImpedanceController(Node):
         self.hist_db_gated_source_code = 0
         self.hist_db_query_updated_this_tick = 0
         self._reset_historical_soft_shadow_state()
+        self._reset_gp_triple_combined_base_shadow_state()
 
     def _update_historical_residual_db_shadow_state(self, q, dq, t_now=None):
         # 为降低真机 callback 负载，可按 stride 降频查询 hist DB。
@@ -4126,6 +4203,7 @@ class CartesianImpedanceController(Node):
         self.hist_db_gated_source_code = int(result["gated_source_code"])
         self._update_historical_db_preflight_state(t_now, result, bool(should_query))
         self._update_historical_soft_shadow_state()
+        self._update_gp_triple_combined_base_shadow_state(t_now)
 
     def _new_historical_soft_shadow_result(self):
         zero = np.zeros(7, dtype=float)
@@ -4740,6 +4818,163 @@ class CartesianImpedanceController(Node):
             "dynamic_mode_code": 2,
         })
         return result
+
+    def _new_gp_triple_combined_base_shadow_result(self):
+        zero = np.zeros(7, dtype=float)
+        return {
+            "raw": zero.copy(),
+            "available": 0,
+            "used_fallback": 0,
+            "w_hist": 0.0,
+            "hist_weight_cap": float(
+                getattr(self, "gp_triple_combined_base_hist_weight_cap", 0.50)
+            ),
+            "ramp_factor": 0.0,
+            "distance_ratio": 0.0,
+            "hist_penalty": 1.0,
+            "norm": 0.0,
+            "delta_from_combined_norm": 0.0,
+            "delta_from_legacy_triple_norm": 0.0,
+        }
+
+    def _reset_gp_triple_combined_base_shadow_state(self, result=None):
+        if result is None:
+            result = self._new_gp_triple_combined_base_shadow_result()
+
+        self.gp_triple_combined_base_shadow_raw = self._as_finite_7d(
+            result.get("raw"),
+            0.0,
+        ).copy()
+        self.gp_triple_combined_base_shadow_available = int(
+            result.get("available", 0)
+        )
+        self.gp_triple_combined_base_shadow_used_fallback = int(
+            result.get("used_fallback", 0)
+        )
+        self.gp_triple_combined_base_shadow_w_hist = float(
+            result.get("w_hist", 0.0)
+        )
+        self.gp_triple_combined_base_shadow_hist_weight_cap = float(
+            result.get(
+                "hist_weight_cap",
+                getattr(self, "gp_triple_combined_base_hist_weight_cap", 0.50),
+            )
+        )
+        self.gp_triple_combined_base_shadow_ramp_factor = float(
+            result.get("ramp_factor", 0.0)
+        )
+        self.gp_triple_combined_base_shadow_distance_ratio = float(
+            result.get("distance_ratio", 0.0)
+        )
+        self.gp_triple_combined_base_shadow_hist_penalty = float(
+            result.get("hist_penalty", 1.0)
+        )
+        self.gp_triple_combined_base_shadow_norm = float(result.get("norm", 0.0))
+        self.gp_triple_combined_base_shadow_delta_from_combined_norm = float(
+            result.get("delta_from_combined_norm", 0.0)
+        )
+        self.gp_triple_combined_base_shadow_delta_from_legacy_triple_norm = float(
+            result.get("delta_from_legacy_triple_norm", 0.0)
+        )
+
+    def _gp_triple_combined_base_shadow_ramp_factor(self, t_now=None):
+        ramp_sec = float(self.gp_triple_combined_base_hist_weight_ramp_sec)
+        if not np.isfinite(ramp_sec) or ramp_sec <= 0.0:
+            return 1.0
+        if not self.data_recording_enabled or t_now is None:
+            self._gp_triple_combined_base_shadow_start_time = None
+            return 0.0
+
+        if self._gp_triple_combined_base_shadow_start_time is None:
+            self._gp_triple_combined_base_shadow_start_time = t_now
+
+        try:
+            elapsed_sec = (
+                t_now - self._gp_triple_combined_base_shadow_start_time
+            ).nanoseconds / 1e9
+        except Exception:
+            return 0.0
+
+        if not np.isfinite(elapsed_sec) or elapsed_sec < 0.0:
+            return 0.0
+        return float(np.clip(elapsed_sec / ramp_sec, 0.0, 1.0))
+
+    def _compute_gp_triple_combined_base_shadow_prediction(self, t_now=None):
+        result = self._new_gp_triple_combined_base_shadow_result()
+        if not self.gp_triple_combined_base_shadow_enabled:
+            return result
+
+        try:
+            base = np.asarray(self.y_hat_combined, dtype=float)
+        except (TypeError, ValueError):
+            return result
+        if base.shape != (7,) or not np.all(np.isfinite(base)):
+            return result
+
+        # Enabled shadow fallback is the current combined local/cloud candidate.
+        result.update({
+            "raw": base.copy(),
+            "used_fallback": 1,
+            "norm": float(np.linalg.norm(base)),
+            "ramp_factor": self._gp_triple_combined_base_shadow_ramp_factor(t_now),
+        })
+
+        hist_candidate, hist_available = self._get_gp_triple_hist_candidate()
+        if not hist_available:
+            return result
+
+        try:
+            nearest_distance = float(self.hist_db_nearest_distance)
+            max_distance = float(self.gp_historical_db_max_distance)
+        except (TypeError, ValueError):
+            return result
+        if (
+            not np.isfinite(nearest_distance)
+            or nearest_distance < 0.0
+            or not np.isfinite(max_distance)
+            or nearest_distance > max_distance
+        ):
+            return result
+
+        weights, distance_ratio, hist_penalty, weights_valid = (
+            self._compute_gp_triple_dynamic_weights(nearest_distance)
+        )
+        result["distance_ratio"] = float(distance_ratio)
+        result["hist_penalty"] = float(hist_penalty)
+        if not weights_valid:
+            return result
+
+        cap = float(self.gp_triple_combined_base_hist_weight_cap)
+        ramp_factor = float(result["ramp_factor"])
+        w_hist = float(np.clip(weights[2], 0.0, cap) * ramp_factor)
+        candidate = (1.0 - w_hist) * base + w_hist * hist_candidate
+        legacy_result = self._compute_gp_triple_dynamic_prediction()
+        legacy_raw = self._as_finite_7d(legacy_result.get("raw"), 0.0)
+
+        if (
+            candidate.shape != (7,)
+            or not np.all(np.isfinite(candidate))
+            or not np.all(np.isfinite(legacy_raw))
+        ):
+            return result
+
+        result.update({
+            "raw": candidate.copy(),
+            "available": 1,
+            "used_fallback": 0,
+            "w_hist": w_hist,
+            "hist_weight_cap": cap,
+            "norm": float(np.linalg.norm(candidate)),
+            "delta_from_combined_norm": float(np.linalg.norm(candidate - base)),
+            "delta_from_legacy_triple_norm": float(
+                np.linalg.norm(candidate - legacy_raw)
+            ),
+        })
+        return result
+
+    def _update_gp_triple_combined_base_shadow_state(self, t_now=None):
+        result = self._compute_gp_triple_combined_base_shadow_prediction(t_now)
+        self._reset_gp_triple_combined_base_shadow_state(result)
 
     def _as_finite_7d(self, value, fill_value=0.0):
         try:
@@ -5622,6 +5857,18 @@ class CartesianImpedanceController(Node):
                 self.gp_triple_dynamic_distance_ratio_history,
                 self.gp_triple_dynamic_hist_penalty_history,
                 self.gp_triple_dynamic_mode_code_history,
+                self.gp_triple_combined_base_shadow_raw_history,
+                self.gp_triple_combined_base_shadow_enabled_history,
+                self.gp_triple_combined_base_shadow_available_history,
+                self.gp_triple_combined_base_shadow_used_fallback_history,
+                self.gp_triple_combined_base_shadow_w_hist_history,
+                self.gp_triple_combined_base_shadow_hist_weight_cap_history,
+                self.gp_triple_combined_base_shadow_ramp_factor_history,
+                self.gp_triple_combined_base_shadow_distance_ratio_history,
+                self.gp_triple_combined_base_shadow_hist_penalty_history,
+                self.gp_triple_combined_base_shadow_norm_history,
+                self.gp_triple_combined_base_shadow_delta_from_combined_norm_history,
+                self.gp_triple_combined_base_shadow_delta_from_legacy_triple_norm_history,
                 self.gp_shadow_historical_available_history,
                 self.gp_shadow_local_raw_history,
                 self.gp_shadow_cloud_raw_history,
@@ -5764,6 +6011,20 @@ class CartesianImpedanceController(Node):
                     'gp_triple_dynamic_distance_ratio',
                     'gp_triple_dynamic_hist_penalty',
                     'gp_triple_dynamic_mode_code',
+                    'gp_triple_combined_base_shadow_enabled',
+                    'gp_triple_combined_base_shadow_available',
+                    'gp_triple_combined_base_shadow_used_fallback',
+                    'gp_triple_combined_base_shadow_w_hist',
+                    'gp_triple_combined_base_shadow_hist_weight_cap',
+                    'gp_triple_combined_base_shadow_ramp_factor',
+                    'gp_triple_combined_base_shadow_distance_ratio',
+                    'gp_triple_combined_base_shadow_hist_penalty',
+                    'gp_triple_combined_base_shadow_norm',
+                    'gp_triple_combined_base_shadow_delta_from_combined_norm',
+                    'gp_triple_combined_base_shadow_delta_from_legacy_triple_norm',
+                ])
+                header.extend([
+                    f'gp_triple_combined_base_shadow_raw_{i+1}' for i in range(7)
                 ])
                 header.extend([
                     'gp_shadow_paper_fusion_logging_enabled',
@@ -6134,6 +6395,120 @@ class CartesianImpedanceController(Node):
                         gp_triple_dynamic_hist_penalty,
                         gp_triple_dynamic_mode_code,
                     ])
+
+                    gp_triple_combined_base_shadow_enabled = (
+                        int(self.gp_triple_combined_base_shadow_enabled_history[i])
+                        if i < len(self.gp_triple_combined_base_shadow_enabled_history)
+                        else int(bool(self.gp_triple_combined_base_shadow_enabled))
+                    )
+                    gp_triple_combined_base_shadow_available = (
+                        int(self.gp_triple_combined_base_shadow_available_history[i])
+                        if i < len(self.gp_triple_combined_base_shadow_available_history)
+                        else int(self.gp_triple_combined_base_shadow_available)
+                    )
+                    gp_triple_combined_base_shadow_used_fallback = (
+                        int(self.gp_triple_combined_base_shadow_used_fallback_history[i])
+                        if i < len(
+                            self.gp_triple_combined_base_shadow_used_fallback_history
+                        )
+                        else int(self.gp_triple_combined_base_shadow_used_fallback)
+                    )
+                    gp_triple_combined_base_shadow_w_hist = (
+                        float(self.gp_triple_combined_base_shadow_w_hist_history[i])
+                        if i < len(self.gp_triple_combined_base_shadow_w_hist_history)
+                        else float(self.gp_triple_combined_base_shadow_w_hist)
+                    )
+                    gp_triple_combined_base_shadow_hist_weight_cap = (
+                        float(
+                            self.gp_triple_combined_base_shadow_hist_weight_cap_history[i]
+                        )
+                        if i
+                        < len(
+                            self.gp_triple_combined_base_shadow_hist_weight_cap_history
+                        )
+                        else float(
+                            self.gp_triple_combined_base_shadow_hist_weight_cap
+                        )
+                    )
+                    gp_triple_combined_base_shadow_ramp_factor = (
+                        float(
+                            self.gp_triple_combined_base_shadow_ramp_factor_history[i]
+                        )
+                        if i
+                        < len(
+                            self.gp_triple_combined_base_shadow_ramp_factor_history
+                        )
+                        else float(self.gp_triple_combined_base_shadow_ramp_factor)
+                    )
+                    gp_triple_combined_base_shadow_distance_ratio = (
+                        float(
+                            self.gp_triple_combined_base_shadow_distance_ratio_history[i]
+                        )
+                        if i
+                        < len(
+                            self.gp_triple_combined_base_shadow_distance_ratio_history
+                        )
+                        else float(
+                            self.gp_triple_combined_base_shadow_distance_ratio
+                        )
+                    )
+                    gp_triple_combined_base_shadow_hist_penalty = (
+                        float(
+                            self.gp_triple_combined_base_shadow_hist_penalty_history[i]
+                        )
+                        if i
+                        < len(
+                            self.gp_triple_combined_base_shadow_hist_penalty_history
+                        )
+                        else float(self.gp_triple_combined_base_shadow_hist_penalty)
+                    )
+                    gp_triple_combined_base_shadow_norm = (
+                        float(self.gp_triple_combined_base_shadow_norm_history[i])
+                        if i < len(self.gp_triple_combined_base_shadow_norm_history)
+                        else float(self.gp_triple_combined_base_shadow_norm)
+                    )
+                    gp_triple_combined_base_shadow_delta_from_combined_norm = (
+                        float(
+                            self.gp_triple_combined_base_shadow_delta_from_combined_norm_history[i]
+                        )
+                        if i
+                        < len(
+                            self.gp_triple_combined_base_shadow_delta_from_combined_norm_history
+                        )
+                        else float(
+                            self.gp_triple_combined_base_shadow_delta_from_combined_norm
+                        )
+                    )
+                    gp_triple_combined_base_shadow_delta_from_legacy_triple_norm = (
+                        float(
+                            self.gp_triple_combined_base_shadow_delta_from_legacy_triple_norm_history[i]
+                        )
+                        if i
+                        < len(
+                            self.gp_triple_combined_base_shadow_delta_from_legacy_triple_norm_history
+                        )
+                        else float(
+                            self.gp_triple_combined_base_shadow_delta_from_legacy_triple_norm
+                        )
+                    )
+                    row.extend([
+                        gp_triple_combined_base_shadow_enabled,
+                        gp_triple_combined_base_shadow_available,
+                        gp_triple_combined_base_shadow_used_fallback,
+                        gp_triple_combined_base_shadow_w_hist,
+                        gp_triple_combined_base_shadow_hist_weight_cap,
+                        gp_triple_combined_base_shadow_ramp_factor,
+                        gp_triple_combined_base_shadow_distance_ratio,
+                        gp_triple_combined_base_shadow_hist_penalty,
+                        gp_triple_combined_base_shadow_norm,
+                        gp_triple_combined_base_shadow_delta_from_combined_norm,
+                        gp_triple_combined_base_shadow_delta_from_legacy_triple_norm,
+                    ])
+
+                    if i < len(self.gp_triple_combined_base_shadow_raw_history):
+                        row.extend(self.gp_triple_combined_base_shadow_raw_history[i])
+                    else:
+                        row.extend([0.0] * 7)
 
                     if i < len(self.gp_shadow_historical_available_history):
                         historical_available = int(
