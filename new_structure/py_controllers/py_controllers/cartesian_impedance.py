@@ -5759,8 +5759,26 @@ class CartesianImpedanceController(Node):
             "gp_compensation_clip_nm",
             "gp_compensation_disable_joint7",
         ])
+        columns.extend([f"tau_residual_{i+1}" for i in range(7)])
+        columns.extend([f"y_hat_{i+1}" for i in range(7)])
         columns.extend([f"y_hat_local_{i+1}" for i in range(7)])
         columns.extend([f"y_hat_cloud_{i+1}" for i in range(7)])
+        columns.extend([f"hist_db_pred_{i+1}" for i in range(7)])
+        columns.extend([f"hist_db_gated_pred_{i+1}" for i in range(7)])
+        columns.extend([f"gp_shadow_combined_paper_raw_{i+1}" for i in range(7)])
+        columns.extend([
+            "gp_triple_combined_base_shadow_enabled",
+            "gp_triple_combined_base_shadow_available",
+            "gp_triple_combined_base_shadow_used_fallback",
+            "gp_triple_combined_base_shadow_w_hist",
+            "gp_triple_combined_base_shadow_hist_weight_cap",
+            "gp_triple_combined_base_shadow_norm",
+            "gp_triple_combined_base_shadow_delta_from_combined_norm",
+            "gp_triple_combined_base_shadow_delta_from_legacy_triple_norm",
+        ])
+        columns.extend([
+            f"gp_triple_combined_base_shadow_raw_{i+1}" for i in range(7)
+        ])
         columns.extend([f"gp_applied_{i+1}" for i in range(7)])
         columns.extend([f"gp_clip_active_{i+1}" for i in range(7)])
         columns.extend([
