@@ -105,3 +105,16 @@
   - The IMPL Franka stack can host the gp_torque `cpp_relayer`.
   - The old-API model patch is sufficient for build and runtime state-parameter publication.
   - Next step should be Python-controller compatibility inspection before any trajectory or GP run.
+
+## IMPL underlay + gp_torque overlay checkpoint
+
+- The IMPL underlay + gp_torque overlay build passes.
+- `cpp_relayer` uses the IMPL old `FrankaRobotModel` API names:
+  - `getPose(franka::Frame::kFlange)`
+  - `getMass()`
+  - `getCoriolis()`
+  - `getGravity()`
+- Active zero-fallback validation was manually completed before this checkpoint task.
+- `/state_parameter` published model/state fields including `position`, `velocity`, `effort_measured`, `gravity`, `o_t_f`, and `mass`.
+- Do not run a Python trajectory, GP prediction, or GP compensation yet.
+- Next step: Python controller safety review or an isolated no-trajectory/no-GP launch design.
