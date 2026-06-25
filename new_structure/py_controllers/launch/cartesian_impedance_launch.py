@@ -211,6 +211,7 @@ def generate_launch_description():
     csv_output_profile_parameter_name = 'csv_output_profile'
     reference_mode_parameter_name = 'reference_mode'
     joint_space_command_topic_parameter_name = 'joint_space_command_topic'
+    effort_output_mode_parameter_name = 'effort_output_mode'
     # Stage 1: frozen GP / compensation experiment 参数，默认值保持安全。
     gp_prediction_enabled_parameter_name = 'gp_prediction_enabled'
     gp_prediction_stride_parameter_name = 'gp_prediction_stride'
@@ -357,6 +358,7 @@ def generate_launch_description():
     csv_output_profile = LaunchConfiguration(csv_output_profile_parameter_name)
     reference_mode = LaunchConfiguration(reference_mode_parameter_name)
     joint_space_command_topic = LaunchConfiguration(joint_space_command_topic_parameter_name)
+    effort_output_mode = LaunchConfiguration(effort_output_mode_parameter_name)
     gp_prediction_enabled = LaunchConfiguration(gp_prediction_enabled_parameter_name)
     gp_prediction_stride = LaunchConfiguration(gp_prediction_stride_parameter_name)
     gp_output_timeout_sec = LaunchConfiguration(gp_output_timeout_sec_parameter_name)
@@ -654,6 +656,10 @@ def generate_launch_description():
             joint_space_command_topic_parameter_name,
             default_value='/joint_space_command',
             description='JointSpaceCommand topic used only when reference_mode:=joint.'),
+        DeclareLaunchArgument(
+            effort_output_mode_parameter_name,
+            default_value='disabled',
+            description='Python effort output gate: disabled or active. Defaults fail closed.'),
         DeclareLaunchArgument(
             gp_prediction_enabled_parameter_name,
             default_value='true',
@@ -1070,6 +1076,8 @@ def generate_launch_description():
             parameters=[{
                 reference_mode_parameter_name: ParameterValue(reference_mode, value_type=str),
                 joint_space_command_topic_parameter_name: joint_space_command_topic,
+                effort_output_mode_parameter_name: ParameterValue(
+                    effort_output_mode, value_type=str),
                 gp_prediction_enabled_parameter_name: gp_prediction_enabled,
                 gp_prediction_stride_parameter_name: ParameterValue(gp_prediction_stride, value_type=int),
                 gp_output_timeout_sec_parameter_name: ParameterValue(

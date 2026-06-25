@@ -84,10 +84,14 @@ class CartesianImpedanceController(Node):
 
         self.declare_parameter('reference_mode', 'cartesian')
         self.declare_parameter('joint_space_command_topic', '/joint_space_command')
+        self.declare_parameter('effort_output_mode', 'disabled')
         self.reference_mode = str(self.get_parameter('reference_mode').value).strip().lower()
         self.joint_space_command_topic = str(
             self.get_parameter('joint_space_command_topic').value
         ).strip()
+        self.effort_output_mode = str(
+            self.get_parameter('effort_output_mode').value
+        ).strip().lower()
         if self.reference_mode not in ('cartesian', 'joint'):
             self.get_logger().warn(
                 f"Invalid reference_mode='{self.reference_mode}', falling back to 'cartesian'"
@@ -98,6 +102,20 @@ class CartesianImpedanceController(Node):
                 "joint_space_command_topic is empty, falling back to /joint_space_command"
             )
             self.joint_space_command_topic = '/joint_space_command'
+        if self.effort_output_mode not in ('disabled', 'active'):
+            self.get_logger().error(
+                f"Invalid effort_output_mode='{self.effort_output_mode}'; "
+                "failing closed with effort output disabled"
+            )
+            self.effort_output_mode = 'disabled'
+        if self.effort_output_mode == 'disabled':
+            self.get_logger().warn(
+                "[Safety] effort_output_mode=disabled: /effort_command publishing is blocked"
+            )
+        else:
+            self.get_logger().warn(
+                "[Safety] effort_output_mode=active: /effort_command publishing is enabled"
+            )
         
         # subscribe to /state_parameter
         self.param_subscription = self.create_subscription(
@@ -3102,6 +3120,10 @@ class CartesianImpedanceController(Node):
             self.trajectory_started = False             # reset flag to retry
 
     def _publish_effort(self, msg):
+        if self.effort_output_mode != 'active':
+            self._mark_effort_publish_skipped("effort_output_disabled")
+            return
+
         self.effort_publisher.publish(msg)
         publish_perf = time.perf_counter()
         if self._last_publish_perf is not None:

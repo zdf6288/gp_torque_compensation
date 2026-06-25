@@ -12,6 +12,8 @@ setup(
         ('share/' + package_name, ['package.xml']),
         ('share/' + package_name + '/launch', ['launch/effort_pd_launch.py']),
         ('share/' + package_name + '/launch', ['launch/cartesian_impedance_launch.py']),
+        ('share/' + package_name + '/launch',
+            ['launch/cartesian_impedance_python_only_safety_launch.py']),
         ('share/' + package_name + '/launch', ['launch/cartesian_model_free_launch.py']),
         ('share/' + package_name + '/launch', ['launch/cartesian_impedance_lambda_launch.py']),
         ('share/' + package_name + '/launch', ['launch/goal1_joint_space_replay_launch.py']),
