@@ -75,3 +75,33 @@
 - Next step:
   - create a temporary IMPL-compatible controller YAML that adds `cpp_relayer`;
   - validate loading/configuring carefully before running any trajectory or GP.
+
+## cpp_relayer active zero-fallback validation PASS
+
+- Underlay:
+  - `/opt/ros/humble`
+  - `/home/impl-user/impl-groups/group3/ros2_ws/install`
+- Overlay:
+  - `~/dongfa/tt_dgp/install_impl_bridge`
+- Temporary controller YAML:
+  - `/tmp/impl_gp_torque_cpp_relayer_controllers.yaml`
+- Runtime result:
+  - `cpp_relayer` loaded successfully.
+  - `cpp_relayer` configured successfully.
+  - `cpp_relayer` activated successfully for a short zero-fallback validation.
+  - While active, `panda_joint1/effort` to `panda_joint7/effort` were `[claimed]`.
+  - `/state_parameter` published successfully.
+  - Sample contained:
+    - `position`
+    - `velocity`
+    - `effort_measured`
+    - `gravity`
+    - `o_t_f`
+    - `mass`
+  - `cpp_relayer` deactivated successfully.
+  - After deactivation, `panda_joint1/effort` to `panda_joint7/effort` returned to `[unclaimed]`.
+- No Python trajectory, no GP prediction, and no GP compensation were run in this validation.
+- Interpretation:
+  - The IMPL Franka stack can host the gp_torque `cpp_relayer`.
+  - The old-API model patch is sufficient for build and runtime state-parameter publication.
+  - Next step should be Python-controller compatibility inspection before any trajectory or GP run.
