@@ -13,3 +13,65 @@
 - Not yet validated: Panda System Image, Desk, FCI, robot IP, state-only bringup, no-GP baseline, GP prediction-only, GP compensation-on.
 - Safety: do not directly run GP-on or full trajectory experiments after build.
 - Next order: Desk/FCI/IP -> state-only -> controller manager -> no-GP -> prediction-only -> local GP small scale/clip.
+
+## gp_torque bridge build against IMPL Franka stack PASS
+
+- Build underlay:
+  - `/opt/ros/humble`
+  - `/home/impl-user/impl-groups/group3/ros2_ws/install`
+- gp_torque overlay:
+  - `install_impl_bridge`
+- Built packages:
+  - `custom_msgs`
+  - `new_bringup`
+  - `cpp_relayer`
+  - `py_controllers`
+- Packages intentionally not built from gp_torque:
+  - `franka_hardware`
+  - `franka_bringup`
+  - `franka_semantic_components`
+  - `franka_robot_state_broadcaster`
+- These Franka packages are provided by IMPL workspace instead.
+- `cpp_relayer` required a small compatibility patch for the IMPL old `FrankaRobotModel` API:
+  - `getPoseMatrix(...)` -> `getPose(...)`
+  - `getMassMatrix()` -> `getMass()`
+  - `getCoriolisForceVector()` -> `getCoriolis()`
+  - `getGravityForceVector()` -> `getGravity()`
+- `cpp_relayer.xml` still exports:
+  - `cpp_relayer/CPPRelayer`
+  - `cpp_relayer/UpdateRateDiagnosticController`
+- No GP logic, torque computation, trajectory generation, or Python controller behavior was changed.
+- Next step:
+  - create a temporary IMPL-compatible controller YAML that adds `cpp_relayer`;
+  - validate loading/configuring carefully before running any trajectory or GP.
+
+## gp_torque bridge build against IMPL Franka stack PASS
+
+- Build underlay:
+  - `/opt/ros/humble`
+  - `/home/impl-user/impl-groups/group3/ros2_ws/install`
+- gp_torque overlay:
+  - `install_impl_bridge`
+- Built packages:
+  - `custom_msgs`
+  - `new_bringup`
+  - `cpp_relayer`
+  - `py_controllers`
+- Packages intentionally not built from gp_torque:
+  - `franka_hardware`
+  - `franka_bringup`
+  - `franka_semantic_components`
+  - `franka_robot_state_broadcaster`
+- These Franka packages are provided by IMPL workspace instead.
+- `cpp_relayer` required a small compatibility patch for the IMPL old `FrankaRobotModel` API:
+  - `getPoseMatrix(...)` -> `getPose(...)`
+  - `getMassMatrix()` -> `getMass()`
+  - `getCoriolisForceVector()` -> `getCoriolis()`
+  - `getGravityForceVector()` -> `getGravity()`
+- `cpp_relayer.xml` still exports:
+  - `cpp_relayer/CPPRelayer`
+  - `cpp_relayer/UpdateRateDiagnosticController`
+- No GP logic, torque computation, trajectory generation, or Python controller behavior was changed.
+- Next step:
+  - create a temporary IMPL-compatible controller YAML that adds `cpp_relayer`;
+  - validate loading/configuring carefully before running any trajectory or GP.

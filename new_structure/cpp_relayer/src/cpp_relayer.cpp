@@ -545,11 +545,11 @@ void CPPRelayer::updateStateParam() {
   // get kinematics and dynamics parameters from franka_robot_model_(franka_semantic_components)
   if (franka_robot_model_) {
     try {
-      o_t_f_ = franka_robot_model_->getPoseMatrix(franka::Frame::kFlange);
-      mass_ = franka_robot_model_->getMassMatrix();
-      coriolis_ = franka_robot_model_->getCoriolisForceVector();
+      o_t_f_ = franka_robot_model_->getPose(franka::Frame::kFlange);
+      mass_ = franka_robot_model_->getMass();
+      coriolis_ = franka_robot_model_->getCoriolis();
       zero_jacobian_flange_ = franka_robot_model_->getZeroJacobian(franka::Frame::kFlange);
-      gravity_ = franka_robot_model_->getGravityForceVector();
+      gravity_ = franka_robot_model_->getGravity();
     } 
     catch (const std::exception& e) {
       RCLCPP_WARN(get_node()->get_logger(), "Failed to compute dynamics: %s", e.what());
