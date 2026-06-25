@@ -118,3 +118,33 @@
 - `/state_parameter` published model/state fields including `position`, `velocity`, `effort_measured`, `gravity`, `o_t_f`, and `mass`.
 - Do not run a Python trajectory, GP prediction, or GP compensation yet.
 - Next step: Python controller safety review or an isolated no-trajectory/no-GP launch design.
+
+## Python-only no-torque dry-run PASS
+
+- Runtime stack:
+  - IMPL Franka underlay
+  - gp_torque `install_impl_bridge` overlay
+  - `cpp_relayer` active in zero-fallback mode
+- Python launch:
+  - `cartesian_impedance_python_only_safety_launch.py`
+  - `effort_output_mode=disabled`
+  - no `new_bringup`
+  - no `trajectory_publisher`
+  - no `cpp_relayer` spawn
+  - GP prediction / online update / compensation disabled
+- Validation result:
+  - `/cartesian_impedance` node started.
+  - `/state_parameter` messages were received.
+  - `/effort_command` topic existed, but no message was received within the timeout.
+  - `cpp_relayer` diagnostics showed `received_effort_commands=0`.
+  - `cpp_relayer` remained in zero-fallback behavior.
+  - `cpp_relayer` deactivated cleanly.
+  - `panda_joint1/effort` to `panda_joint7/effort` returned to `[unclaimed]`.
+- Interpretation:
+  - Python controller can be started in no-torque dry-run mode without publishing effort commands.
+  - This does not yet permit active torque control or formal GP data collection.
+- Next step:
+  - Add fixed-start distance guard.
+  - Add startup torque rate limiting.
+  - Lower startup torque clip for first Panda validation.
+  - Keep fixed experimental start pose; do not switch to current-pose startup.
