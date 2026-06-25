@@ -232,18 +232,67 @@ class CartesianImpedanceController(Node):
         self.startup_rot0 = None
 
         self.declare_parameter('startup_linear_speed', 0.01)   # m/s
-        self.startup_linear_speed = float(self.get_parameter('startup_linear_speed').value)
+        self.startup_linear_speed = self._get_positive_float_parameter(
+            'startup_linear_speed', 0.01
+        )
 
 
         self.declare_parameter('start_x', 0.35)
         self.declare_parameter('start_y', 0.0)
         self.declare_parameter('start_z', 0.65)
+        self.declare_parameter('startup_distance_guard_enabled', True)
+        self.declare_parameter('startup_distance_warn_m', 0.10)
+        self.declare_parameter('startup_distance_refuse_m', 0.30)
+        self.declare_parameter('startup_distance_refuse_enabled', False)
+        self.declare_parameter('startup_torque_clip_nm', 10.0)
+        self.declare_parameter('startup_torque_rate_limit_from_zero', True)
 
         self.start_x = float(self.get_parameter('start_x').value)
         self.start_y = float(self.get_parameter('start_y').value)
         self.start_z = float(self.get_parameter('start_z').value)
 
         self.x_start_des = np.array([self.start_x, self.start_y, self.start_z], dtype=float)
+        self.startup_distance_guard_enabled = self._get_bool_parameter(
+            'startup_distance_guard_enabled'
+        )
+        self.startup_distance_warn_m = self._get_nonnegative_float_parameter(
+            'startup_distance_warn_m', 0.10
+        )
+        self.startup_distance_refuse_m = self._get_nonnegative_float_parameter(
+            'startup_distance_refuse_m', 0.30
+        )
+        self.startup_distance_refuse_enabled = self._get_bool_parameter(
+            'startup_distance_refuse_enabled'
+        )
+        self.startup_torque_clip_nm = self._get_nonnegative_float_parameter(
+            'startup_torque_clip_nm', 10.0
+        )
+        self.startup_torque_rate_limit_from_zero = self._get_bool_parameter(
+            'startup_torque_rate_limit_from_zero'
+        )
+        self._startup_plan_logged = False
+        self._startup_distance_warn_logged = False
+        self._startup_distance_refuse_logged = False
+        self._startup_distance_invalid_logged = False
+        self._startup_torque_zero_baseline_logged = False
+
+        if self.startup_distance_refuse_m < self.startup_distance_warn_m:
+            self.get_logger().warn(
+                "[StartupSafety] startup_distance_refuse_m is below "
+                "startup_distance_warn_m; the lower threshold only hard-refuses "
+                "when startup_distance_refuse_enabled=true."
+            )
+        self.get_logger().warn(
+            "[StartupSafety] fixed-start guard configuration: "
+            f"enabled={self.startup_distance_guard_enabled}, "
+            f"fixed_start={self.x_start_des.tolist()}, "
+            f"warn_m={self.startup_distance_warn_m:.3f}, "
+            f"refuse_m={self.startup_distance_refuse_m:.3f}, "
+            f"refuse_enabled={self.startup_distance_refuse_enabled}, "
+            f"startup_torque_clip_nm={self.startup_torque_clip_nm:.3f}, "
+            "startup_torque_rate_limit_from_zero="
+            f"{self.startup_torque_rate_limit_from_zero}"
+        )
 
         self.declare_parameter('startup_kp_task', [500.0, 500.0, 500.0, 10.0, 10.0, 1.0])
         self.declare_parameter('startup_kd_task', [50.0, 50.0, 50.0, 1.0, 1.0, 1.0])
@@ -2281,6 +2330,9 @@ class CartesianImpedanceController(Node):
                 return
 
             if self.joint_position_control_active and not self.joint_position_adjusted:
+                if not self._startup_distance_guard_allows_effort(o_t_f):
+                    return
+
                 tau, reached, pos_err_norm = self._startup_taskspace_control(
                     t_now, q, dq, dt, o_t_f, zero_jacobian, zero_jacobian_pinv
                 )
@@ -2297,6 +2349,10 @@ class CartesianImpedanceController(Node):
                         self.get_logger().info(f"First task command received. Switching to active trajectory control.")
 
                 # 无论是否 reached，均持续发布正常的阻抗保持力矩，不发零力矩，不断流
+                self._tau_nominal = tau.copy()
+                self._tau_final_raw = tau.copy()
+                tau = self._apply_startup_torque_rate_limit(tau, t_now)
+                self._tau_final = tau.copy()
                 self.effort_msg.efforts = tau.tolist()
                 self._publish_effort(self.effort_msg)
                 return
@@ -2934,6 +2990,92 @@ class CartesianImpedanceController(Node):
 
         finished = False
         return x_ref, dx_ref, ddx_ref, finished
+
+    def _startup_distance_guard_allows_effort(self, o_t_f):
+        if not self.startup_distance_guard_enabled:
+            return True
+
+        try:
+            x = np.asarray(o_t_f[:3, 3], dtype=float)
+        except (TypeError, ValueError, IndexError):
+            x = np.array([], dtype=float)
+
+        if x.shape != (3,) or not np.all(np.isfinite(x)):
+            if not self._startup_distance_invalid_logged:
+                self.get_logger().error(
+                    "[StartupSafety] Refusing startup effort because current "
+                    "end-effector position is invalid or non-finite."
+                )
+                self._startup_distance_invalid_logged = True
+            self._mark_effort_publish_skipped("startup_distance_invalid")
+            return False
+
+        distance = float(np.linalg.norm(x - self.x_start_des))
+        if not np.isfinite(distance):
+            if not self._startup_distance_invalid_logged:
+                self.get_logger().error(
+                    "[StartupSafety] Refusing startup effort because fixed-start "
+                    "distance is non-finite."
+                )
+                self._startup_distance_invalid_logged = True
+            self._mark_effort_publish_skipped("startup_distance_invalid")
+            return False
+
+        estimated_duration = distance / self.startup_linear_speed
+        if not self._startup_plan_logged:
+            self.get_logger().info(
+                "[StartupSafety] Fixed-start startup plan: "
+                f"current_ee_pose={x.tolist()}, "
+                f"fixed_start_pose={self.x_start_des.tolist()}, "
+                f"distance_to_fixed_start={distance:.6f} m, "
+                f"startup_linear_speed={self.startup_linear_speed:.6f} m/s, "
+                f"estimated_startup_duration={estimated_duration:.6f} s, "
+                f"startup_distance_warn_m={self.startup_distance_warn_m:.6f} m, "
+                f"startup_distance_refuse_m={self.startup_distance_refuse_m:.6f} m, "
+                "startup_distance_refuse_enabled="
+                f"{self.startup_distance_refuse_enabled}."
+            )
+            self._startup_plan_logged = True
+
+        if distance > self.startup_distance_refuse_m:
+            if self.startup_distance_refuse_enabled:
+                if not self._startup_distance_refuse_logged:
+                    self.get_logger().error(
+                        "[StartupSafety] Refusing startup effort: "
+                        f"distance_to_fixed_start={distance:.6f} m exceeds "
+                        f"startup_distance_refuse_m={self.startup_distance_refuse_m:.6f} m; "
+                        f"current={x.tolist()}, fixed_start={self.x_start_des.tolist()}."
+                    )
+                    self._startup_distance_refuse_logged = True
+                self._mark_effort_publish_skipped("startup_distance_refused")
+                return False
+
+            if not self._startup_distance_refuse_logged:
+                self.get_logger().warn(
+                    "[StartupSafety] Distance exceeds startup_distance_refuse_m, "
+                    "but startup_distance_refuse_enabled=false; continuing the "
+                    "conservative interpolation to the fixed start: "
+                    f"distance_to_fixed_start={distance:.6f} m, "
+                    f"estimated_startup_duration={estimated_duration:.6f} s, "
+                    f"current={x.tolist()}, fixed_start={self.x_start_des.tolist()}."
+                )
+                self._startup_distance_refuse_logged = True
+            self._startup_distance_warn_logged = True
+
+        if (
+            distance > self.startup_distance_warn_m
+            and not self._startup_distance_warn_logged
+        ):
+            self.get_logger().warn(
+                "[StartupSafety] Startup is outside warning distance but below "
+                "the refusal threshold: "
+                f"distance_to_fixed_start={distance:.6f} m, "
+                f"startup_distance_warn_m={self.startup_distance_warn_m:.6f} m, "
+                f"startup_distance_refuse_m={self.startup_distance_refuse_m:.6f} m."
+            )
+            self._startup_distance_warn_logged = True
+
+        return True
         
     def _startup_taskspace_control(
         self,
@@ -2980,7 +3122,11 @@ class CartesianImpedanceController(Node):
         tau_nullspace = N.T @ (- self.dpn_gains * dq)
         tau = tau + tau_nullspace
         tau = tau + self.friction_compensation(dq)
-        tau = np.clip(tau, -50.0, 50.0)
+        tau = np.clip(
+            tau,
+            -self.startup_torque_clip_nm,
+            self.startup_torque_clip_nm
+        )
 
         reached = np.linalg.norm(pos_error) < self.startup_pos_threshold
         return tau, (finished and reached), np.linalg.norm(pos_error)
@@ -3017,6 +3163,29 @@ class CartesianImpedanceController(Node):
     def friction_compensation(self, dq):
         dq = np.asarray(dq, dtype=float)
         return self.Fc * np.tanh(dq / self.v_eps) + self.Bv * dq
+
+    def _apply_startup_torque_rate_limit(self, tau_raw, t_now):
+        prev_tau = self._torque_rate_limit_prev_tau
+        baseline_missing = (
+            prev_tau is None
+            or not np.all(np.isfinite(prev_tau))
+        )
+        if (
+            self.torque_rate_limit_enabled
+            and self.startup_torque_rate_limit_from_zero
+            and baseline_missing
+        ):
+            self._torque_rate_limit_prev_tau = np.zeros(7, dtype=float)
+            self._torque_rate_limit_prev_time = t_now
+            if not self._startup_torque_zero_baseline_logged:
+                self.get_logger().warn(
+                    "[StartupSafety] Initializing startup torque rate limiter "
+                    "from zero torque; the first startup command cannot bypass "
+                    "torque_rate_limit_nm_per_s."
+                )
+                self._startup_torque_zero_baseline_logged = True
+
+        return self._apply_torque_rate_limit(tau_raw, t_now)
 
     def _apply_torque_rate_limit(self, tau_raw, t_now):
         fallback_dt = 1.0 / max(float(self.control_frequency), 1e-6)
