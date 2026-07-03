@@ -5865,14 +5865,30 @@ class CartesianImpedanceController(Node):
         确保在当前进程中有名为 'skygp' 的模块，
         路径指向 repo 里的 /new_structure/gp/skygp.py
         """
-        # 以当前脚本为基准，找到 gp/skygp.py
+        # 以当前脚本为基准向上搜索 repo 根，避免不同机器用户名/路径导致硬编码失效。
         script_dir = os.path.dirname(os.path.abspath(__file__))
-        skygp_path = os.path.abspath(os.path.join(
-            script_dir, "..","..", "..","..","..", "..", "new_structure","gp", "skygp.py"
-        ))
+        search_roots = [script_dir]
+        current_dir = script_dir
+        for _ in range(8):
+            parent_dir = os.path.dirname(current_dir)
+            if parent_dir == current_dir:
+                break
+            search_roots.append(parent_dir)
+            current_dir = parent_dir
 
-        if not os.path.isfile(skygp_path):
-            self.get_logger().error(f"[GP] skygp.py not found at: {skygp_path}")
+        skygp_path = None
+        checked_paths = []
+        for root in search_roots:
+            candidate = os.path.abspath(os.path.join(root, "new_structure", "gp", "skygp.py"))
+            checked_paths.append(candidate)
+            if os.path.isfile(candidate):
+                skygp_path = candidate
+                break
+
+        if skygp_path is None:
+            self.get_logger().error(
+                "[GP] skygp.py not found. Checked: " + "; ".join(checked_paths)
+            )
             return False
 
         # 如果已加载则跳过
