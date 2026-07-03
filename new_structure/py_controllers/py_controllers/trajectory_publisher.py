@@ -5,10 +5,19 @@ from rclpy.node import Node
 from custom_msgs.msg import TaskSpaceCommand, StateParameter
 from custom_msgs.srv import JointPositionAdjust, GetFutureTrajectory
 from std_msgs.msg import Header, Bool
+import json
 import numpy as np
 import time
+from pathlib import Path
 from rclpy.duration import Duration
 from std_msgs.msg import String
+
+# session_relative 模式下，平移后的轨迹起点必须与 JSON 里的
+# session_trajectory_start_xyz 一致；超过该容差说明控制器写 anchor 时用的
+# nominal 轨迹起点和本节点的实际几何不一致（例如 multisine 参数被改过），
+# 此时拒绝启用轨迹，避免两个节点用不同的起点。
+SESSION_ANCHOR_START_CONSISTENCY_TOLERANCE_M = 0.010
+SESSION_ANCHOR_NOMINAL_GEOMETRY_TOLERANCE_M = 0.005
 
 
 class TrajectoryPublisher(Node):
@@ -68,6 +77,21 @@ class TrajectoryPublisher(Node):
         self.declare_parameter('circle_center_y', 0.0)  # circle center y coordinate
         self.declare_parameter('circle_center_z', 0.65) # circle center z coordinate
         self.declare_parameter('anchor_trajectory_start_to_current_pose', False)
+        # session_relative：整条轨迹（center + start）按 session anchor JSON 里
+        # 的 anchor_delta 整体平移；形状/半径/频率/相位不变。默认 fixed_absolute
+        # 保持旧的固定绝对几何，向后兼容。
+        self.declare_parameter('trajectory_reference_mode', 'fixed_absolute')
+        self.declare_parameter('session_anchor_path', '')
+        self.declare_parameter('session_relative_apply_to_trajectory_center', True)
+        self.declare_parameter('session_relative_max_anchor_delta_m', 0.250)
+        self.declare_parameter(
+            'session_relative_nominal_trajectory_start_xyz',
+            [0.3077306122468523, 0.043799833015107294, 0.6648721535244662],
+        )
+        self.declare_parameter(
+            'session_relative_nominal_circle_center_xyz',
+            [0.3, 0.0, 0.65],
+        )
         # Stage 3A default-off：planar_circle 保持 Stage 1 / Stage 2A 的平面圆轨迹行为。
         # z_modulated_circle 只在显式设置 trajectory_mode 时启用。
         self.declare_parameter('trajectory_mode', 'planar_circle')
@@ -102,6 +126,74 @@ class TrajectoryPublisher(Node):
         self.anchor_trajectory_start_to_current_pose = bool(
             self.get_parameter('anchor_trajectory_start_to_current_pose').value
         )
+        self.trajectory_reference_mode = str(
+            self.get_parameter('trajectory_reference_mode').value
+        ).strip().lower()
+        self.session_anchor_path = str(
+            self.get_parameter('session_anchor_path').value
+        ).strip()
+        self.session_relative_apply_to_trajectory_center = bool(
+            self.get_parameter('session_relative_apply_to_trajectory_center').value
+        )
+        self.session_relative_max_anchor_delta_m = float(
+            self.get_parameter('session_relative_max_anchor_delta_m').value
+        )
+        self.session_relative_nominal_trajectory_start = (
+            self._parse_vec3_parameter(
+                self.get_parameter(
+                    'session_relative_nominal_trajectory_start_xyz'
+                ).value,
+                'session_relative_nominal_trajectory_start_xyz',
+            )
+        )
+        self.session_relative_nominal_circle_center = (
+            self._parse_vec3_parameter(
+                self.get_parameter(
+                    'session_relative_nominal_circle_center_xyz'
+                ).value,
+                'session_relative_nominal_circle_center_xyz',
+            )
+        )
+        if self.trajectory_reference_mode not in ('fixed_absolute', 'session_relative'):
+            self.get_logger().error(
+                f"Unsupported trajectory_reference_mode "
+                f"'{self.trajectory_reference_mode}'. "
+                "Supported: fixed_absolute, session_relative."
+            )
+            raise ValueError(
+                f"Unsupported trajectory_reference_mode: "
+                f"{self.trajectory_reference_mode}"
+            )
+        if self.trajectory_reference_mode == 'session_relative':
+            if not self.session_anchor_path:
+                raise ValueError(
+                    "trajectory_reference_mode=session_relative requires a "
+                    "non-empty session_anchor_path; refusing to start."
+                )
+            if self.anchor_trajectory_start_to_current_pose:
+                # 两种平移机制叠加会让每次运行的轨迹漂移，破坏可比性。
+                raise ValueError(
+                    "anchor_trajectory_start_to_current_pose=true conflicts "
+                    "with trajectory_reference_mode=session_relative; the "
+                    "session anchor JSON is the only allowed shift source."
+                )
+            if not self.session_relative_apply_to_trajectory_center:
+                raise ValueError(
+                    "trajectory_reference_mode=session_relative requires "
+                    "session_relative_apply_to_trajectory_center=true so the "
+                    "whole trajectory center/start are shifted by the same "
+                    "anchor_delta; refusing to start."
+                )
+            if (
+                not np.isfinite(self.session_relative_max_anchor_delta_m)
+                or self.session_relative_max_anchor_delta_m <= 0.0
+            ):
+                raise ValueError(
+                    "session_relative_max_anchor_delta_m must be a positive "
+                    f"finite value, got {self.session_relative_max_anchor_delta_m}."
+                )
+        self.session_anchor_applied = False
+        self._session_anchor_error_logged = False
         self.trajectory_mode = self.get_parameter('trajectory_mode').value
         self.z_amplitude = self.get_parameter('z_amplitude').value
         self.z_frequency_multiplier = self.get_parameter('z_frequency_multiplier').value
@@ -180,6 +272,52 @@ class TrajectoryPublisher(Node):
         self.trajectory_start_x = trajectory_start[0]
         self.trajectory_start_y = trajectory_start[1]
         self.trajectory_start_z = trajectory_start[2]
+        # session_relative 模式下平移前的名义几何，记录下来用于日志和一致性检查。
+        self.nominal_center_xyz = np.array(
+            [self.center_x, self.center_y, self.center_z], dtype=float
+        )
+        self.nominal_trajectory_start_xyz = np.array(
+            [self.trajectory_start_x, self.trajectory_start_y, self.trajectory_start_z],
+            dtype=float,
+        )
+
+        if self.trajectory_reference_mode == 'session_relative':
+            nominal_start_mismatch = float(np.linalg.norm(
+                self.nominal_trajectory_start_xyz
+                - self.session_relative_nominal_trajectory_start
+            ))
+            nominal_center_mismatch = float(np.linalg.norm(
+                self.nominal_center_xyz
+                - self.session_relative_nominal_circle_center
+            ))
+            if (
+                nominal_start_mismatch
+                > SESSION_ANCHOR_NOMINAL_GEOMETRY_TOLERANCE_M
+                or nominal_center_mismatch
+                > SESSION_ANCHOR_NOMINAL_GEOMETRY_TOLERANCE_M
+            ):
+                raise ValueError(
+                    "session_relative nominal geometry parameters do not "
+                    "match trajectory_publisher's computed nominal geometry "
+                    f"(start mismatch {nominal_start_mismatch:.4f} m, "
+                    f"center mismatch {nominal_center_mismatch:.4f} m > "
+                    f"{SESSION_ANCHOR_NOMINAL_GEOMETRY_TOLERANCE_M:.3f} m). "
+                    "Refusing to start."
+                )
+            anchor_file = Path(self.session_anchor_path).expanduser()
+            if anchor_file.is_file():
+                # load 复用：anchor JSON 已存在，启动时立即校验并平移几何。
+                # 任何校验失败直接抛异常 fail closed，不发布任何轨迹指令。
+                self._load_and_apply_session_anchor()
+            else:
+                self.get_logger().warn(
+                    '[TrajectoryPublisher] trajectory_reference_mode='
+                    'session_relative: anchor JSON '
+                    f"'{anchor_file}' does not exist yet (capture_first). "
+                    'Trajectory stays disabled until the controller captures '
+                    'and saves the session anchor; it will be loaded when the '
+                    'joint position adjust service is called.'
+                )
 
         # Ablation parameters
         self.gp_mode_pub = self.create_publisher(String, "/gp_mode", 10)
@@ -249,6 +387,11 @@ class TrajectoryPublisher(Node):
         self.get_logger().info(
             f'Anchor trajectory start to current pose: {self.anchor_trajectory_start_to_current_pose}'
         )
+        self.get_logger().info(
+            f'trajectory_reference_mode: {self.trajectory_reference_mode}, '
+            f"session_anchor_path: '{self.session_anchor_path}', "
+            f'session_anchor_applied: {self.session_anchor_applied}'
+        )
         if self.use_transition:
             self.get_logger().info(f'Transition duration: {self.transition_duration} s')
         self.get_logger().info(
@@ -269,7 +412,29 @@ class TrajectoryPublisher(Node):
             self.get_logger().info(f'Received joint position adjustment request')
             self.get_logger().info(f'q_des: {request.q_des}')
             self.get_logger().info(f'dq_des: {request.dq_des}')
-            
+
+            if (
+                self.trajectory_reference_mode == 'session_relative'
+                and not self.session_anchor_applied
+            ):
+                # capture_first：控制器在发布任何 startup 力矩之前就已写好
+                # anchor JSON，所以此时文件应当存在。加载/校验失败一律拒绝
+                # 启用轨迹（trajectory_enabled 保持 False，不发布任何指令）。
+                try:
+                    self._load_and_apply_session_anchor()
+                except Exception as e:
+                    if not self._session_anchor_error_logged:
+                        self._session_anchor_error_logged = True
+                        self.get_logger().error(
+                            '[TrajectoryPublisher] Refusing to enable '
+                            f'trajectory: session anchor load failed: {e}'
+                        )
+                    response.success = False
+                    response.message = (
+                        f'session anchor load failed: {e}'
+                    )
+                    return response
+
             self.trajectory_enabled = True
             
             # reset timing for trajectory
@@ -294,7 +459,215 @@ class TrajectoryPublisher(Node):
             response.message = f"Error: {str(e)}"
             
         return response
+
+    @staticmethod
+    def _parse_vec3_parameter(value, name):
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError as e:
+                raise ValueError(
+                    f"Parameter '{name}' must be a JSON-style 3-vector, "
+                    f"got {value!r}: {e}"
+                )
+        try:
+            vec = np.asarray(value, dtype=float)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"Parameter '{name}' must be 3 finite numeric values, "
+                f"got {value!r}."
+            )
+        if vec.shape != (3,) or not np.all(np.isfinite(vec)):
+            raise ValueError(
+                f"Parameter '{name}' must be 3 finite numeric values, "
+                f"got {value!r}."
+            )
+        return vec
     
+    @staticmethod
+    def _session_anchor_vec3(payload, key):
+        """Read one finite 3-vector field from the anchor JSON; raise on failure."""
+        value = payload.get(key)
+        try:
+            vec = np.asarray(value, dtype=float)
+        except (TypeError, ValueError):
+            raise ValueError(f"session anchor field '{key}' is not numeric.")
+        if vec.shape != (3,) or not np.all(np.isfinite(vec)):
+            raise ValueError(
+                f"session anchor field '{key}' must be 3 finite values, "
+                f"got {value!r}."
+            )
+        return vec
+
+    def _load_and_apply_session_anchor(self):
+        """Load the session anchor JSON and shift the whole trajectory by anchor_delta.
+
+        只平移（center + start 同步移动 anchor_delta），不改变形状/半径/频率/
+        相位。任何字段缺失、模式不匹配、delta 超限或起点一致性失败都抛
+        ValueError，由调用方拒绝启用轨迹。
+        """
+        anchor_file = Path(self.session_anchor_path).expanduser()
+        if not anchor_file.is_file():
+            raise ValueError(
+                f"session anchor JSON not found: '{anchor_file}' "
+                "(controller capture may not have completed)."
+            )
+        try:
+            payload = json.loads(anchor_file.read_text())
+        except Exception as e:
+            raise ValueError(
+                f"failed to parse session anchor JSON '{anchor_file}': {e}"
+            )
+        if not isinstance(payload, dict):
+            raise ValueError(
+                f"session anchor JSON '{anchor_file}' is not an object."
+            )
+
+        file_mode = str(
+            payload.get('trajectory_reference_mode', '')
+        ).strip().lower()
+        if file_mode != 'session_relative':
+            raise ValueError(
+                "session anchor JSON trajectory_reference_mode="
+                f"'{file_mode}' does not match node mode 'session_relative'."
+            )
+        for key in ('version', 'created_at', 'source', 'notes'):
+            if key not in payload:
+                raise ValueError(
+                    f"session anchor JSON '{anchor_file}' is missing "
+                    f"required field '{key}'."
+                )
+        try:
+            version = int(payload.get('version'))
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"session anchor JSON '{anchor_file}' field 'version' must "
+                "be an integer."
+            )
+        if version < 2:
+            raise ValueError(
+                f"session anchor JSON '{anchor_file}' version={version} is "
+                "too old for session_relative anchors; re-capture the anchor."
+            )
+
+        session_start = self._session_anchor_vec3(
+            payload, 'session_trajectory_start_xyz'
+        )
+        ee_pose = self._session_anchor_vec3(payload, 'ee_pose_xyz')
+        anchor_delta = self._session_anchor_vec3(payload, 'anchor_delta_xyz')
+        shifted_center = self._session_anchor_vec3(
+            payload, 'shifted_circle_center_xyz'
+        )
+        nominal_start_json = self._session_anchor_vec3(
+            payload, 'nominal_trajectory_start_xyz'
+        )
+        nominal_center_json = self._session_anchor_vec3(
+            payload, 'nominal_circle_center_xyz'
+        )
+        self._session_anchor_vec3(payload, 'nominal_fixed_start_xyz')
+
+        internal_tol = 1e-6
+        ee_pose_residual = float(np.linalg.norm(ee_pose - session_start))
+        start_residual = float(np.linalg.norm(
+            session_start - (nominal_start_json + anchor_delta)
+        ))
+        center_residual = float(np.linalg.norm(
+            shifted_center - (nominal_center_json + anchor_delta)
+        ))
+        if (
+            ee_pose_residual > internal_tol
+            or start_residual > internal_tol
+            or center_residual > internal_tol
+        ):
+            raise ValueError(
+                "session anchor JSON is internally inconsistent "
+                f"(ee_pose_residual={ee_pose_residual:.2e} m, "
+                f"start_residual={start_residual:.2e} m, "
+                f"center_residual={center_residual:.2e} m)."
+            )
+
+        anchor_delta_norm = float(np.linalg.norm(anchor_delta))
+        if anchor_delta_norm > self.session_relative_max_anchor_delta_m:
+            raise ValueError(
+                f"anchor_delta norm {anchor_delta_norm:.4f} m exceeds "
+                "session_relative_max_anchor_delta_m="
+                f"{self.session_relative_max_anchor_delta_m:.4f} m."
+            )
+
+        configured_start_mismatch = float(np.linalg.norm(
+            nominal_start_json - self.session_relative_nominal_trajectory_start
+        ))
+        configured_center_mismatch = float(np.linalg.norm(
+            nominal_center_json - self.session_relative_nominal_circle_center
+        ))
+        actual_start_mismatch = float(np.linalg.norm(
+            nominal_start_json - self.nominal_trajectory_start_xyz
+        ))
+        actual_center_mismatch = float(np.linalg.norm(
+            nominal_center_json - self.nominal_center_xyz
+        ))
+        geometry_tol = SESSION_ANCHOR_NOMINAL_GEOMETRY_TOLERANCE_M
+        if (
+            configured_start_mismatch > geometry_tol
+            or configured_center_mismatch > geometry_tol
+            or actual_start_mismatch > geometry_tol
+            or actual_center_mismatch > geometry_tol
+        ):
+            raise ValueError(
+                "session anchor nominal geometry does not match this run "
+                f"(configured_start_mismatch={configured_start_mismatch:.4f} m, "
+                "configured_center_mismatch="
+                f"{configured_center_mismatch:.4f} m, "
+                f"actual_start_mismatch={actual_start_mismatch:.4f} m, "
+                f"actual_center_mismatch={actual_center_mismatch:.4f} m > "
+                f"{geometry_tol:.3f} m). Re-capture the anchor for the "
+                "current trajectory geometry."
+            )
+
+        old_center = self.nominal_center_xyz.copy()
+        self.center_x = float(shifted_center[0])
+        self.center_y = float(shifted_center[1])
+        self.center_z = float(shifted_center[2])
+        new_start, _, _ = self._compute_task_space_trajectory(0.0)
+        new_start = np.asarray(new_start[:3], dtype=float)
+        start_consistency_m = float(np.linalg.norm(new_start - session_start))
+        if start_consistency_m > SESSION_ANCHOR_START_CONSISTENCY_TOLERANCE_M:
+            # 回滚 center，保持未平移状态，拒绝启用轨迹。
+            self.center_x = float(old_center[0])
+            self.center_y = float(old_center[1])
+            self.center_z = float(old_center[2])
+            raise ValueError(
+                "shifted trajectory start "
+                f"{new_start.tolist()} deviates "
+                f"{start_consistency_m:.4f} m from session_trajectory_start "
+                f"{session_start.tolist()} (tolerance "
+                f"{SESSION_ANCHOR_START_CONSISTENCY_TOLERANCE_M:.3f} m); the "
+                "anchor JSON nominal geometry does not match this node's "
+                "trajectory parameters."
+            )
+
+        self.trajectory_start_x = float(new_start[0])
+        self.trajectory_start_y = float(new_start[1])
+        self.trajectory_start_z = float(new_start[2])
+        self.session_anchor_applied = True
+        self.get_logger().warn(
+            '[TrajectoryPublisher] Session-relative anchor applied: '
+            f"anchor='{anchor_file}', "
+            f'nominal_trajectory_start={self.nominal_trajectory_start_xyz.tolist()}, '
+            f'nominal_trajectory_start_json={nominal_start_json.tolist()}, '
+            f'nominal_circle_center_json={nominal_center_json.tolist()}, '
+            f'session_trajectory_start={session_start.tolist()}, '
+            f'anchor_delta={anchor_delta.tolist()} '
+            f'(norm={anchor_delta_norm:.4f} m), '
+            f'nominal_center={old_center.tolist()}, '
+            f'shifted_circle_center={shifted_center.tolist()}, '
+            f'shifted_trajectory_start={new_start.tolist()}, '
+            f'start_consistency={start_consistency_m:.6f} m. '
+            'Trajectory shape/radius/frequency/phase unchanged; global '
+            'translation only. The start-distance guard now checks the '
+            'shifted start.'
+        )
+
     def future_traj_callback(self, request, response):
         t_delay = float(request.t_delay)
         future = self.get_future_task_space(t_delay)  # 你刚才写好的函数
@@ -370,6 +743,14 @@ class TrajectoryPublisher(Node):
                 
                 self.robot_initial_received = True
                 self.get_logger().info(f'Robot initial position recorded: ({self.robot_initial_x:.3f}, {self.robot_initial_y:.3f}, {self.robot_initial_z:.3f})')
+                if self.trajectory_reference_mode == 'session_relative':
+                    self.get_logger().info(
+                        '[TrajectoryPublisher] session_relative: '
+                        f'distance_to_shifted_start={float(np.linalg.norm(target_position - current_position)):.4f} m '
+                        f'(shifted start={target_position.tolist()}); the '
+                        'start-distance guard below uses this shifted start, '
+                        'not the old nominal trajectory start.'
+                    )
                 self.get_logger().info(
                     f'[TrajectoryPublisher] Smooth transition start: '
                     f'current=({current_position[0]:.4f}, {current_position[1]:.4f}, {current_position[2]:.4f}), '

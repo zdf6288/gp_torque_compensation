@@ -53,6 +53,41 @@ def generate_launch_description():
     session_home_capture_max_z = LaunchConfiguration(
         'session_home_capture_max_z'
     )
+    trajectory_reference_mode = LaunchConfiguration(
+        'trajectory_reference_mode'
+    )
+    session_relative_capture_enabled = LaunchConfiguration(
+        'session_relative_capture_enabled'
+    )
+    session_relative_max_anchor_delta_m = LaunchConfiguration(
+        'session_relative_max_anchor_delta_m'
+    )
+    session_relative_warn_anchor_delta_m = LaunchConfiguration(
+        'session_relative_warn_anchor_delta_m'
+    )
+    session_relative_min_z = LaunchConfiguration('session_relative_min_z')
+    session_relative_max_z = LaunchConfiguration('session_relative_max_z')
+    session_relative_requires_stable_state = LaunchConfiguration(
+        'session_relative_requires_stable_state'
+    )
+    session_relative_stability_samples = LaunchConfiguration(
+        'session_relative_stability_samples'
+    )
+    session_relative_stability_position_std_m = LaunchConfiguration(
+        'session_relative_stability_position_std_m'
+    )
+    session_relative_apply_to_startup_and_return = LaunchConfiguration(
+        'session_relative_apply_to_startup_and_return'
+    )
+    session_relative_apply_to_trajectory_center = LaunchConfiguration(
+        'session_relative_apply_to_trajectory_center'
+    )
+    session_relative_nominal_trajectory_start_xyz = LaunchConfiguration(
+        'session_relative_nominal_trajectory_start_xyz'
+    )
+    session_relative_nominal_circle_center_xyz = LaunchConfiguration(
+        'session_relative_nominal_circle_center_xyz'
+    )
     normal_run_start_gate_enabled = LaunchConfiguration(
         'normal_run_start_gate_enabled'
     )
@@ -463,6 +498,42 @@ def generate_launch_description():
             'session_home_capture_max_z': ParameterValue(
                 session_home_capture_max_z, value_type=float
             ),
+            'trajectory_reference_mode': ParameterValue(
+                trajectory_reference_mode, value_type=str
+            ),
+            'session_relative_capture_enabled': ParameterValue(
+                session_relative_capture_enabled, value_type=bool
+            ),
+            'session_relative_max_anchor_delta_m': ParameterValue(
+                session_relative_max_anchor_delta_m, value_type=float
+            ),
+            'session_relative_warn_anchor_delta_m': ParameterValue(
+                session_relative_warn_anchor_delta_m, value_type=float
+            ),
+            'session_relative_min_z': ParameterValue(
+                session_relative_min_z, value_type=float
+            ),
+            'session_relative_max_z': ParameterValue(
+                session_relative_max_z, value_type=float
+            ),
+            'session_relative_requires_stable_state': ParameterValue(
+                session_relative_requires_stable_state, value_type=bool
+            ),
+            'session_relative_stability_samples': ParameterValue(
+                session_relative_stability_samples, value_type=int
+            ),
+            'session_relative_stability_position_std_m': ParameterValue(
+                session_relative_stability_position_std_m, value_type=float
+            ),
+            'session_relative_apply_to_startup_and_return': ParameterValue(
+                session_relative_apply_to_startup_and_return, value_type=bool
+            ),
+            'session_relative_nominal_trajectory_start_xyz': ParameterValue(
+                session_relative_nominal_trajectory_start_xyz, value_type=str
+            ),
+            'session_relative_nominal_circle_center_xyz': ParameterValue(
+                session_relative_nominal_circle_center_xyz, value_type=str
+            ),
             'normal_run_start_gate_enabled': ParameterValue(
                 normal_run_start_gate_enabled, value_type=bool
             ),
@@ -539,6 +610,26 @@ def generate_launch_description():
             # goal1_spatial_multisine would shift the center to the measured
             # pose after /joint_position_adjust is called.
             'anchor_trajectory_start_to_current_pose': False,
+            'trajectory_reference_mode': ParameterValue(
+                trajectory_reference_mode, value_type=str
+            ),
+            # The controller calls this session_home_path; trajectory_publisher
+            # calls the same JSON file session_anchor_path.
+            'session_anchor_path': ParameterValue(
+                session_home_path, value_type=str
+            ),
+            'session_relative_apply_to_trajectory_center': ParameterValue(
+                session_relative_apply_to_trajectory_center, value_type=bool
+            ),
+            'session_relative_max_anchor_delta_m': ParameterValue(
+                session_relative_max_anchor_delta_m, value_type=float
+            ),
+            'session_relative_nominal_trajectory_start_xyz': ParameterValue(
+                session_relative_nominal_trajectory_start_xyz, value_type=str
+            ),
+            'session_relative_nominal_circle_center_xyz': ParameterValue(
+                session_relative_nominal_circle_center_xyz, value_type=str
+            ),
             # Keep this node alive after the final round while the controller
             # returns to the session home; same flag as the controller return.
             'post_run_return_wait_enabled': ParameterValue(
@@ -665,6 +756,71 @@ def generate_launch_description():
             'session_home_capture_max_z',
             default_value='0.85',
             description='Maximum z for a valid session home in m.',
+        ),
+        DeclareLaunchArgument(
+            'trajectory_reference_mode',
+            default_value='fixed_absolute',
+            description='Trajectory reference mode: fixed_absolute or session_relative.',
+        ),
+        DeclareLaunchArgument(
+            'session_relative_capture_enabled',
+            default_value='false',
+            description='Allow capture_first to save a session-relative trajectory anchor.',
+        ),
+        DeclareLaunchArgument(
+            'session_relative_max_anchor_delta_m',
+            default_value='0.250',
+            description='Maximum allowed session-relative anchor_delta norm in m.',
+        ),
+        DeclareLaunchArgument(
+            'session_relative_warn_anchor_delta_m',
+            default_value='0.150',
+            description='Warn threshold for session-relative anchor_delta norm in m.',
+        ),
+        DeclareLaunchArgument(
+            'session_relative_min_z',
+            default_value='0.45',
+            description='Minimum z for a valid session-relative trajectory start in m.',
+        ),
+        DeclareLaunchArgument(
+            'session_relative_max_z',
+            default_value='0.85',
+            description='Maximum z for a valid session-relative trajectory start in m.',
+        ),
+        DeclareLaunchArgument(
+            'session_relative_requires_stable_state',
+            default_value='true',
+            description='Require EE position stability before session-relative capture.',
+        ),
+        DeclareLaunchArgument(
+            'session_relative_stability_samples',
+            default_value='10',
+            description='State samples used for session-relative capture stability.',
+        ),
+        DeclareLaunchArgument(
+            'session_relative_stability_position_std_m',
+            default_value='0.003',
+            description='Max per-axis position std for session-relative capture in m.',
+        ),
+        DeclareLaunchArgument(
+            'session_relative_apply_to_startup_and_return',
+            default_value='true',
+            description='Use session_trajectory_start for startup and post-run return.',
+        ),
+        DeclareLaunchArgument(
+            'session_relative_apply_to_trajectory_center',
+            default_value='true',
+            description='Shift trajectory center by anchor_delta in session_relative mode.',
+        ),
+        DeclareLaunchArgument(
+            'session_relative_nominal_trajectory_start_xyz',
+            default_value='[0.3077306122468523, 0.043799833015107294, 0.6648721535244662]',
+            description='Nominal unshifted trajectory start xyz used to compute anchor_delta.',
+        ),
+        DeclareLaunchArgument(
+            'session_relative_nominal_circle_center_xyz',
+            default_value='[0.3, 0.0, 0.65]',
+            description='Nominal unshifted circle center xyz used to compute shifted center.',
         ),
         DeclareLaunchArgument(
             'normal_run_start_gate_enabled',

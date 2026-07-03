@@ -402,6 +402,99 @@ class CartesianImpedanceController(Node):
             'post_run_return_disable_online_update'
         )
 
+        # ===== Trajectory reference mode: session-relative trajectory anchor =====
+        # fixed_absolute（默认）：轨迹几何保持旧的固定绝对坐标，session_home
+        # 只替换 startup/return 目标点，行为与之前完全一致。
+        # session_relative：第一次运行把当前稳定 EE pose 采集为
+        # session_trajectory_start，anchor_delta = 采集点 - 名义轨迹起点，
+        # 整条轨迹（含 circle center）平移 anchor_delta；后续 load 复用同一
+        # anchor JSON，所有 source/scale 跑同一条平移后的轨迹。只平移，不改形状。
+        self.declare_parameter('trajectory_reference_mode', 'fixed_absolute')
+        self.declare_parameter('session_relative_capture_enabled', False)
+        self.declare_parameter('session_relative_max_anchor_delta_m', 0.250)
+        self.declare_parameter('session_relative_warn_anchor_delta_m', 0.150)
+        self.declare_parameter('session_relative_min_z', 0.45)
+        self.declare_parameter('session_relative_max_z', 0.85)
+        self.declare_parameter('session_relative_requires_stable_state', True)
+        self.declare_parameter('session_relative_stability_samples', 10)
+        self.declare_parameter(
+            'session_relative_stability_position_std_m', 0.003
+        )
+        self.declare_parameter(
+            'session_relative_apply_to_startup_and_return', True
+        )
+        # 名义轨迹几何参考点。默认值必须与 trajectory_publisher 默认
+        # goal1_spatial_multisine 几何在 t=0 的起点严格一致：
+        #   x0 = 0.3 + 0.012*sin(0.7)
+        #   y0 = 0.035*cos(0.4) + 0.012*sin(1.3)
+        #   z0 = 0.65 + 0.030*sin(0.2) + 0.010*sin(1.1)
+        # trajectory_publisher 加载 anchor 后会用自身几何做起点一致性检查
+        # （容差 0.010 m），两边不一致会 fail closed。
+        self.declare_parameter(
+            'session_relative_nominal_trajectory_start_xyz',
+            [0.3077306122468523, 0.043799833015107294, 0.6648721535244662],
+        )
+        self.declare_parameter(
+            'session_relative_nominal_circle_center_xyz',
+            [0.3, 0.0, 0.65],
+        )
+
+        self.trajectory_reference_mode = str(
+            self.get_parameter('trajectory_reference_mode').value
+        ).strip().lower()
+        self.session_relative_capture_enabled = self._get_bool_parameter(
+            'session_relative_capture_enabled'
+        )
+        self.session_relative_max_anchor_delta_m = (
+            self._get_positive_float_parameter(
+                'session_relative_max_anchor_delta_m', 0.250
+            )
+        )
+        self.session_relative_warn_anchor_delta_m = (
+            self._get_nonnegative_float_parameter(
+                'session_relative_warn_anchor_delta_m', 0.150
+            )
+        )
+        self.session_relative_min_z = self._get_nonnegative_float_parameter(
+            'session_relative_min_z', 0.45
+        )
+        self.session_relative_max_z = self._get_positive_float_parameter(
+            'session_relative_max_z', 0.85
+        )
+        self.session_relative_requires_stable_state = self._get_bool_parameter(
+            'session_relative_requires_stable_state'
+        )
+        self.session_relative_stability_samples = self._get_bounded_int_parameter(
+            'session_relative_stability_samples', 10, 2, 1000
+        )
+        self.session_relative_stability_position_std_m = (
+            self._get_positive_float_parameter(
+                'session_relative_stability_position_std_m', 0.003
+            )
+        )
+        self.session_relative_apply_to_startup_and_return = (
+            self._get_bool_parameter(
+                'session_relative_apply_to_startup_and_return'
+            )
+        )
+        self.session_relative_nominal_trajectory_start = (
+            self._get_vec3_parameter(
+                'session_relative_nominal_trajectory_start_xyz'
+            )
+        )
+        self.session_relative_nominal_circle_center = (
+            self._get_vec3_parameter('session_relative_nominal_circle_center_xyz')
+        )
+        if self.trajectory_reference_mode not in (
+            'fixed_absolute', 'session_relative'
+        ):
+            raise ValueError(
+                "Unsupported trajectory_reference_mode="
+                f"'{self.trajectory_reference_mode}'. "
+                "Supported: fixed_absolute, session_relative."
+            )
+        self.session_anchor_delta = None
+
         self.x_nominal_fixed_start = self.x_start_des.copy()
         self.session_home = None
         self.session_home_resolved = False
@@ -426,6 +519,53 @@ class CartesianImpedanceController(Node):
                 f"Unsupported session_home_mode='{self.session_home_mode}'. "
                 "Supported: fixed, capture_first, load."
             )
+
+        # session_relative 采集/加载共用 session_home 的 capture_first/load
+        # 流程，但稳定性/z/距离门限换成 session_relative_* 参数，距离参考点
+        # 从 nominal fixed start 换成 nominal trajectory start。
+        if self.trajectory_reference_mode == 'session_relative':
+            if self.session_home_mode == 'fixed':
+                raise ValueError(
+                    "trajectory_reference_mode=session_relative requires "
+                    "session_home_mode=capture_first or load (there is no "
+                    "anchor source in fixed mode); refusing to start."
+                )
+            if (
+                self.session_home_mode == 'capture_first'
+                and not self.session_relative_capture_enabled
+            ):
+                raise ValueError(
+                    "trajectory_reference_mode=session_relative with "
+                    "session_home_mode=capture_first requires "
+                    "session_relative_capture_enabled=true; refusing to start."
+                )
+            if not self.session_relative_apply_to_startup_and_return:
+                raise ValueError(
+                    "trajectory_reference_mode=session_relative requires "
+                    "session_relative_apply_to_startup_and_return=true so "
+                    "startup interpolation and post-run return use "
+                    "session_trajectory_start; refusing to start."
+                )
+            self.effective_capture_requires_stable_state = (
+                self.session_relative_requires_stable_state
+            )
+            self.effective_capture_stability_samples = (
+                self.session_relative_stability_samples
+            )
+            self.effective_capture_stability_position_std_m = (
+                self.session_relative_stability_position_std_m
+            )
+        else:
+            self.effective_capture_requires_stable_state = (
+                self.session_home_capture_requires_stable_state
+            )
+            self.effective_capture_stability_samples = (
+                self.session_home_capture_stability_samples
+            )
+            self.effective_capture_stability_position_std_m = (
+                self.session_home_capture_stability_position_std_m
+            )
+
         if self.session_home_mode == 'load':
             pose, payload = self._load_session_home(self.session_home_path)
             self._adopt_session_home(pose, 'load')
@@ -449,7 +589,7 @@ class CartesianImpedanceController(Node):
             self.get_logger().warn(
                 "[SessionHome] capture_first: will capture current EE pose as "
                 "session home after "
-                f"{self.session_home_capture_stability_samples} stable state "
+                f"{self.effective_capture_stability_samples} stable state "
                 "samples; no startup torque is published until capture passes "
                 "validation."
             )
@@ -459,6 +599,7 @@ class CartesianImpedanceController(Node):
         self.get_logger().warn(
             "[SessionHome] Configuration: "
             f"mode={self.session_home_mode}, "
+            f"trajectory_reference_mode={self.trajectory_reference_mode}, "
             f"path='{self.session_home_path}', "
             f"normal_run_start_gate_enabled={self.normal_run_start_gate_enabled}, "
             f"normal_run_start_warn_m={self.normal_run_start_warn_m:.3f}, "
@@ -472,6 +613,28 @@ class CartesianImpedanceController(Node):
             f"post_run_return_hold_sec={self.post_run_return_hold_sec:.1f}, "
             f"post_run_return_tolerance_m={self.post_run_return_tolerance_m:.4f}"
         )
+        if self.trajectory_reference_mode == 'session_relative':
+            self.get_logger().warn(
+                "[SessionAnchor] session_relative configuration: "
+                "nominal_trajectory_start="
+                f"{self.session_relative_nominal_trajectory_start.tolist()}, "
+                "nominal_circle_center="
+                f"{self.session_relative_nominal_circle_center.tolist()}, "
+                "max_anchor_delta_m="
+                f"{self.session_relative_max_anchor_delta_m:.3f}, "
+                "warn_anchor_delta_m="
+                f"{self.session_relative_warn_anchor_delta_m:.3f}, "
+                f"min_z={self.session_relative_min_z:.3f}, "
+                f"max_z={self.session_relative_max_z:.3f}, "
+                "requires_stable_state="
+                f"{self.session_relative_requires_stable_state}, "
+                "stability_samples="
+                f"{self.session_relative_stability_samples}, "
+                "stability_position_std_m="
+                f"{self.session_relative_stability_position_std_m:.4f}, "
+                "apply_to_startup_and_return="
+                f"{self.session_relative_apply_to_startup_and_return}."
+            )
 
 
         self.q_initial = None               # initial joint position q0
@@ -1577,6 +1740,30 @@ class CartesianImpedanceController(Node):
 
         self.get_logger().warn(f"[GP] Parameter '{name}' is not bool-like ({value}); using bool(value)")
         return bool(value)
+
+    def _get_vec3_parameter(self, name):
+        value = self.get_parameter(name).value
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError as e:
+                raise ValueError(
+                    f"Parameter '{name}' must be a JSON-style 3-vector, "
+                    f"got {value!r}: {e}"
+                )
+        try:
+            array = np.asarray(value, dtype=float)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"Parameter '{name}' must be 3 finite numeric values, "
+                f"got {value!r}."
+            )
+        if array.shape != (3,) or not np.all(np.isfinite(array)):
+            raise ValueError(
+                f"Parameter '{name}' must be 3 finite numeric values, "
+                f"got {value!r}."
+            )
+        return array
 
     def _disable_timing_logging(self, error):
         if not self._timing_disabled_after_error:
@@ -3375,6 +3562,11 @@ class CartesianImpedanceController(Node):
                 f"[SessionHome] {context}: pose must be 3 finite values, "
                 f"got {pose.tolist() if pose.size else pose}."
             )
+        if self.trajectory_reference_mode == 'session_relative':
+            # session_relative：距离参考点是名义轨迹起点（anchor_delta），
+            # 不再要求靠近旧的 nominal fixed start；z 范围用 session_relative_*。
+            pose, _ = self._validate_session_relative_start(pose, context)
+            return pose
         z = float(pose[2])
         if not (self.session_home_capture_min_z <= z <= self.session_home_capture_max_z):
             raise ValueError(
@@ -3395,6 +3587,41 @@ class CartesianImpedanceController(Node):
                 f"nominal={self.x_nominal_fixed_start.tolist()}."
             )
         return pose
+
+    def _validate_session_relative_start(self, pose, context):
+        """Validate a session-relative trajectory start; return (pose, anchor_delta).
+
+        Gates: z range and |anchor_delta| against the nominal trajectory start.
+        Raise ValueError on failure (fail closed, no torque is published).
+        """
+        pose = np.asarray(pose, dtype=float)
+        z = float(pose[2])
+        if not (self.session_relative_min_z <= z <= self.session_relative_max_z):
+            raise ValueError(
+                f"[SessionAnchor] {context}: z={z:.4f} outside "
+                f"[{self.session_relative_min_z:.3f}, "
+                f"{self.session_relative_max_z:.3f}]."
+            )
+        anchor_delta = pose - self.session_relative_nominal_trajectory_start
+        anchor_delta_norm = float(np.linalg.norm(anchor_delta))
+        if anchor_delta_norm > self.session_relative_max_anchor_delta_m:
+            raise ValueError(
+                f"[SessionAnchor] {context}: anchor_delta norm "
+                f"{anchor_delta_norm:.4f} m exceeds "
+                "session_relative_max_anchor_delta_m="
+                f"{self.session_relative_max_anchor_delta_m:.4f} m; "
+                f"pose={pose.tolist()}, nominal_trajectory_start="
+                f"{self.session_relative_nominal_trajectory_start.tolist()}."
+            )
+        if anchor_delta_norm > self.session_relative_warn_anchor_delta_m:
+            self.get_logger().warn(
+                f"[SessionAnchor] {context}: anchor_delta norm "
+                f"{anchor_delta_norm:.4f} m exceeds warn threshold "
+                "session_relative_warn_anchor_delta_m="
+                f"{self.session_relative_warn_anchor_delta_m:.4f} m; the "
+                "whole trajectory will be shifted by this offset."
+            )
+        return pose, anchor_delta
 
     def _load_session_home(self, path):
         """Load and validate session home JSON; raise ValueError on any problem."""
@@ -3420,47 +3647,265 @@ class CartesianImpedanceController(Node):
             raise ValueError(
                 f"[SessionHome] session home JSON '{file_path}' is not an object."
             )
+        if self.trajectory_reference_mode == 'session_relative':
+            pose = self._validate_session_anchor_payload(payload, file_path)
+            return pose, payload
         pose = self._validate_session_home_pose(
             payload.get('ee_pose_xyz'), f"load '{file_path}'"
         )
         return pose, payload
 
+    @staticmethod
+    def _session_anchor_vec3(payload, key, file_path):
+        """Read one finite 3-vector field from the anchor JSON; raise on failure."""
+        value = payload.get(key)
+        try:
+            vec = np.asarray(value, dtype=float)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"[SessionAnchor] '{file_path}': field '{key}' is not numeric."
+            )
+        if vec.shape != (3,) or not np.all(np.isfinite(vec)):
+            raise ValueError(
+                f"[SessionAnchor] '{file_path}': field '{key}' must be 3 "
+                f"finite values, got {value!r}."
+            )
+        return vec
+
+    def _validate_session_anchor_payload(self, payload, file_path):
+        """Validate a session-relative anchor JSON; return the session start pose.
+
+        任何字段缺失/模式不匹配/delta 超限/内部不一致都抛 ValueError；
+        校验失败时不发布任何力矩（构造期抛出 → 节点直接退出）。
+        """
+        file_mode = str(
+            payload.get('trajectory_reference_mode', '')
+        ).strip().lower()
+        if file_mode != 'session_relative':
+            raise ValueError(
+                f"[SessionAnchor] '{file_path}': trajectory_reference_mode="
+                f"'{file_mode}' does not match controller mode "
+                "'session_relative'. Re-capture the anchor or switch modes."
+            )
+        for key in ('version', 'created_at', 'source', 'notes'):
+            if key not in payload:
+                raise ValueError(
+                    f"[SessionAnchor] '{file_path}': missing required field "
+                    f"'{key}'."
+                )
+        try:
+            version = int(payload.get('version'))
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"[SessionAnchor] '{file_path}': field 'version' must be an "
+                "integer."
+            )
+        if version < 2:
+            raise ValueError(
+                f"[SessionAnchor] '{file_path}': version={version} is too old "
+                "for session_relative anchors; re-capture the anchor."
+            )
+        session_start = self._session_anchor_vec3(
+            payload, 'session_trajectory_start_xyz', file_path
+        )
+        ee_pose = self._session_anchor_vec3(payload, 'ee_pose_xyz', file_path)
+        nominal_start = self._session_anchor_vec3(
+            payload, 'nominal_trajectory_start_xyz', file_path
+        )
+        nominal_center = self._session_anchor_vec3(
+            payload, 'nominal_circle_center_xyz', file_path
+        )
+        shifted_center = self._session_anchor_vec3(
+            payload, 'shifted_circle_center_xyz', file_path
+        )
+        anchor_delta = self._session_anchor_vec3(
+            payload, 'anchor_delta_xyz', file_path
+        )
+        self._session_anchor_vec3(
+            payload, 'nominal_fixed_start_xyz', file_path
+        )
+
+        q_at_capture = payload.get('q_at_capture')
+        if q_at_capture is not None:
+            try:
+                q_vec = np.asarray(q_at_capture, dtype=float)
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"[SessionAnchor] '{file_path}': q_at_capture must be "
+                    "null or 7 finite values."
+                )
+            if q_vec.shape != (7,) or not np.all(np.isfinite(q_vec)):
+                raise ValueError(
+                    f"[SessionAnchor] '{file_path}': q_at_capture must be "
+                    f"null or 7 finite values, got {q_at_capture!r}."
+                )
+
+        # 文件内部一致性：session_start/shifted_center 必须与 anchor_delta 自洽。
+        internal_tol = 1e-6
+        ee_pose_residual = float(np.linalg.norm(ee_pose - session_start))
+        start_residual = float(np.linalg.norm(
+            session_start - (nominal_start + anchor_delta)
+        ))
+        center_residual = float(np.linalg.norm(
+            shifted_center - (nominal_center + anchor_delta)
+        ))
+        if (
+            ee_pose_residual > internal_tol
+            or start_residual > internal_tol
+            or center_residual > internal_tol
+        ):
+            raise ValueError(
+                f"[SessionAnchor] '{file_path}': internally inconsistent "
+                f"anchor JSON (ee_pose_residual={ee_pose_residual:.2e} m, "
+                f"start_residual={start_residual:.2e} m, "
+                f"center_residual={center_residual:.2e} m)."
+            )
+
+        # 采集时的名义几何必须与当前 launch 的名义几何一致，否则平移后的
+        # 轨迹会不同，跨 run 不可比。
+        geometry_tol = 0.005
+        nominal_start_mismatch = float(np.linalg.norm(
+            nominal_start - self.session_relative_nominal_trajectory_start
+        ))
+        nominal_center_mismatch = float(np.linalg.norm(
+            nominal_center - self.session_relative_nominal_circle_center
+        ))
+        if (
+            nominal_start_mismatch > geometry_tol
+            or nominal_center_mismatch > geometry_tol
+        ):
+            raise ValueError(
+                f"[SessionAnchor] '{file_path}': nominal geometry in the "
+                "anchor JSON does not match this run "
+                f"(start mismatch {nominal_start_mismatch:.4f} m, center "
+                f"mismatch {nominal_center_mismatch:.4f} m > "
+                f"{geometry_tol:.3f} m). Re-capture the anchor for the "
+                "current geometry."
+            )
+
+        # z 范围 + anchor_delta 上限/警告（与 capture 相同的安全门）。
+        _, recomputed_delta = self._validate_session_relative_start(
+            session_start, f"load '{file_path}'"
+        )
+        self.session_anchor_delta = recomputed_delta
+        return session_start
+
     def _save_session_home(self, path, pose, q=None):
-        payload = {
-            'version': 1,
-            'created_at': time.strftime('%Y-%m-%dT%H:%M:%S'),
-            'source': 'capture_first',
-            'ee_pose_xyz': [float(v) for v in np.asarray(pose, dtype=float)],
-            'nominal_fixed_start_xyz': self.x_nominal_fixed_start.tolist(),
-            'q_at_capture': (
-                [float(v) for v in np.asarray(q, dtype=float)]
-                if q is not None else None
-            ),
-            'notes': (
-                'Session home for repeated GP compensation split runs. '
-                'Captured after stability/z-range/nominal-distance validation; '
-                'used only as startup and post-run return target.'
-            ),
-        }
+        pose = np.asarray(pose, dtype=float)
+        if self.trajectory_reference_mode == 'session_relative':
+            anchor_delta = (
+                pose - self.session_relative_nominal_trajectory_start
+            )
+            shifted_center = (
+                self.session_relative_nominal_circle_center + anchor_delta
+            )
+            self.session_anchor_delta = anchor_delta.copy()
+            payload = {
+                'version': 2,
+                'created_at': time.strftime('%Y-%m-%dT%H:%M:%S'),
+                'source': 'capture_first',
+                'trajectory_reference_mode': 'session_relative',
+                # ee_pose_xyz 与 session_trajectory_start_xyz 相同，保留是为了
+                # 旧的 fixed_absolute session_home load 路径仍能读该文件。
+                'ee_pose_xyz': [float(v) for v in pose],
+                'session_trajectory_start_xyz': [float(v) for v in pose],
+                'nominal_trajectory_start_xyz': (
+                    self.session_relative_nominal_trajectory_start.tolist()
+                ),
+                'nominal_circle_center_xyz': (
+                    self.session_relative_nominal_circle_center.tolist()
+                ),
+                'shifted_circle_center_xyz': (
+                    [float(v) for v in shifted_center]
+                ),
+                'anchor_delta_xyz': [float(v) for v in anchor_delta],
+                'nominal_fixed_start_xyz': self.x_nominal_fixed_start.tolist(),
+                'q_at_capture': (
+                    [float(v) for v in np.asarray(q, dtype=float)]
+                    if q is not None else None
+                ),
+                'notes': (
+                    'session-relative trajectory anchor for repeated GP '
+                    'compensation experiments'
+                ),
+            }
+        else:
+            payload = {
+                'version': 1,
+                'created_at': time.strftime('%Y-%m-%dT%H:%M:%S'),
+                'source': 'capture_first',
+                'ee_pose_xyz': [float(v) for v in pose],
+                'nominal_fixed_start_xyz': self.x_nominal_fixed_start.tolist(),
+                'q_at_capture': (
+                    [float(v) for v in np.asarray(q, dtype=float)]
+                    if q is not None else None
+                ),
+                'notes': (
+                    'Session home for repeated GP compensation split runs. '
+                    'Captured after stability/z-range/nominal-distance validation; '
+                    'used only as startup and post-run return target.'
+                ),
+            }
         file_path = Path(path).expanduser()
         file_path.parent.mkdir(parents=True, exist_ok=True)
         file_path.write_text(json.dumps(payload, indent=2) + '\n')
-        self.get_logger().warn(
-            f"[SessionHome] Saved captured session home to '{file_path}'."
-        )
+        if self.trajectory_reference_mode == 'session_relative':
+            self.get_logger().warn(
+                "[SessionAnchor] Saved session-relative trajectory anchor to "
+                f"'{file_path}': "
+                f"session_trajectory_start={pose.tolist()}, "
+                "nominal_trajectory_start="
+                f"{self.session_relative_nominal_trajectory_start.tolist()}, "
+                f"anchor_delta={payload['anchor_delta_xyz']}, "
+                f"shifted_circle_center={payload['shifted_circle_center_xyz']}."
+            )
+        else:
+            self.get_logger().warn(
+                f"[SessionHome] Saved captured session home to '{file_path}'."
+            )
 
     def _adopt_session_home(self, pose, source):
         self.session_home = np.asarray(pose, dtype=float).copy()
         self.session_home_resolved = True
         self.session_home_source = source
-        self.x_start_des = self.session_home.copy()
-        self.get_logger().warn(
-            "[SessionHome] Session home adopted: "
-            f"source={source}, pose={self.session_home.tolist()}, "
-            f"nominal_fixed_start={self.x_nominal_fixed_start.tolist()}; "
-            "session home replaces the fixed start for startup interpolation "
-            "and return cleanup only; trajectory geometry is unchanged."
-        )
+        if (
+            self.trajectory_reference_mode != 'session_relative'
+            or self.session_relative_apply_to_startup_and_return
+        ):
+            self.x_start_des = self.session_home.copy()
+        if self.trajectory_reference_mode == 'session_relative':
+            anchor_delta = (
+                self.session_anchor_delta
+                if self.session_anchor_delta is not None
+                else self.session_home
+                - self.session_relative_nominal_trajectory_start
+            )
+            shifted_center = (
+                self.session_relative_nominal_circle_center + anchor_delta
+            )
+            self.get_logger().warn(
+                "[SessionAnchor] Session trajectory start adopted: "
+                f"source={source}, "
+                f"trajectory_reference_mode={self.trajectory_reference_mode}, "
+                "session_trajectory_start="
+                f"{self.session_home.tolist()}, "
+                "nominal_trajectory_start="
+                f"{self.session_relative_nominal_trajectory_start.tolist()}, "
+                f"anchor_delta={np.asarray(anchor_delta, dtype=float).tolist()}, "
+                "shifted_circle_center="
+                f"{np.asarray(shifted_center, dtype=float).tolist()}; "
+                "startup interpolation and post-run return target the session "
+                "trajectory start; trajectory_publisher shifts the whole "
+                "trajectory by the same anchor_delta (translation only)."
+            )
+        else:
+            self.get_logger().warn(
+                "[SessionHome] Session home adopted: "
+                f"source={source}, pose={self.session_home.tolist()}, "
+                f"nominal_fixed_start={self.x_nominal_fixed_start.tolist()}; "
+                "session home replaces the fixed start for startup interpolation "
+                "and return cleanup only; trajectory geometry is unchanged."
+            )
 
     def _refuse_session_home(self, reason):
         if not self._session_home_refused:
@@ -3490,7 +3935,7 @@ class CartesianImpedanceController(Node):
         )
         if (
             len(self._session_home_capture_positions)
-            < self.session_home_capture_stability_samples
+            < self.effective_capture_stability_samples
         ):
             return False
 
@@ -3499,14 +3944,14 @@ class CartesianImpedanceController(Node):
         position_std = samples.std(axis=0)
         max_std = float(np.max(position_std))
         if (
-            self.session_home_capture_requires_stable_state
-            and max_std > self.session_home_capture_stability_position_std_m
+            self.effective_capture_requires_stable_state
+            and max_std > self.effective_capture_stability_position_std_m
         ):
             self._refuse_session_home(
                 "capture_first stability check failed: "
                 f"max_position_std={max_std:.6f} m exceeds "
-                "session_home_capture_stability_position_std_m="
-                f"{self.session_home_capture_stability_position_std_m:.6f} m."
+                "capture stability_position_std_m="
+                f"{self.effective_capture_stability_position_std_m:.6f} m."
             )
             return False
 

@@ -25,8 +25,23 @@ STARTUP_LINEAR_SPEED="0.005"
 STARTUP_DISTANCE_WARN_M="0.100"
 STARTUP_DISTANCE_REFUSE_M="0.300"
 STARTUP_DISTANCE_REFUSE_ENABLED="true"
+TRAJECTORY_REFERENCE_MODE="fixed_absolute"
+TRAJECTORY_REFERENCE_MODE_EXPLICIT=0
+SESSION_RELATIVE_SHORTCUT=0
 SESSION_HOME_MODE="fixed"
+SESSION_HOME_MODE_EXPLICIT=0
 SESSION_HOME_PATH=""
+SESSION_RELATIVE_MAX_ANCHOR_DELTA_M="0.250"
+SESSION_RELATIVE_WARN_ANCHOR_DELTA_M="0.150"
+SESSION_RELATIVE_MIN_Z="0.45"
+SESSION_RELATIVE_MAX_Z="0.85"
+SESSION_RELATIVE_REQUIRES_STABLE_STATE="true"
+SESSION_RELATIVE_STABILITY_SAMPLES="10"
+SESSION_RELATIVE_STABILITY_POSITION_STD_M="0.003"
+SESSION_RELATIVE_APPLY_TO_STARTUP_AND_RETURN="true"
+SESSION_RELATIVE_APPLY_TO_TRAJECTORY_CENTER="true"
+SESSION_RELATIVE_NOMINAL_TRAJECTORY_START_XYZ="[0.3077306122468523, 0.043799833015107294, 0.6648721535244662]"
+SESSION_RELATIVE_NOMINAL_CIRCLE_CENTER_XYZ="[0.3, 0.0, 0.65]"
 NORMAL_RUN_START_GATE_ENABLED="false"
 NORMAL_RUN_START_WARN_M="0.100"
 NORMAL_RUN_START_REFUSE_M="0.150"
@@ -46,7 +61,10 @@ Usage:
 Options:
   --plan                 Print the planned Terminal-C-only runs and exit.
   --repeat N             Repeat each selected source N times. Default: 1.
-  --source VALUE         local, cloud, combined, or all. Default: all.
+  --source VALUE         local, cloud, combined, triple, triple_dynamic, or all.
+                         Default: all. all preserves the older
+                         local/cloud/combined matrix; use --source triple
+                         explicitly for triple fusion on the same anchor.
   --scale VALUE          GP compensation scale. Default: 1.0.
   --clip VALUE           GP compensation clip in Nm. Default: 0.5.
   --model-dir PATH       GP model directory.
@@ -68,6 +86,17 @@ Options:
   --startup-distance-refuse-enabled true|false
                          Refuse startup when far from the fixed start.
                          Default: true.
+  --trajectory-reference-mode fixed_absolute|session_relative
+                         fixed_absolute keeps the old absolute trajectory;
+                         session_relative shifts start/center from the shared
+                         anchor JSON. Default: fixed_absolute.
+  --session-relative     Convenience mode for repeated matrix runs. Sets
+                         trajectory_reference_mode=session_relative,
+                         post-run return enabled, strict run-start gate enabled,
+                         normal_run_start_refuse_m=0.150, and
+                         emergency_return_start_refuse_m=0.300. If
+                         --session-home-mode was not explicit, the first case
+                         uses capture_first and later cases load the same JSON.
   --session-home-mode fixed|capture_first|load
                          Session home source. capture_first captures the
                          current safe EE pose on the first case and later
@@ -199,9 +228,24 @@ while (($# > 0)); do
       STARTUP_DISTANCE_REFUSE_ENABLED="$2"
       shift
       ;;
+    --trajectory-reference-mode)
+      [[ $# -ge 2 ]] || die "--trajectory-reference-mode requires fixed_absolute or session_relative"
+      TRAJECTORY_REFERENCE_MODE="$2"
+      TRAJECTORY_REFERENCE_MODE_EXPLICIT=1
+      shift
+      ;;
+    --session-relative)
+      SESSION_RELATIVE_SHORTCUT=1
+      TRAJECTORY_REFERENCE_MODE="session_relative"
+      NORMAL_RUN_START_GATE_ENABLED="true"
+      NORMAL_RUN_START_REFUSE_M="0.150"
+      EMERGENCY_RETURN_START_REFUSE_M="0.300"
+      POST_RUN_RETURN="true"
+      ;;
     --session-home-mode)
       [[ $# -ge 2 ]] || die "--session-home-mode requires fixed, capture_first, or load"
       SESSION_HOME_MODE="$2"
+      SESSION_HOME_MODE_EXPLICIT=1
       shift
       ;;
     --session-home-path)
@@ -262,12 +306,24 @@ done
 [[ "${REPEAT_COUNT}" =~ ^[1-9][0-9]*$ ]] || die "--repeat must be a positive integer"
 
 case "${SOURCE_FILTER}" in
-  local|cloud|combined|all)
+  local|cloud|combined|triple|triple_dynamic|all)
     ;;
   *)
-    die "--source must be local, cloud, combined, or all"
+    die "--source must be local, cloud, combined, triple, triple_dynamic, or all"
     ;;
 esac
+
+case "${TRAJECTORY_REFERENCE_MODE}" in
+  fixed_absolute|session_relative)
+    ;;
+  *)
+    die "--trajectory-reference-mode must be fixed_absolute or session_relative"
+    ;;
+esac
+
+if ((SESSION_RELATIVE_SHORTCUT)) && [[ "${TRAJECTORY_REFERENCE_MODE}" != "session_relative" ]]; then
+  die "--session-relative conflicts with --trajectory-reference-mode fixed_absolute"
+fi
 
 case "${STARTUP_DISTANCE_REFUSE_ENABLED}" in
   true|false)
@@ -276,6 +332,14 @@ case "${STARTUP_DISTANCE_REFUSE_ENABLED}" in
     die "--startup-distance-refuse-enabled must be true or false"
     ;;
 esac
+
+if [[ "${TRAJECTORY_REFERENCE_MODE}" == "session_relative" ]]; then
+  if (( ! SESSION_HOME_MODE_EXPLICIT )); then
+    SESSION_HOME_MODE="capture_first"
+  elif [[ "${SESSION_HOME_MODE}" == "fixed" ]]; then
+    die "trajectory_reference_mode=session_relative requires --session-home-mode capture_first or load"
+  fi
+fi
 
 case "${SESSION_HOME_MODE}" in
   fixed|capture_first|load)
@@ -359,7 +423,7 @@ print_repo_status() {
 
 init_manifest() {
   mkdir -p "${OUTPUT_ROOT}"
-  printf 'case_name,run_name,data_output_dir,source,scale,clip,j7_disabled,control_frequency,trajectory_publish_rate,state_parameter_publish_rate,session_home_mode,session_home_path,post_run_return,status\n' > "${MANIFEST_PATH}"
+  printf 'case_name,run_name,data_output_dir,source,scale,clip,j7_disabled,control_frequency,trajectory_publish_rate,state_parameter_publish_rate,trajectory_reference_mode,session_home_mode,session_home_path,post_run_return,status\n' > "${MANIFEST_PATH}"
 }
 
 append_manifest_row() {
@@ -369,9 +433,10 @@ append_manifest_row() {
   local source="$4"
   local effective_session_home_mode="$5"
   local status="$6"
-  printf '%s,%s,%s,%s,%s,%s,true,50,50,50,%s,%s,%s,%s\n' \
+  printf '%s,%s,%s,%s,%s,%s,true,50,50,50,%s,%s,%s,%s,%s\n' \
     "${case_name}" "${run_name}" "${data_output_dir}" "${source}" \
     "${GP_SCALE}" "${GP_CLIP}" \
+    "${TRAJECTORY_REFERENCE_MODE}" \
     "${effective_session_home_mode}" "${SESSION_HOME_PATH}" \
     "${POST_RUN_RETURN}" "${status}" >> "${MANIFEST_PATH}"
 }
@@ -419,6 +484,7 @@ run_one_case() {
   local data_output_dir
   local effective_session_home_mode
   local effective_capture_enabled
+  local effective_session_relative_capture_enabled
 
   # capture_first 只对本次 session 的第一个 case 生效；
   # 之后的 case 自动改用 load 复用同一个 session_home.json。
@@ -430,6 +496,11 @@ run_one_case() {
     effective_capture_enabled="true"
   else
     effective_capture_enabled="false"
+  fi
+  if [[ "${TRAJECTORY_REFERENCE_MODE}" == "session_relative" && "${effective_session_home_mode}" == "capture_first" ]]; then
+    effective_session_relative_capture_enabled="true"
+  else
+    effective_session_relative_capture_enabled="false"
   fi
   SESSION_CASE_INDEX=$((SESSION_CASE_INDEX + 1))
 
@@ -453,9 +524,22 @@ run_one_case() {
     "startup_distance_warn_m:=${STARTUP_DISTANCE_WARN_M}"
     "startup_distance_refuse_m:=${STARTUP_DISTANCE_REFUSE_M}"
     "startup_distance_refuse_enabled:=${STARTUP_DISTANCE_REFUSE_ENABLED}"
+    "trajectory_reference_mode:=${TRAJECTORY_REFERENCE_MODE}"
     "session_home_mode:=${effective_session_home_mode}"
     "session_home_path:=${SESSION_HOME_PATH}"
     "session_home_capture_enabled:=${effective_capture_enabled}"
+    "session_relative_capture_enabled:=${effective_session_relative_capture_enabled}"
+    "session_relative_max_anchor_delta_m:=${SESSION_RELATIVE_MAX_ANCHOR_DELTA_M}"
+    "session_relative_warn_anchor_delta_m:=${SESSION_RELATIVE_WARN_ANCHOR_DELTA_M}"
+    "session_relative_min_z:=${SESSION_RELATIVE_MIN_Z}"
+    "session_relative_max_z:=${SESSION_RELATIVE_MAX_Z}"
+    "session_relative_requires_stable_state:=${SESSION_RELATIVE_REQUIRES_STABLE_STATE}"
+    "session_relative_stability_samples:=${SESSION_RELATIVE_STABILITY_SAMPLES}"
+    "session_relative_stability_position_std_m:=${SESSION_RELATIVE_STABILITY_POSITION_STD_M}"
+    "session_relative_apply_to_startup_and_return:=${SESSION_RELATIVE_APPLY_TO_STARTUP_AND_RETURN}"
+    "session_relative_apply_to_trajectory_center:=${SESSION_RELATIVE_APPLY_TO_TRAJECTORY_CENTER}"
+    "session_relative_nominal_trajectory_start_xyz:=${SESSION_RELATIVE_NOMINAL_TRAJECTORY_START_XYZ}"
+    "session_relative_nominal_circle_center_xyz:=${SESSION_RELATIVE_NOMINAL_CIRCLE_CENTER_XYZ}"
     "normal_run_start_gate_enabled:=${NORMAL_RUN_START_GATE_ENABLED}"
     "normal_run_start_warn_m:=${NORMAL_RUN_START_WARN_M}"
     "normal_run_start_refuse_m:=${NORMAL_RUN_START_REFUSE_M}"
@@ -487,9 +571,23 @@ run_one_case() {
   echo "startup_distance_warn_m=${STARTUP_DISTANCE_WARN_M}"
   echo "startup_distance_refuse_m=${STARTUP_DISTANCE_REFUSE_M}"
   echo "startup_distance_refuse_enabled=${STARTUP_DISTANCE_REFUSE_ENABLED}"
+  echo "trajectory_reference_mode=${TRAJECTORY_REFERENCE_MODE}"
   echo "session_home_mode=${effective_session_home_mode}"
-  echo "session_home_path=${SESSION_HOME_PATH}"
+  echo "session_home/session_anchor path=${SESSION_HOME_PATH}"
+  echo "session_relative_capture_enabled=${effective_session_relative_capture_enabled}"
+  echo "session_relative_max_anchor_delta_m=${SESSION_RELATIVE_MAX_ANCHOR_DELTA_M}"
+  echo "session_relative_warn_anchor_delta_m=${SESSION_RELATIVE_WARN_ANCHOR_DELTA_M}"
+  echo "session_relative_min_z=${SESSION_RELATIVE_MIN_Z}"
+  echo "session_relative_max_z=${SESSION_RELATIVE_MAX_Z}"
+  echo "session_relative_requires_stable_state=${SESSION_RELATIVE_REQUIRES_STABLE_STATE}"
+  echo "session_relative_stability_samples=${SESSION_RELATIVE_STABILITY_SAMPLES}"
+  echo "session_relative_stability_position_std_m=${SESSION_RELATIVE_STABILITY_POSITION_STD_M}"
+  echo "session_relative_apply_to_startup_and_return=${SESSION_RELATIVE_APPLY_TO_STARTUP_AND_RETURN}"
+  echo "session_relative_apply_to_trajectory_center=${SESSION_RELATIVE_APPLY_TO_TRAJECTORY_CENTER}"
+  echo "session_relative_nominal_trajectory_start_xyz=${SESSION_RELATIVE_NOMINAL_TRAJECTORY_START_XYZ}"
+  echo "session_relative_nominal_circle_center_xyz=${SESSION_RELATIVE_NOMINAL_CIRCLE_CENTER_XYZ}"
   echo "normal_run_start_gate_enabled=${NORMAL_RUN_START_GATE_ENABLED}"
+  echo "normal_run_start_warn_m=${NORMAL_RUN_START_WARN_M}"
   echo "normal_run_start_refuse_m=${NORMAL_RUN_START_REFUSE_M}"
   echo "emergency_return_start_refuse_m=${EMERGENCY_RETURN_START_REFUSE_M}"
   echo "post_run_return_to_session_home_enabled=${POST_RUN_RETURN}"
@@ -555,6 +653,20 @@ main() {
   echo "ROS_DOMAIN_ID=${ROS_DOMAIN_ID}"
   echo "Model dir: ${MODEL_DIR}"
   echo "Cleanup between successful runs: disabled"
+  echo "== Trajectory reference / session anchor =="
+  echo "trajectory_reference_mode=${TRAJECTORY_REFERENCE_MODE}"
+  echo "session_home/session_anchor path=${SESSION_HOME_PATH}"
+  echo "session_relative_max_anchor_delta_m=${SESSION_RELATIVE_MAX_ANCHOR_DELTA_M}"
+  echo "session_relative_warn_anchor_delta_m=${SESSION_RELATIVE_WARN_ANCHOR_DELTA_M}"
+  echo "session_relative_min_z=${SESSION_RELATIVE_MIN_Z}"
+  echo "session_relative_max_z=${SESSION_RELATIVE_MAX_Z}"
+  echo "session_relative_requires_stable_state=${SESSION_RELATIVE_REQUIRES_STABLE_STATE}"
+  echo "session_relative_stability_samples=${SESSION_RELATIVE_STABILITY_SAMPLES}"
+  echo "session_relative_stability_position_std_m=${SESSION_RELATIVE_STABILITY_POSITION_STD_M}"
+  echo "session_relative_apply_to_startup_and_return=${SESSION_RELATIVE_APPLY_TO_STARTUP_AND_RETURN}"
+  echo "session_relative_apply_to_trajectory_center=${SESSION_RELATIVE_APPLY_TO_TRAJECTORY_CENTER}"
+  echo "session_relative_nominal_trajectory_start_xyz=${SESSION_RELATIVE_NOMINAL_TRAJECTORY_START_XYZ}"
+  echo "session_relative_nominal_circle_center_xyz=${SESSION_RELATIVE_NOMINAL_CIRCLE_CENTER_XYZ}"
   echo "== Session home / return cleanup =="
   echo "session_home_mode=${SESSION_HOME_MODE}"
   echo "session_home_path=${SESSION_HOME_PATH}"
