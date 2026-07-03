@@ -358,6 +358,21 @@ append_manifest_row() {
     "${POST_RUN_RETURN}" "${status}" >> "${MANIFEST_PATH}"
 }
 
+cpp_relayer_list_shows_active() {
+  # ros2controlcli 输出可能带 ANSI 颜色码（例如 ^[[92mcpp_relayer...^[[0m 和
+  # ^[[92mactive^[[0m），直接按字段比较会误报 inactive。先剥离颜色码和 \r，
+  # 再要求首字段是 cpp_relayer 且末字段（state）是 active；中间的
+  # controller type 列（cpp_relayer/CPPRelayer）不参与匹配。
+  awk '
+    {
+      gsub(/\033\[[0-9;]*m/, "")
+      sub(/\r$/, "")
+    }
+    $1 == "cpp_relayer" && $NF == "active" { found = 1 }
+    END { exit found ? 0 : 1 }
+  ' "$@"
+}
+
 check_cpp_relayer_active() {
   local output
   local controllers_log
@@ -372,7 +387,7 @@ check_cpp_relayer_active() {
   printf '%s\n' "${output}" > "${controllers_log}"
   printf '%s\n' "${output}"
   echo "Controller-list diagnostic saved to ${controllers_log}"
-  if ! printf '%s\n' "${output}" | awk '$1 == "cpp_relayer" && $NF == "active" {found=1} END {exit found ? 0 : 1}'; then
+  if ! cpp_relayer_list_shows_active "${controllers_log}"; then
     die "cpp_relayer is not active. Run Terminal B load/activate sequence before continuing."
   fi
 }

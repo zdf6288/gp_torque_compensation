@@ -18,8 +18,24 @@ log() {
   printf '[cpp_relayer-cleanup] %s\n' "$*"
 }
 
+strip_ansi_and_cr() {
+  # ros2controlcli 输出可能带 ANSI 颜色码（如 ^[[92mactive^[[0m）和 \r，
+  # 不剥离会导致字段匹配失败，把 active 的 cpp_relayer 误判为未加载/未激活，
+  # 从而静默跳过 deactivate 清理。
+  awk '{ gsub(/\033\[[0-9;]*m/, ""); sub(/\r$/, "") } 1'
+}
+
 cpp_relayer_is_active() {
-  awk '$1 == "cpp_relayer" && $NF == "active" {found=1} END {exit found ? 0 : 1}'
+  # 先剥离颜色码/\r 再匹配：首字段必须是 cpp_relayer，末字段（state）必须是
+  # active；中间的 controller type 列（cpp_relayer/CPPRelayer）不参与匹配。
+  awk '
+    {
+      gsub(/\033\[[0-9;]*m/, "")
+      sub(/\r$/, "")
+    }
+    $1 == "cpp_relayer" && $NF == "active" { found = 1 }
+    END { exit found ? 0 : 1 }
+  '
 }
 
 source_environment() {
@@ -54,7 +70,7 @@ printf '%s\n' "${controllers_output}" > "${controllers_log}"
 log "Controller-list diagnostic saved to ${controllers_log}"
 printf '%s\n' "${controllers_output}"
 
-cpp_line="$(printf '%s\n' "${controllers_output}" | awk '$1 == "cpp_relayer" {print; exit}')"
+cpp_line="$(printf '%s\n' "${controllers_output}" | strip_ansi_and_cr | awk '$1 == "cpp_relayer" {print; exit}')"
 if [[ -z "${cpp_line}" ]]; then
   log "cpp_relayer is not loaded; no cleanup action is needed."
   exit 0
