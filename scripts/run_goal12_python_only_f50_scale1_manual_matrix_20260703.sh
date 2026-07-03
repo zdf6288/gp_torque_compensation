@@ -116,6 +116,24 @@ die() {
   exit 1
 }
 
+confirm_start_or_die() {
+  # 真机启动确认必须来自操作员终端。历史 bug：主循环曾用
+  # `done < <(selected_sources)` 重定向整个循环体的 stdin，导致这里的 read
+  # 读到 EOF 后被 set -e 静默退出。现在显式从 /dev/tty 读取；拿不到终端或
+  # 读取失败一律大声失败，绝不静默通过，也绝不自动继续。
+  local answer=""
+  echo "Type START to launch this real-robot Python-only case, or Ctrl+C to stop."
+  if [[ ! -e /dev/tty ]]; then
+    die "no controlling terminal (/dev/tty unavailable); refusing to launch without an explicit interactive START"
+  fi
+  if ! read -r -p "Type START to launch this real-robot Python-only case: " answer < /dev/tty; then
+    die "could not read START confirmation from /dev/tty (no interactive terminal?); refusing to launch"
+  fi
+  if [[ "${answer}" != "START" ]]; then
+    die "operator did not type START"
+  fi
+}
+
 while (($# > 0)); do
   case "$1" in
     --plan)
@@ -489,10 +507,8 @@ run_one_case() {
   fi
 
   check_cpp_relayer_active
-  read -r -p "Type START to run this Terminal-C case, or Ctrl+C to stop: " answer
-  if [[ "${answer}" != "START" ]]; then
-    die "operator did not type START"
-  fi
+  echo "cpp_relayer active check passed; proceeding to START confirmation."
+  confirm_start_or_die
 
   mkdir -p "${data_output_dir}"
   append_manifest_row "${case_name}" "${run_name}" "${data_output_dir}" "${source}" "${effective_session_home_mode}" "starting"
@@ -557,13 +573,18 @@ main() {
   fi
   echo
 
+  # 用 mapfile 代替 `done < <(selected_sources)`：后者会把整个循环体
+  # （包括 run_one_case 里的 START 确认 read）的 stdin 重定向到
+  # process substitution，导致确认读到 EOF 后 set -e 静默退出。
+  local sources=()
+  mapfile -t sources < <(selected_sources)
   local source
   local repeat_index
-  while IFS= read -r source; do
+  for source in "${sources[@]}"; do
     for ((repeat_index = 1; repeat_index <= REPEAT_COUNT; repeat_index++)); do
       run_one_case "${source}" "${repeat_index}"
     done
-  done < <(selected_sources)
+  done
 }
 
 main "$@"
