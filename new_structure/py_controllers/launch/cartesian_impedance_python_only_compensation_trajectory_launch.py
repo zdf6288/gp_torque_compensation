@@ -22,6 +22,14 @@ def generate_launch_description():
     torque_rate_limit_nm_per_s = LaunchConfiguration(
         'torque_rate_limit_nm_per_s'
     )
+    startup_linear_speed = LaunchConfiguration('startup_linear_speed')
+    startup_distance_warn_m = LaunchConfiguration('startup_distance_warn_m')
+    startup_distance_refuse_m = LaunchConfiguration(
+        'startup_distance_refuse_m'
+    )
+    startup_distance_refuse_enabled = LaunchConfiguration(
+        'startup_distance_refuse_enabled'
+    )
     gp_model_dir = LaunchConfiguration('gp_model_dir')
     gp_compensation_source = LaunchConfiguration('gp_compensation_source')
     gp_compensation_scale = LaunchConfiguration('gp_compensation_scale')
@@ -354,7 +362,18 @@ def generate_launch_description():
             'csv_output_profile': ParameterValue(
                 csv_output_profile, value_type=str
             ),
-            'startup_distance_refuse_enabled': False,
+            'startup_linear_speed': ParameterValue(
+                startup_linear_speed, value_type=float
+            ),
+            'startup_distance_warn_m': ParameterValue(
+                startup_distance_warn_m, value_type=float
+            ),
+            'startup_distance_refuse_m': ParameterValue(
+                startup_distance_refuse_m, value_type=float
+            ),
+            'startup_distance_refuse_enabled': ParameterValue(
+                startup_distance_refuse_enabled, value_type=bool
+            ),
             'startup_torque_clip_nm': 10.0,
             'startup_torque_rate_limit_from_zero': True,
             'torque_rate_limit_enabled': True,
@@ -448,6 +467,26 @@ def generate_launch_description():
             'torque_rate_limit_nm_per_s',
             default_value='20.0',
             description='Per-joint torque slew-rate limit in Nm/s.',
+        ),
+        DeclareLaunchArgument(
+            'startup_linear_speed',
+            default_value='0.005',
+            description='Startup move-to-fixed-start linear speed in m/s.',
+        ),
+        DeclareLaunchArgument(
+            'startup_distance_warn_m',
+            default_value='0.100',
+            description='Warn threshold for distance to fixed start in m.',
+        ),
+        DeclareLaunchArgument(
+            'startup_distance_refuse_m',
+            default_value='0.300',
+            description='Hard-refuse threshold for distance to fixed start in m.',
+        ),
+        DeclareLaunchArgument(
+            'startup_distance_refuse_enabled',
+            default_value='true',
+            description='Refuse startup when distance exceeds startup_distance_refuse_m.',
         ),
         DeclareLaunchArgument(
             'gp_model_dir',

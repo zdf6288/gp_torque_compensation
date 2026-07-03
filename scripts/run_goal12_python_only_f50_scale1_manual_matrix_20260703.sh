@@ -19,6 +19,12 @@ GP_CLIP="0.5"
 MODEL_DIR="${REPO_ROOT}/outputs/gp_models_extracted_20260625_164901/gp_models"
 OUTPUT_ROOT="outputs/manual_compensation"
 NO_CLEANUP=1
+TRANSITION_DURATION="60.0"
+TORQUE_RATE_LIMIT_NM_PER_S="20.0"
+STARTUP_LINEAR_SPEED="0.005"
+STARTUP_DISTANCE_WARN_M="0.100"
+STARTUP_DISTANCE_REFUSE_M="0.300"
+STARTUP_DISTANCE_REFUSE_ENABLED="true"
 
 usage() {
   cat <<'USAGE'
@@ -33,12 +39,34 @@ Options:
   --clip VALUE           GP compensation clip in Nm. Default: 0.5.
   --model-dir PATH       GP model directory.
   --output-root DIR      Output root. Default: outputs/manual_compensation.
+  --transition-duration VALUE
+                         Fixed-start to trajectory-start transition duration
+                         in seconds. Default: 60.0.
+  --torque-rate-limit-nm-per-s VALUE
+                         Per-joint torque slew-rate limit in Nm/s. Default: 20.0.
+  --startup-linear-speed VALUE
+                         Startup move-to-fixed-start linear speed in m/s.
+                         Default: 0.005.
+  --startup-distance-warn-m VALUE
+                         Warn threshold for distance to fixed start in m.
+                         Default: 0.100.
+  --startup-distance-refuse-m VALUE
+                         Hard-refuse threshold for distance to fixed start in m.
+                         Default: 0.300.
+  --startup-distance-refuse-enabled true|false
+                         Refuse startup when far from the fixed start.
+                         Default: true.
   --no-cleanup           Keep cpp_relayer active between runs. This is the default.
   -h, --help             Show this help.
 
 Before running:
   Terminal A must already own external IMPL bringup/controller_manager.
   Terminal B must already have cpp_relayer active.
+
+Safety:
+  scale1 is NOT a post-reflex first rerun. After a Franka reflex, rerun the
+  chain in order: predict-only/no-GP -> scale0.25 -> scale0.5 -> scale1.
+  Far-start protection is enabled by default (startup_distance_refuse_enabled=true).
 USAGE
 }
 
@@ -82,6 +110,36 @@ while (($# > 0)); do
       OUTPUT_ROOT="$2"
       shift
       ;;
+    --transition-duration)
+      [[ $# -ge 2 ]] || die "--transition-duration requires a value"
+      TRANSITION_DURATION="$2"
+      shift
+      ;;
+    --torque-rate-limit-nm-per-s)
+      [[ $# -ge 2 ]] || die "--torque-rate-limit-nm-per-s requires a value"
+      TORQUE_RATE_LIMIT_NM_PER_S="$2"
+      shift
+      ;;
+    --startup-linear-speed)
+      [[ $# -ge 2 ]] || die "--startup-linear-speed requires a value"
+      STARTUP_LINEAR_SPEED="$2"
+      shift
+      ;;
+    --startup-distance-warn-m)
+      [[ $# -ge 2 ]] || die "--startup-distance-warn-m requires a value"
+      STARTUP_DISTANCE_WARN_M="$2"
+      shift
+      ;;
+    --startup-distance-refuse-m)
+      [[ $# -ge 2 ]] || die "--startup-distance-refuse-m requires a value"
+      STARTUP_DISTANCE_REFUSE_M="$2"
+      shift
+      ;;
+    --startup-distance-refuse-enabled)
+      [[ $# -ge 2 ]] || die "--startup-distance-refuse-enabled requires true or false"
+      STARTUP_DISTANCE_REFUSE_ENABLED="$2"
+      shift
+      ;;
     --no-cleanup)
       NO_CLEANUP=1
       ;;
@@ -103,6 +161,14 @@ case "${SOURCE_FILTER}" in
     ;;
   *)
     die "--source must be local, cloud, combined, or all"
+    ;;
+esac
+
+case "${STARTUP_DISTANCE_REFUSE_ENABLED}" in
+  true|false)
+    ;;
+  *)
+    die "--startup-distance-refuse-enabled must be true or false"
     ;;
 esac
 
@@ -222,8 +288,12 @@ run_one_case() {
     "control_frequency:=50"
     "trajectory_publish_rate:=50"
     "state_parameter_publish_rate:=50"
-    "transition_duration:=10.0"
-    "torque_rate_limit_nm_per_s:=20.0"
+    "transition_duration:=${TRANSITION_DURATION}"
+    "torque_rate_limit_nm_per_s:=${TORQUE_RATE_LIMIT_NM_PER_S}"
+    "startup_linear_speed:=${STARTUP_LINEAR_SPEED}"
+    "startup_distance_warn_m:=${STARTUP_DISTANCE_WARN_M}"
+    "startup_distance_refuse_m:=${STARTUP_DISTANCE_REFUSE_M}"
+    "startup_distance_refuse_enabled:=${STARTUP_DISTANCE_REFUSE_ENABLED}"
     "gp_model_dir:=${MODEL_DIR}"
     "gp_compensation_source:=${source}"
     "gp_compensation_scale:=${GP_SCALE}"
@@ -240,6 +310,12 @@ run_one_case() {
   echo "run_name: ${run_name}"
   echo "data_output_dir: ${data_output_dir}"
   echo "source: ${source}, scale: ${GP_SCALE}, clip: ${GP_CLIP}, J7OFF: true"
+  echo "transition_duration=${TRANSITION_DURATION}"
+  echo "torque_rate_limit_nm_per_s=${TORQUE_RATE_LIMIT_NM_PER_S}"
+  echo "startup_linear_speed=${STARTUP_LINEAR_SPEED}"
+  echo "startup_distance_warn_m=${STARTUP_DISTANCE_WARN_M}"
+  echo "startup_distance_refuse_m=${STARTUP_DISTANCE_REFUSE_M}"
+  echo "startup_distance_refuse_enabled=${STARTUP_DISTANCE_REFUSE_ENABLED}"
   echo "This will start only the Python-only compensation trajectory launch."
   echo "========================================================================"
 
@@ -274,8 +350,22 @@ run_one_case() {
   echo "cpp_relayer is intentionally left active; next iteration will verify it before launch."
 }
 
+print_scale1_safety_warning() {
+  echo "########################################################################"
+  echo "# SAFETY WARNING: scale1 runner"
+  echo "# scale1 is NOT a post-reflex first rerun. After any Franka reflex,"
+  echo "# rerun the chain in order:"
+  echo "#   predict-only/no-GP -> scale0.25 -> scale0.5 -> scale1"
+  echo "# Far-start protection is enabled by default:"
+  echo "#   startup_distance_refuse_enabled=${STARTUP_DISTANCE_REFUSE_ENABLED}"
+  echo "#   (refuse threshold startup_distance_refuse_m=${STARTUP_DISTANCE_REFUSE_M} m)"
+  echo "########################################################################"
+  echo
+}
+
 main() {
   print_repo_status
+  print_scale1_safety_warning
   if ((PLAN_ONLY)); then
     echo "Plan mode: no output directories or manifest files will be created."
   else
