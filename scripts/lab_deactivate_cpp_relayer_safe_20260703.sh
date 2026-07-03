@@ -18,6 +18,10 @@ log() {
   printf '[cpp_relayer-cleanup] %s\n' "$*"
 }
 
+cpp_relayer_is_active() {
+  awk '$1 == "cpp_relayer" && $NF == "active" {found=1} END {exit found ? 0 : 1}'
+}
+
 source_environment() {
   set +u
   # shellcheck source=/opt/ros/humble/setup.bash
@@ -35,14 +39,19 @@ log "RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION}"
 log "ROS_DOMAIN_ID=${ROS_DOMAIN_ID}"
 log "Checking /controller_manager reachability with timeout."
 
+controllers_log="outputs/runtime_logs/cpp_relayer_cleanup_list_controllers_$(date +%Y%m%d_%H%M%S).txt"
 if ! controllers_output="$(
   timeout 5 ros2 control list_controllers --controller-manager /controller_manager 2>&1
 )"; then
+  printf '%s\n' "${controllers_output}" > "${controllers_log}"
   log "/controller_manager is not reachable or list_controllers timed out."
+  log "Controller-list diagnostic saved to ${controllers_log}"
   log "No cleanup action was taken; exiting successfully because this helper is best-effort."
   exit 0
 fi
 
+printf '%s\n' "${controllers_output}" > "${controllers_log}"
+log "Controller-list diagnostic saved to ${controllers_log}"
 printf '%s\n' "${controllers_output}"
 
 cpp_line="$(printf '%s\n' "${controllers_output}" | awk '$1 == "cpp_relayer" {print; exit}')"
@@ -51,10 +60,10 @@ if [[ -z "${cpp_line}" ]]; then
   exit 0
 fi
 
-cpp_state="$(printf '%s\n' "${cpp_line}" | awk '{print $3}')"
+cpp_state="$(printf '%s\n' "${cpp_line}" | awk '{print $NF}')"
 log "cpp_relayer state appears to be '${cpp_state}'."
 
-if [[ "${cpp_state}" != "active" ]]; then
+if ! printf '%s\n' "${controllers_output}" | cpp_relayer_is_active; then
   log "cpp_relayer is not active; no deactivate command is needed."
   exit 0
 fi
@@ -67,4 +76,3 @@ else
   log "Check Terminal A/B state manually before any further robot-facing run."
   exit 1
 fi
-

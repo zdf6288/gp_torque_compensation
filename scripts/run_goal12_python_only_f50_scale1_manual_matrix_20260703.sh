@@ -184,12 +184,19 @@ append_manifest_row() {
 
 check_cpp_relayer_active() {
   local output
+  local controllers_log
+  controllers_log="outputs/runtime_logs/grouped_runner_list_controllers_$(date +%Y%m%d_%H%M%S).txt"
+  mkdir -p outputs/runtime_logs
   if ! output="$(timeout 5 ros2 control list_controllers --controller-manager /controller_manager 2>&1)"; then
+    printf '%s\n' "${output}" > "${controllers_log}"
     printf '%s\n' "${output}"
+    echo "Controller-list diagnostic saved to ${controllers_log}"
     die "Cannot reach external controller manager. Start/check Terminal A before Terminal C."
   fi
+  printf '%s\n' "${output}" > "${controllers_log}"
   printf '%s\n' "${output}"
-  if ! printf '%s\n' "${output}" | awk '$1 == "cpp_relayer" && $3 == "active" {found=1} END {exit found ? 0 : 1}'; then
+  echo "Controller-list diagnostic saved to ${controllers_log}"
+  if ! printf '%s\n' "${output}" | awk '$1 == "cpp_relayer" && $NF == "active" {found=1} END {exit found ? 0 : 1}'; then
     die "cpp_relayer is not active. Run Terminal B load/activate sequence before continuing."
   fi
 }
