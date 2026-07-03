@@ -25,6 +25,18 @@ STARTUP_LINEAR_SPEED="0.005"
 STARTUP_DISTANCE_WARN_M="0.100"
 STARTUP_DISTANCE_REFUSE_M="0.300"
 STARTUP_DISTANCE_REFUSE_ENABLED="true"
+SESSION_HOME_MODE="fixed"
+SESSION_HOME_PATH=""
+NORMAL_RUN_START_GATE_ENABLED="false"
+NORMAL_RUN_START_WARN_M="0.100"
+NORMAL_RUN_START_REFUSE_M="0.150"
+EMERGENCY_RETURN_START_REFUSE_M="0.300"
+RETURN_ONLY_IF_TOO_FAR_ENABLED="false"
+POST_RUN_RETURN="false"
+POST_RUN_RETURN_LINEAR_SPEED="0.005"
+POST_RUN_RETURN_TIMEOUT_SEC="60.0"
+POST_RUN_RETURN_HOLD_SEC="2.0"
+SESSION_CASE_INDEX=0
 
 usage() {
   cat <<'USAGE'
@@ -56,6 +68,35 @@ Options:
   --startup-distance-refuse-enabled true|false
                          Refuse startup when far from the fixed start.
                          Default: true.
+  --session-home-mode fixed|capture_first|load
+                         Session home source. capture_first captures the
+                         current safe EE pose on the first case and later
+                         cases in this invocation automatically use load.
+                         Default: fixed.
+  --session-home-path PATH
+                         Session home JSON path. Default when mode is not
+                         fixed: <output-root>/<stamp>/session_home.json.
+  --normal-run-start-refuse-m VALUE
+                         Refuse official GP run above this distance to the
+                         session home (needs --strict-start to enable the
+                         gate). Default: 0.150.
+  --emergency-return-start-refuse-m VALUE
+                         Refuse all automatic motion above this distance to
+                         the session home. Default: 0.300.
+  --post-run-return true|false
+                         Slowly return to session home after each run before
+                         exit. Default: false.
+  --post-run-return-linear-speed VALUE
+                         Post-run return linear speed in m/s. Default: 0.005.
+  --post-run-return-timeout-sec VALUE
+                         Post-run return timeout in seconds. Default: 60.0.
+  --post-run-return-hold-sec VALUE
+                         Hold time at session home in seconds. Default: 2.0.
+  --strict-start         Enable the run-start gate with
+                         normal_run_start_refuse_m=0.150,
+                         emergency_return_start_refuse_m=0.300, and
+                         post-run return enabled. Later explicit options can
+                         still override individual values.
   --no-cleanup           Keep cpp_relayer active between runs. This is the default.
   -h, --help             Show this help.
 
@@ -140,6 +181,52 @@ while (($# > 0)); do
       STARTUP_DISTANCE_REFUSE_ENABLED="$2"
       shift
       ;;
+    --session-home-mode)
+      [[ $# -ge 2 ]] || die "--session-home-mode requires fixed, capture_first, or load"
+      SESSION_HOME_MODE="$2"
+      shift
+      ;;
+    --session-home-path)
+      [[ $# -ge 2 ]] || die "--session-home-path requires a value"
+      SESSION_HOME_PATH="$2"
+      shift
+      ;;
+    --normal-run-start-refuse-m)
+      [[ $# -ge 2 ]] || die "--normal-run-start-refuse-m requires a value"
+      NORMAL_RUN_START_REFUSE_M="$2"
+      shift
+      ;;
+    --emergency-return-start-refuse-m)
+      [[ $# -ge 2 ]] || die "--emergency-return-start-refuse-m requires a value"
+      EMERGENCY_RETURN_START_REFUSE_M="$2"
+      shift
+      ;;
+    --post-run-return)
+      [[ $# -ge 2 ]] || die "--post-run-return requires true or false"
+      POST_RUN_RETURN="$2"
+      shift
+      ;;
+    --post-run-return-linear-speed)
+      [[ $# -ge 2 ]] || die "--post-run-return-linear-speed requires a value"
+      POST_RUN_RETURN_LINEAR_SPEED="$2"
+      shift
+      ;;
+    --post-run-return-timeout-sec)
+      [[ $# -ge 2 ]] || die "--post-run-return-timeout-sec requires a value"
+      POST_RUN_RETURN_TIMEOUT_SEC="$2"
+      shift
+      ;;
+    --post-run-return-hold-sec)
+      [[ $# -ge 2 ]] || die "--post-run-return-hold-sec requires a value"
+      POST_RUN_RETURN_HOLD_SEC="$2"
+      shift
+      ;;
+    --strict-start)
+      NORMAL_RUN_START_GATE_ENABLED="true"
+      NORMAL_RUN_START_REFUSE_M="0.150"
+      EMERGENCY_RETURN_START_REFUSE_M="0.300"
+      POST_RUN_RETURN="true"
+      ;;
     --no-cleanup)
       NO_CLEANUP=1
       ;;
@@ -172,11 +259,31 @@ case "${STARTUP_DISTANCE_REFUSE_ENABLED}" in
     ;;
 esac
 
+case "${SESSION_HOME_MODE}" in
+  fixed|capture_first|load)
+    ;;
+  *)
+    die "--session-home-mode must be fixed, capture_first, or load"
+    ;;
+esac
+
+case "${POST_RUN_RETURN}" in
+  true|false)
+    ;;
+  *)
+    die "--post-run-return must be true or false"
+    ;;
+esac
+
 cd "${REPO_ROOT}"
 
 RUN_STAMP="$(date +%Y%m%d_%H%M%S)"
 OUTPUT_ROOT="${OUTPUT_ROOT%/}/${RUN_STAMP}"
 MANIFEST_PATH="${OUTPUT_ROOT}/manifest.csv"
+
+if [[ "${SESSION_HOME_MODE}" != "fixed" && -z "${SESSION_HOME_PATH}" ]]; then
+  SESSION_HOME_PATH="${OUTPUT_ROOT}/session_home.json"
+fi
 
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 export ROS_DOMAIN_ID=75
@@ -234,7 +341,7 @@ print_repo_status() {
 
 init_manifest() {
   mkdir -p "${OUTPUT_ROOT}"
-  printf 'case_name,run_name,data_output_dir,source,scale,clip,j7_disabled,control_frequency,trajectory_publish_rate,state_parameter_publish_rate,status\n' > "${MANIFEST_PATH}"
+  printf 'case_name,run_name,data_output_dir,source,scale,clip,j7_disabled,control_frequency,trajectory_publish_rate,state_parameter_publish_rate,session_home_mode,session_home_path,post_run_return,status\n' > "${MANIFEST_PATH}"
 }
 
 append_manifest_row() {
@@ -242,10 +349,13 @@ append_manifest_row() {
   local run_name="$2"
   local data_output_dir="$3"
   local source="$4"
-  local status="$5"
-  printf '%s,%s,%s,%s,%s,%s,true,50,50,50,%s\n' \
+  local effective_session_home_mode="$5"
+  local status="$6"
+  printf '%s,%s,%s,%s,%s,%s,true,50,50,50,%s,%s,%s,%s\n' \
     "${case_name}" "${run_name}" "${data_output_dir}" "${source}" \
-    "${GP_SCALE}" "${GP_CLIP}" "${status}" >> "${MANIFEST_PATH}"
+    "${GP_SCALE}" "${GP_CLIP}" \
+    "${effective_session_home_mode}" "${SESSION_HOME_PATH}" \
+    "${POST_RUN_RETURN}" "${status}" >> "${MANIFEST_PATH}"
 }
 
 check_cpp_relayer_active() {
@@ -274,6 +384,22 @@ run_one_case() {
   local case_name
   local run_name
   local data_output_dir
+  local effective_session_home_mode
+  local effective_capture_enabled
+
+  # capture_first 只对本次 session 的第一个 case 生效；
+  # 之后的 case 自动改用 load 复用同一个 session_home.json。
+  effective_session_home_mode="${SESSION_HOME_MODE}"
+  if [[ "${SESSION_HOME_MODE}" == "capture_first" && ${SESSION_CASE_INDEX} -gt 0 ]]; then
+    effective_session_home_mode="load"
+  fi
+  if [[ "${effective_session_home_mode}" == "capture_first" ]]; then
+    effective_capture_enabled="true"
+  else
+    effective_capture_enabled="false"
+  fi
+  SESSION_CASE_INDEX=$((SESSION_CASE_INDEX + 1))
+
   source_tag="$(source_upper "${source}")"
   case_name="COMP_${source_tag}_F50_SCALE$(scale_tag "${GP_SCALE}")_CLIP$(scale_tag "${GP_CLIP}")_J7OFF_1000HZ_BRIDGE_R${repeat_index}"
   run_name="${case_name}_${RUN_STAMP}"
@@ -294,6 +420,18 @@ run_one_case() {
     "startup_distance_warn_m:=${STARTUP_DISTANCE_WARN_M}"
     "startup_distance_refuse_m:=${STARTUP_DISTANCE_REFUSE_M}"
     "startup_distance_refuse_enabled:=${STARTUP_DISTANCE_REFUSE_ENABLED}"
+    "session_home_mode:=${effective_session_home_mode}"
+    "session_home_path:=${SESSION_HOME_PATH}"
+    "session_home_capture_enabled:=${effective_capture_enabled}"
+    "normal_run_start_gate_enabled:=${NORMAL_RUN_START_GATE_ENABLED}"
+    "normal_run_start_warn_m:=${NORMAL_RUN_START_WARN_M}"
+    "normal_run_start_refuse_m:=${NORMAL_RUN_START_REFUSE_M}"
+    "emergency_return_start_refuse_m:=${EMERGENCY_RETURN_START_REFUSE_M}"
+    "return_only_if_too_far_enabled:=${RETURN_ONLY_IF_TOO_FAR_ENABLED}"
+    "post_run_return_to_session_home_enabled:=${POST_RUN_RETURN}"
+    "post_run_return_linear_speed:=${POST_RUN_RETURN_LINEAR_SPEED}"
+    "post_run_return_timeout_sec:=${POST_RUN_RETURN_TIMEOUT_SEC}"
+    "post_run_return_hold_sec:=${POST_RUN_RETURN_HOLD_SEC}"
     "gp_model_dir:=${MODEL_DIR}"
     "gp_compensation_source:=${source}"
     "gp_compensation_scale:=${GP_SCALE}"
@@ -316,6 +454,15 @@ run_one_case() {
   echo "startup_distance_warn_m=${STARTUP_DISTANCE_WARN_M}"
   echo "startup_distance_refuse_m=${STARTUP_DISTANCE_REFUSE_M}"
   echo "startup_distance_refuse_enabled=${STARTUP_DISTANCE_REFUSE_ENABLED}"
+  echo "session_home_mode=${effective_session_home_mode}"
+  echo "session_home_path=${SESSION_HOME_PATH}"
+  echo "normal_run_start_gate_enabled=${NORMAL_RUN_START_GATE_ENABLED}"
+  echo "normal_run_start_refuse_m=${NORMAL_RUN_START_REFUSE_M}"
+  echo "emergency_return_start_refuse_m=${EMERGENCY_RETURN_START_REFUSE_M}"
+  echo "post_run_return_to_session_home_enabled=${POST_RUN_RETURN}"
+  echo "post_run_return_linear_speed=${POST_RUN_RETURN_LINEAR_SPEED}"
+  echo "post_run_return_timeout_sec=${POST_RUN_RETURN_TIMEOUT_SEC}"
+  echo "post_run_return_hold_sec=${POST_RUN_RETURN_HOLD_SEC}"
   echo "This will start only the Python-only compensation trajectory launch."
   echo "========================================================================"
 
@@ -333,11 +480,11 @@ run_one_case() {
   fi
 
   mkdir -p "${data_output_dir}"
-  append_manifest_row "${case_name}" "${run_name}" "${data_output_dir}" "${source}" "starting"
+  append_manifest_row "${case_name}" "${run_name}" "${data_output_dir}" "${source}" "${effective_session_home_mode}" "starting"
   if ros2 launch py_controllers cartesian_impedance_python_only_compensation_trajectory_launch.py "${launch_args[@]}"; then
-    append_manifest_row "${case_name}" "${run_name}" "${data_output_dir}" "${source}" "launch_exited_zero"
+    append_manifest_row "${case_name}" "${run_name}" "${data_output_dir}" "${source}" "${effective_session_home_mode}" "launch_exited_zero"
   else
-    append_manifest_row "${case_name}" "${run_name}" "${data_output_dir}" "${source}" "launch_failed"
+    append_manifest_row "${case_name}" "${run_name}" "${data_output_dir}" "${source}" "${effective_session_home_mode}" "launch_failed"
     echo "Terminal-C launch failed or was interrupted."
     echo "Default behavior is no cleanup. Check robot state and Terminal B manually."
     if ((NO_CLEANUP)); then
@@ -377,6 +524,22 @@ main() {
   echo "ROS_DOMAIN_ID=${ROS_DOMAIN_ID}"
   echo "Model dir: ${MODEL_DIR}"
   echo "Cleanup between successful runs: disabled"
+  echo "== Session home / return cleanup =="
+  echo "session_home_mode=${SESSION_HOME_MODE}"
+  echo "session_home_path=${SESSION_HOME_PATH}"
+  echo "normal_run_start_gate_enabled=${NORMAL_RUN_START_GATE_ENABLED}"
+  echo "normal_run_start_warn_m=${NORMAL_RUN_START_WARN_M}"
+  echo "normal_run_start_refuse_m=${NORMAL_RUN_START_REFUSE_M}"
+  echo "emergency_return_start_refuse_m=${EMERGENCY_RETURN_START_REFUSE_M}"
+  echo "return_only_if_too_far_enabled=${RETURN_ONLY_IF_TOO_FAR_ENABLED}"
+  echo "post_run_return_to_session_home_enabled=${POST_RUN_RETURN}"
+  echo "post_run_return_linear_speed=${POST_RUN_RETURN_LINEAR_SPEED}"
+  echo "post_run_return_timeout_sec=${POST_RUN_RETURN_TIMEOUT_SEC}"
+  echo "post_run_return_hold_sec=${POST_RUN_RETURN_HOLD_SEC}"
+  if [[ "${SESSION_HOME_MODE}" == "capture_first" ]]; then
+    echo "NOTE: capture_first applies to the first case only; later cases in"
+    echo "this invocation automatically load ${SESSION_HOME_PATH}."
+  fi
   echo
 
   local source

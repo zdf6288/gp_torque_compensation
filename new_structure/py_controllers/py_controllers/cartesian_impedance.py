@@ -305,7 +305,175 @@ class CartesianImpedanceController(Node):
         self.startup_x_int_error = np.zeros(6, dtype=float)
         self.declare_parameter('startup_pos_threshold', 0.02)   # 1 cm
         self.startup_pos_threshold = float(self.get_parameter('startup_pos_threshold').value)
-                
+
+        # ===== Session home: deterministic reset pose for repeated split runs =====
+        # session_home 只替换 startup/return 的目标点，不改变轨迹几何。
+        self.declare_parameter('session_home_mode', 'fixed')
+        self.declare_parameter('session_home_path', '')
+        self.declare_parameter('session_home_capture_enabled', False)
+        self.declare_parameter(
+            'session_home_capture_max_distance_from_nominal_m', 0.250
+        )
+        self.declare_parameter('session_home_capture_requires_stable_state', True)
+        self.declare_parameter('session_home_capture_stability_samples', 10)
+        self.declare_parameter(
+            'session_home_capture_stability_position_std_m', 0.003
+        )
+        self.declare_parameter('session_home_capture_min_z', 0.45)
+        self.declare_parameter('session_home_capture_max_z', 0.85)
+        self.declare_parameter('normal_run_start_gate_enabled', False)
+        self.declare_parameter('normal_run_start_warn_m', 0.100)
+        self.declare_parameter('normal_run_start_refuse_m', 0.150)
+        self.declare_parameter('emergency_return_start_refuse_m', 0.300)
+        self.declare_parameter('return_only_if_too_far_enabled', False)
+        self.declare_parameter('post_run_return_to_session_home_enabled', False)
+        self.declare_parameter('post_run_return_linear_speed', 0.005)
+        self.declare_parameter('post_run_return_timeout_sec', 60.0)
+        self.declare_parameter('post_run_return_hold_sec', 2.0)
+        self.declare_parameter('post_run_return_tolerance_m', 0.015)
+        self.declare_parameter('post_run_return_disable_gp_compensation', True)
+        self.declare_parameter('post_run_return_disable_online_update', True)
+
+        self.session_home_mode = str(
+            self.get_parameter('session_home_mode').value
+        ).strip().lower()
+        self.session_home_path = str(
+            self.get_parameter('session_home_path').value
+        ).strip()
+        self.session_home_capture_enabled = self._get_bool_parameter(
+            'session_home_capture_enabled'
+        )
+        self.session_home_capture_max_distance_from_nominal_m = (
+            self._get_nonnegative_float_parameter(
+                'session_home_capture_max_distance_from_nominal_m', 0.250
+            )
+        )
+        self.session_home_capture_requires_stable_state = self._get_bool_parameter(
+            'session_home_capture_requires_stable_state'
+        )
+        self.session_home_capture_stability_samples = self._get_bounded_int_parameter(
+            'session_home_capture_stability_samples', 10, 2, 1000
+        )
+        self.session_home_capture_stability_position_std_m = (
+            self._get_positive_float_parameter(
+                'session_home_capture_stability_position_std_m', 0.003
+            )
+        )
+        self.session_home_capture_min_z = self._get_nonnegative_float_parameter(
+            'session_home_capture_min_z', 0.45
+        )
+        self.session_home_capture_max_z = self._get_positive_float_parameter(
+            'session_home_capture_max_z', 0.85
+        )
+        self.normal_run_start_gate_enabled = self._get_bool_parameter(
+            'normal_run_start_gate_enabled'
+        )
+        self.normal_run_start_warn_m = self._get_nonnegative_float_parameter(
+            'normal_run_start_warn_m', 0.100
+        )
+        self.normal_run_start_refuse_m = self._get_nonnegative_float_parameter(
+            'normal_run_start_refuse_m', 0.150
+        )
+        self.emergency_return_start_refuse_m = self._get_nonnegative_float_parameter(
+            'emergency_return_start_refuse_m', 0.300
+        )
+        self.return_only_if_too_far_enabled = self._get_bool_parameter(
+            'return_only_if_too_far_enabled'
+        )
+        self.post_run_return_to_session_home_enabled = self._get_bool_parameter(
+            'post_run_return_to_session_home_enabled'
+        )
+        self.post_run_return_linear_speed = self._get_positive_float_parameter(
+            'post_run_return_linear_speed', 0.005
+        )
+        self.post_run_return_timeout_sec = self._get_positive_float_parameter(
+            'post_run_return_timeout_sec', 60.0
+        )
+        self.post_run_return_hold_sec = self._get_nonnegative_float_parameter(
+            'post_run_return_hold_sec', 2.0
+        )
+        self.post_run_return_tolerance_m = self._get_positive_float_parameter(
+            'post_run_return_tolerance_m', 0.015
+        )
+        self.post_run_return_disable_gp_compensation = self._get_bool_parameter(
+            'post_run_return_disable_gp_compensation'
+        )
+        self.post_run_return_disable_online_update = self._get_bool_parameter(
+            'post_run_return_disable_online_update'
+        )
+
+        self.x_nominal_fixed_start = self.x_start_des.copy()
+        self.session_home = None
+        self.session_home_resolved = False
+        self.session_home_source = ''
+        self._session_home_capture_positions = []
+        self._session_home_capture_last_q = None
+        self._session_home_refused = False
+        self._normal_run_gate_decision = None
+        self.session_home_return_active = False
+        self.session_home_return_reason = ''
+        self._session_home_return_start_time = None
+        self._session_home_return_reached_time = None
+        self._session_home_return_reached_logged = False
+        self._last_ee_pose = None
+
+        self.post_run_return_complete_publisher = self.create_publisher(
+            Bool, '/post_run_return_complete', 10
+        )
+
+        if self.session_home_mode not in ('fixed', 'capture_first', 'load'):
+            raise ValueError(
+                f"Unsupported session_home_mode='{self.session_home_mode}'. "
+                "Supported: fixed, capture_first, load."
+            )
+        if self.session_home_mode == 'load':
+            pose, payload = self._load_session_home(self.session_home_path)
+            self._adopt_session_home(pose, 'load')
+            self.get_logger().warn(
+                "[SessionHome] Loaded session home from "
+                f"'{self.session_home_path}': pose={pose.tolist()}, "
+                f"created_at={payload.get('created_at')}, "
+                f"source={payload.get('source')}."
+            )
+        elif self.session_home_mode == 'capture_first':
+            if not self.session_home_capture_enabled:
+                raise ValueError(
+                    "session_home_mode=capture_first requires "
+                    "session_home_capture_enabled=true; refusing to start."
+                )
+            if not self.session_home_path:
+                raise ValueError(
+                    "session_home_mode=capture_first requires a non-empty "
+                    "session_home_path; refusing to start."
+                )
+            self.get_logger().warn(
+                "[SessionHome] capture_first: will capture current EE pose as "
+                "session home after "
+                f"{self.session_home_capture_stability_samples} stable state "
+                "samples; no startup torque is published until capture passes "
+                "validation."
+            )
+        else:
+            self._adopt_session_home(self.x_nominal_fixed_start, 'fixed')
+
+        self.get_logger().warn(
+            "[SessionHome] Configuration: "
+            f"mode={self.session_home_mode}, "
+            f"path='{self.session_home_path}', "
+            f"normal_run_start_gate_enabled={self.normal_run_start_gate_enabled}, "
+            f"normal_run_start_warn_m={self.normal_run_start_warn_m:.3f}, "
+            f"normal_run_start_refuse_m={self.normal_run_start_refuse_m:.3f}, "
+            f"emergency_return_start_refuse_m={self.emergency_return_start_refuse_m:.3f}, "
+            f"return_only_if_too_far_enabled={self.return_only_if_too_far_enabled}, "
+            "post_run_return_to_session_home_enabled="
+            f"{self.post_run_return_to_session_home_enabled}, "
+            f"post_run_return_linear_speed={self.post_run_return_linear_speed:.4f}, "
+            f"post_run_return_timeout_sec={self.post_run_return_timeout_sec:.1f}, "
+            f"post_run_return_hold_sec={self.post_run_return_hold_sec:.1f}, "
+            f"post_run_return_tolerance_m={self.post_run_return_tolerance_m:.4f}"
+        )
+
+
         self.q_initial = None               # initial joint position q0
         self.t_initial = None               # initial time
         self.t_last = None                  # last time
@@ -2167,6 +2335,46 @@ class CartesianImpedanceController(Node):
 
     def shutdown_callback(self, msg):
         if msg.data:
+            if self.session_home_return_active:
+                # 已在 return cleanup 中；重复 shutdown 信号不打断归位。
+                return
+
+            if (
+                self.post_run_return_to_session_home_enabled
+                and self.session_home_resolved
+            ):
+                x_curr = self._last_ee_pose
+                if (
+                    x_curr is not None
+                    and x_curr.shape == (3,)
+                    and np.all(np.isfinite(x_curr))
+                ):
+                    return_distance = float(
+                        np.linalg.norm(x_curr - self.session_home)
+                    )
+                    if return_distance <= self.emergency_return_start_refuse_m:
+                        self.get_logger().warn(
+                            "[Controller] Shutdown signal received; starting "
+                            "post-run return to session home instead of "
+                            "immediate exit: "
+                            f"distance_to_session_home={return_distance:.6f} m."
+                        )
+                        self._enter_session_home_return('post_run')
+                        return
+                    self.get_logger().error(
+                        "[SessionHome] Post-run return refused: "
+                        f"distance_to_session_home={return_distance:.6f} m "
+                        "exceeds emergency_return_start_refuse_m="
+                        f"{self.emergency_return_start_refuse_m:.3f} m; "
+                        "falling back to immediate zero torque + save + exit."
+                    )
+                else:
+                    self.get_logger().error(
+                        "[SessionHome] Post-run return refused: current EE "
+                        "pose unavailable; falling back to immediate zero "
+                        "torque + save + exit."
+                    )
+
             self._signal_handled = True
             self.get_logger().info("[Controller] Received shutdown signal — stopping robot, saving data & exiting.")
 
@@ -2304,6 +2512,7 @@ class CartesianImpedanceController(Node):
             tau_measured = np.array(msg.effort_measured)
 
             o_t_f = o_t_f_array.reshape(4, 4, order='F')                    # 4x4 pose matrix in flange frame, column-major
+            self._last_ee_pose = np.asarray(o_t_f[:3, 3], dtype=float).copy()
             mass_matrix = mass_matrix_array.reshape(7, 7, order='F')        # 7x7
             coriolis_matrix = np.diag(coriolis_matrix_array)                # 7x7
             coriolis_vec = np.array(msg.coriolis, dtype=float)
@@ -2330,6 +2539,23 @@ class CartesianImpedanceController(Node):
                 return
 
             if self.joint_position_control_active and not self.joint_position_adjusted:
+                if not self.session_home_resolved:
+                    # capture_first 采样期间不发力矩，验证失败则 fail closed。
+                    if not self._resolve_session_home_runtime(
+                        o_t_f[:3, 3], q
+                    ):
+                        self._mark_effort_publish_skipped(
+                            "session_home_unresolved"
+                        )
+                        return
+
+                if not self.session_home_return_active:
+                    if not self._evaluate_normal_run_start_gate(o_t_f[:3, 3]):
+                        self._mark_effort_publish_skipped(
+                            "normal_run_start_refused"
+                        )
+                        return
+
                 if not self._startup_distance_guard_allows_effort(o_t_f):
                     return
 
@@ -2337,7 +2563,12 @@ class CartesianImpedanceController(Node):
                     t_now, q, dq, dt, o_t_f, zero_jacobian, zero_jacobian_pinv
                 )
 
-                if reached:
+                if self.session_home_return_active:
+                    # return cleanup：只回 session home，不再请求轨迹。
+                    # _update_session_home_return 在 reach+hold 或 timeout 时
+                    # 发零力矩、存 CSV 并退出进程。
+                    self._update_session_home_return(t_now, pos_err_norm, reached)
+                elif reached:
                     if not self.trajectory_started:
                         self.start_trajectory()
                         self.get_logger().info(f"End-effector reached start point. Error={pos_err_norm:.6f}. Requesting trajectory start...")
@@ -3130,6 +3361,358 @@ class CartesianImpedanceController(Node):
 
         reached = np.linalg.norm(pos_error) < self.startup_pos_threshold
         return tau, (finished and reached), np.linalg.norm(pos_error)
+
+    # ===== Session home helpers (startup/return target only; no GP change) =====
+
+    def _validate_session_home_pose(self, pose, context):
+        """Validate a candidate session home pose; raise ValueError on failure."""
+        try:
+            pose = np.asarray(pose, dtype=float)
+        except (TypeError, ValueError):
+            raise ValueError(f"[SessionHome] {context}: pose is not numeric.")
+        if pose.shape != (3,) or not np.all(np.isfinite(pose)):
+            raise ValueError(
+                f"[SessionHome] {context}: pose must be 3 finite values, "
+                f"got {pose.tolist() if pose.size else pose}."
+            )
+        z = float(pose[2])
+        if not (self.session_home_capture_min_z <= z <= self.session_home_capture_max_z):
+            raise ValueError(
+                f"[SessionHome] {context}: z={z:.4f} outside "
+                f"[{self.session_home_capture_min_z:.3f}, "
+                f"{self.session_home_capture_max_z:.3f}]."
+            )
+        distance_from_nominal = float(
+            np.linalg.norm(pose - self.x_nominal_fixed_start)
+        )
+        if distance_from_nominal > self.session_home_capture_max_distance_from_nominal_m:
+            raise ValueError(
+                f"[SessionHome] {context}: distance_from_nominal="
+                f"{distance_from_nominal:.4f} m exceeds "
+                "session_home_capture_max_distance_from_nominal_m="
+                f"{self.session_home_capture_max_distance_from_nominal_m:.4f} m; "
+                f"pose={pose.tolist()}, "
+                f"nominal={self.x_nominal_fixed_start.tolist()}."
+            )
+        return pose
+
+    def _load_session_home(self, path):
+        """Load and validate session home JSON; raise ValueError on any problem."""
+        if not path:
+            raise ValueError(
+                "[SessionHome] session_home_mode=load requires a non-empty "
+                "session_home_path; refusing to start."
+            )
+        file_path = Path(path).expanduser()
+        if not file_path.is_file():
+            raise ValueError(
+                f"[SessionHome] session home file not found: '{file_path}'; "
+                "refusing to start."
+            )
+        try:
+            payload = json.loads(file_path.read_text())
+        except Exception as e:
+            raise ValueError(
+                f"[SessionHome] failed to parse session home JSON "
+                f"'{file_path}': {e}"
+            )
+        if not isinstance(payload, dict):
+            raise ValueError(
+                f"[SessionHome] session home JSON '{file_path}' is not an object."
+            )
+        pose = self._validate_session_home_pose(
+            payload.get('ee_pose_xyz'), f"load '{file_path}'"
+        )
+        return pose, payload
+
+    def _save_session_home(self, path, pose, q=None):
+        payload = {
+            'version': 1,
+            'created_at': time.strftime('%Y-%m-%dT%H:%M:%S'),
+            'source': 'capture_first',
+            'ee_pose_xyz': [float(v) for v in np.asarray(pose, dtype=float)],
+            'nominal_fixed_start_xyz': self.x_nominal_fixed_start.tolist(),
+            'q_at_capture': (
+                [float(v) for v in np.asarray(q, dtype=float)]
+                if q is not None else None
+            ),
+            'notes': (
+                'Session home for repeated GP compensation split runs. '
+                'Captured after stability/z-range/nominal-distance validation; '
+                'used only as startup and post-run return target.'
+            ),
+        }
+        file_path = Path(path).expanduser()
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_text(json.dumps(payload, indent=2) + '\n')
+        self.get_logger().warn(
+            f"[SessionHome] Saved captured session home to '{file_path}'."
+        )
+
+    def _adopt_session_home(self, pose, source):
+        self.session_home = np.asarray(pose, dtype=float).copy()
+        self.session_home_resolved = True
+        self.session_home_source = source
+        self.x_start_des = self.session_home.copy()
+        self.get_logger().warn(
+            "[SessionHome] Session home adopted: "
+            f"source={source}, pose={self.session_home.tolist()}, "
+            f"nominal_fixed_start={self.x_nominal_fixed_start.tolist()}; "
+            "session home replaces the fixed start for startup interpolation "
+            "and return cleanup only; trajectory geometry is unchanged."
+        )
+
+    def _refuse_session_home(self, reason):
+        if not self._session_home_refused:
+            self._session_home_refused = True
+            self.get_logger().error(
+                "[SessionHome] Refusing to start the experiment: "
+                f"{reason} No startup torque will be published."
+            )
+
+    def _resolve_session_home_runtime(self, x_curr, q):
+        """capture_first runtime capture; True once session home is resolved."""
+        if self.session_home_resolved:
+            return True
+        if self._session_home_refused:
+            return False
+
+        try:
+            x_curr = np.asarray(x_curr, dtype=float)
+        except (TypeError, ValueError):
+            return False
+        if x_curr.shape != (3,) or not np.all(np.isfinite(x_curr)):
+            return False
+
+        self._session_home_capture_positions.append(x_curr.copy())
+        self._session_home_capture_last_q = (
+            np.asarray(q, dtype=float).copy() if q is not None else None
+        )
+        if (
+            len(self._session_home_capture_positions)
+            < self.session_home_capture_stability_samples
+        ):
+            return False
+
+        samples = np.asarray(self._session_home_capture_positions, dtype=float)
+        mean_pose = samples.mean(axis=0)
+        position_std = samples.std(axis=0)
+        max_std = float(np.max(position_std))
+        if (
+            self.session_home_capture_requires_stable_state
+            and max_std > self.session_home_capture_stability_position_std_m
+        ):
+            self._refuse_session_home(
+                "capture_first stability check failed: "
+                f"max_position_std={max_std:.6f} m exceeds "
+                "session_home_capture_stability_position_std_m="
+                f"{self.session_home_capture_stability_position_std_m:.6f} m."
+            )
+            return False
+
+        try:
+            pose = self._validate_session_home_pose(mean_pose, 'capture_first')
+        except ValueError as e:
+            self._refuse_session_home(str(e))
+            return False
+
+        try:
+            self._save_session_home(
+                self.session_home_path, pose, self._session_home_capture_last_q
+            )
+        except Exception as e:
+            self._refuse_session_home(
+                f"failed to save session home to "
+                f"'{self.session_home_path}': {e}."
+            )
+            return False
+
+        self._adopt_session_home(pose, 'capture_first')
+        return True
+
+    def _evaluate_normal_run_start_gate(self, x_curr):
+        """Three-tier run-start gate against session home. True allows effort."""
+        if not self.normal_run_start_gate_enabled:
+            return True
+        if self._normal_run_gate_decision == 'normal':
+            return True
+        if self._normal_run_gate_decision == 'refused':
+            return False
+        if self._normal_run_gate_decision == 'return_only':
+            return True
+
+        try:
+            x_curr = np.asarray(x_curr, dtype=float)
+        except (TypeError, ValueError):
+            return False
+        if x_curr.shape != (3,) or not np.all(np.isfinite(x_curr)):
+            return False
+
+        distance = float(np.linalg.norm(x_curr - self.session_home))
+        self.get_logger().info(
+            "[SessionHome] Run-start gate: "
+            f"distance_to_session_home={distance:.6f} m, "
+            f"normal_run_start_warn_m={self.normal_run_start_warn_m:.3f}, "
+            f"normal_run_start_refuse_m={self.normal_run_start_refuse_m:.3f}, "
+            "emergency_return_start_refuse_m="
+            f"{self.emergency_return_start_refuse_m:.3f}."
+        )
+
+        if distance <= self.normal_run_start_refuse_m:
+            if distance > self.normal_run_start_warn_m:
+                self.get_logger().warn(
+                    "[SessionHome] Run-start distance above warn threshold but "
+                    f"allowed: distance={distance:.6f} m > "
+                    f"normal_run_start_warn_m={self.normal_run_start_warn_m:.3f} m."
+                )
+            self._normal_run_gate_decision = 'normal'
+            return True
+
+        if distance <= self.emergency_return_start_refuse_m:
+            if self.return_only_if_too_far_enabled:
+                self._normal_run_gate_decision = 'return_only'
+                self.get_logger().error(
+                    "[SessionHome] Refusing official GP recording: "
+                    f"distance_to_session_home={distance:.6f} m exceeds "
+                    f"normal_run_start_refuse_m={self.normal_run_start_refuse_m:.3f} m. "
+                    "return_only_if_too_far_enabled=true, so starting no-GP "
+                    "return-only cleanup toward session home."
+                )
+                self._enter_session_home_return('run_start_too_far_return_only')
+                return True
+            self._normal_run_gate_decision = 'refused'
+            self.get_logger().error(
+                "[SessionHome] Refusing official GP recording: "
+                f"distance_to_session_home={distance:.6f} m exceeds "
+                f"normal_run_start_refuse_m={self.normal_run_start_refuse_m:.3f} m "
+                "and return_only_if_too_far_enabled=false. "
+                "No automatic motion; reposition the robot or rerun with "
+                "return-only cleanup."
+            )
+            return False
+
+        self._normal_run_gate_decision = 'refused'
+        self.get_logger().error(
+            "[SessionHome] Refusing ALL automatic motion: "
+            f"distance_to_session_home={distance:.6f} m exceeds "
+            "emergency_return_start_refuse_m="
+            f"{self.emergency_return_start_refuse_m:.3f} m. "
+            "Manual/operator recovery is required."
+        )
+        return False
+
+    def _enter_session_home_return(self, reason):
+        """Switch to slow no-GP startup-style interpolation back to session home."""
+        if self.session_home_return_active:
+            return
+        self.session_home_return_active = True
+        self.session_home_return_reason = str(reason)
+        self._session_home_return_start_time = self.get_clock().now()
+        self._session_home_return_reached_time = None
+        self._session_home_return_reached_logged = False
+
+        self.data_recording_enabled = False
+        self.gp_active = False
+        if self.post_run_return_disable_gp_compensation:
+            self.gp_compensation_enabled = False
+        if self.post_run_return_disable_online_update:
+            self.gp_online_update_enabled = False
+
+        self.x_start_des = self.session_home.copy()
+        self.startup_linear_speed = float(self.post_run_return_linear_speed)
+        self.startup_interp_started = False
+        self.startup_x_int_error = np.zeros(6, dtype=float)
+        self._startup_plan_logged = False
+        self._startup_distance_warn_logged = False
+        self._startup_distance_refuse_logged = False
+        self.joint_position_control_active = True
+        self.joint_position_adjusted = False
+        self.task_command_received = False
+        self.trajectory_started = True  # never re-request trajectory during return
+
+        self.get_logger().warn(
+            "[SessionHome] Return cleanup started: "
+            f"reason={self.session_home_return_reason}, "
+            f"target={self.session_home.tolist()}, "
+            f"linear_speed={self.startup_linear_speed:.4f} m/s, "
+            f"tolerance={self.post_run_return_tolerance_m:.4f} m, "
+            f"hold={self.post_run_return_hold_sec:.1f} s, "
+            f"timeout={self.post_run_return_timeout_sec:.1f} s; "
+            "data recording disabled and GP compensation disabled for return "
+            "cleanup; torque rate limiting stays active."
+        )
+
+    def _update_session_home_return(self, t_now, pos_err_norm, reached):
+        """Track return progress; finishes (and exits) on reach+hold or timeout."""
+        if not self.session_home_return_active:
+            return
+
+        return_elapsed_sec = (
+            t_now - self._session_home_return_start_time
+        ).nanoseconds / 1e9
+        if return_elapsed_sec > self.post_run_return_timeout_sec:
+            self.get_logger().error(
+                "[SessionHome] Return cleanup timeout after "
+                f"{self.post_run_return_timeout_sec:.1f} s: "
+                f"pos_err={pos_err_norm:.6f} m. Stopping with zero torque."
+            )
+            self._finish_session_home_return(timed_out=True)
+            return
+
+        if reached and pos_err_norm <= self.post_run_return_tolerance_m:
+            if self._session_home_return_reached_time is None:
+                self._session_home_return_reached_time = t_now
+                if not self._session_home_return_reached_logged:
+                    self._session_home_return_reached_logged = True
+                    self.get_logger().info(
+                        "[SessionHome] Return cleanup reached session home: "
+                        f"pos_err={pos_err_norm:.6f} m; holding for "
+                        f"{self.post_run_return_hold_sec:.1f} s."
+                    )
+            else:
+                hold_elapsed = (
+                    t_now - self._session_home_return_reached_time
+                ).nanoseconds / 1e9
+                if hold_elapsed >= self.post_run_return_hold_sec:
+                    self._finish_session_home_return(timed_out=False)
+        else:
+            self._session_home_return_reached_time = None
+
+    def _finish_session_home_return(self, timed_out):
+        """Zero torque, save CSV, notify trajectory publisher, exit cleanly."""
+        self.session_home_return_active = False
+        self._signal_handled = True
+        self.get_logger().warn(
+            "[SessionHome] Return cleanup finished "
+            f"(timed_out={timed_out}); publishing zero torque, saving CSV, "
+            "and exiting."
+        )
+        try:
+            zero_tau = EffortCommand()
+            zero_tau.efforts = [0.0] * 7
+            self._publish_effort(zero_tau)
+            self.get_logger().info(
+                "[SessionHome] Published zero torque after return cleanup."
+            )
+        except Exception as e:
+            self.get_logger().error(f"Error publishing zero torque: {e}")
+        try:
+            self.save_data_to_file()
+        except Exception as e:
+            self.get_logger().error(f"Error saving data: {e}")
+        try:
+            done_msg = Bool()
+            done_msg.data = True
+            self.post_run_return_complete_publisher.publish(done_msg)
+            self.get_logger().info(
+                "[SessionHome] Published /post_run_return_complete=True."
+            )
+        except Exception as e:
+            self.get_logger().error(
+                f"Error publishing post-run return completion: {e}"
+            )
+        time.sleep(0.2)
+        os._exit(0)
 
     def _sample_rollout_times_uniform(self, Td, n, span):
         """

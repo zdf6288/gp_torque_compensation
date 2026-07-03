@@ -30,6 +30,66 @@ def generate_launch_description():
     startup_distance_refuse_enabled = LaunchConfiguration(
         'startup_distance_refuse_enabled'
     )
+    session_home_mode = LaunchConfiguration('session_home_mode')
+    session_home_path = LaunchConfiguration('session_home_path')
+    session_home_capture_enabled = LaunchConfiguration(
+        'session_home_capture_enabled'
+    )
+    session_home_capture_max_distance_from_nominal_m = LaunchConfiguration(
+        'session_home_capture_max_distance_from_nominal_m'
+    )
+    session_home_capture_requires_stable_state = LaunchConfiguration(
+        'session_home_capture_requires_stable_state'
+    )
+    session_home_capture_stability_samples = LaunchConfiguration(
+        'session_home_capture_stability_samples'
+    )
+    session_home_capture_stability_position_std_m = LaunchConfiguration(
+        'session_home_capture_stability_position_std_m'
+    )
+    session_home_capture_min_z = LaunchConfiguration(
+        'session_home_capture_min_z'
+    )
+    session_home_capture_max_z = LaunchConfiguration(
+        'session_home_capture_max_z'
+    )
+    normal_run_start_gate_enabled = LaunchConfiguration(
+        'normal_run_start_gate_enabled'
+    )
+    normal_run_start_warn_m = LaunchConfiguration('normal_run_start_warn_m')
+    normal_run_start_refuse_m = LaunchConfiguration(
+        'normal_run_start_refuse_m'
+    )
+    emergency_return_start_refuse_m = LaunchConfiguration(
+        'emergency_return_start_refuse_m'
+    )
+    return_only_if_too_far_enabled = LaunchConfiguration(
+        'return_only_if_too_far_enabled'
+    )
+    post_run_return_to_session_home_enabled = LaunchConfiguration(
+        'post_run_return_to_session_home_enabled'
+    )
+    post_run_return_linear_speed = LaunchConfiguration(
+        'post_run_return_linear_speed'
+    )
+    post_run_return_timeout_sec = LaunchConfiguration(
+        'post_run_return_timeout_sec'
+    )
+    post_run_return_hold_sec = LaunchConfiguration(
+        'post_run_return_hold_sec'
+    )
+    post_run_return_tolerance_m = LaunchConfiguration(
+        'post_run_return_tolerance_m'
+    )
+    post_run_return_disable_gp_compensation = LaunchConfiguration(
+        'post_run_return_disable_gp_compensation'
+    )
+    post_run_return_disable_online_update = LaunchConfiguration(
+        'post_run_return_disable_online_update'
+    )
+    post_run_return_wait_timeout_sec = LaunchConfiguration(
+        'post_run_return_wait_timeout_sec'
+    )
     gp_model_dir = LaunchConfiguration('gp_model_dir')
     gp_compensation_source = LaunchConfiguration('gp_compensation_source')
     gp_compensation_scale = LaunchConfiguration('gp_compensation_scale')
@@ -374,6 +434,71 @@ def generate_launch_description():
             'startup_distance_refuse_enabled': ParameterValue(
                 startup_distance_refuse_enabled, value_type=bool
             ),
+            'session_home_mode': ParameterValue(
+                session_home_mode, value_type=str
+            ),
+            'session_home_path': ParameterValue(
+                session_home_path, value_type=str
+            ),
+            'session_home_capture_enabled': ParameterValue(
+                session_home_capture_enabled, value_type=bool
+            ),
+            'session_home_capture_max_distance_from_nominal_m': ParameterValue(
+                session_home_capture_max_distance_from_nominal_m,
+                value_type=float,
+            ),
+            'session_home_capture_requires_stable_state': ParameterValue(
+                session_home_capture_requires_stable_state, value_type=bool
+            ),
+            'session_home_capture_stability_samples': ParameterValue(
+                session_home_capture_stability_samples, value_type=int
+            ),
+            'session_home_capture_stability_position_std_m': ParameterValue(
+                session_home_capture_stability_position_std_m,
+                value_type=float,
+            ),
+            'session_home_capture_min_z': ParameterValue(
+                session_home_capture_min_z, value_type=float
+            ),
+            'session_home_capture_max_z': ParameterValue(
+                session_home_capture_max_z, value_type=float
+            ),
+            'normal_run_start_gate_enabled': ParameterValue(
+                normal_run_start_gate_enabled, value_type=bool
+            ),
+            'normal_run_start_warn_m': ParameterValue(
+                normal_run_start_warn_m, value_type=float
+            ),
+            'normal_run_start_refuse_m': ParameterValue(
+                normal_run_start_refuse_m, value_type=float
+            ),
+            'emergency_return_start_refuse_m': ParameterValue(
+                emergency_return_start_refuse_m, value_type=float
+            ),
+            'return_only_if_too_far_enabled': ParameterValue(
+                return_only_if_too_far_enabled, value_type=bool
+            ),
+            'post_run_return_to_session_home_enabled': ParameterValue(
+                post_run_return_to_session_home_enabled, value_type=bool
+            ),
+            'post_run_return_linear_speed': ParameterValue(
+                post_run_return_linear_speed, value_type=float
+            ),
+            'post_run_return_timeout_sec': ParameterValue(
+                post_run_return_timeout_sec, value_type=float
+            ),
+            'post_run_return_hold_sec': ParameterValue(
+                post_run_return_hold_sec, value_type=float
+            ),
+            'post_run_return_tolerance_m': ParameterValue(
+                post_run_return_tolerance_m, value_type=float
+            ),
+            'post_run_return_disable_gp_compensation': ParameterValue(
+                post_run_return_disable_gp_compensation, value_type=bool
+            ),
+            'post_run_return_disable_online_update': ParameterValue(
+                post_run_return_disable_online_update, value_type=bool
+            ),
             'startup_torque_clip_nm': 10.0,
             'startup_torque_rate_limit_from_zero': True,
             'torque_rate_limit_enabled': True,
@@ -414,6 +539,14 @@ def generate_launch_description():
             # goal1_spatial_multisine would shift the center to the measured
             # pose after /joint_position_adjust is called.
             'anchor_trajectory_start_to_current_pose': False,
+            # Keep this node alive after the final round while the controller
+            # returns to the session home; same flag as the controller return.
+            'post_run_return_wait_enabled': ParameterValue(
+                post_run_return_to_session_home_enabled, value_type=bool
+            ),
+            'post_run_return_wait_timeout_sec': ParameterValue(
+                post_run_return_wait_timeout_sec, value_type=float
+            ),
         }],
     )
 
@@ -487,6 +620,116 @@ def generate_launch_description():
             'startup_distance_refuse_enabled',
             default_value='true',
             description='Refuse startup when distance exceeds startup_distance_refuse_m.',
+        ),
+        DeclareLaunchArgument(
+            'session_home_mode',
+            default_value='fixed',
+            description='Session home mode: fixed, capture_first, or load.',
+        ),
+        DeclareLaunchArgument(
+            'session_home_path',
+            default_value='',
+            description='JSON path for captured/loaded session home.',
+        ),
+        DeclareLaunchArgument(
+            'session_home_capture_enabled',
+            default_value='false',
+            description='Allow capture_first session home capture.',
+        ),
+        DeclareLaunchArgument(
+            'session_home_capture_max_distance_from_nominal_m',
+            default_value='0.250',
+            description='Max session home distance from nominal fixed start in m.',
+        ),
+        DeclareLaunchArgument(
+            'session_home_capture_requires_stable_state',
+            default_value='true',
+            description='Require position stability before session home capture.',
+        ),
+        DeclareLaunchArgument(
+            'session_home_capture_stability_samples',
+            default_value='10',
+            description='State samples used for session home capture stability.',
+        ),
+        DeclareLaunchArgument(
+            'session_home_capture_stability_position_std_m',
+            default_value='0.003',
+            description='Max per-axis position std for session home capture in m.',
+        ),
+        DeclareLaunchArgument(
+            'session_home_capture_min_z',
+            default_value='0.45',
+            description='Minimum z for a valid session home in m.',
+        ),
+        DeclareLaunchArgument(
+            'session_home_capture_max_z',
+            default_value='0.85',
+            description='Maximum z for a valid session home in m.',
+        ),
+        DeclareLaunchArgument(
+            'normal_run_start_gate_enabled',
+            default_value='false',
+            description='Enable stricter three-tier run-start gate against session home.',
+        ),
+        DeclareLaunchArgument(
+            'normal_run_start_warn_m',
+            default_value='0.100',
+            description='Warn threshold for run-start distance to session home in m.',
+        ),
+        DeclareLaunchArgument(
+            'normal_run_start_refuse_m',
+            default_value='0.150',
+            description='Refuse official GP run above this distance to session home in m.',
+        ),
+        DeclareLaunchArgument(
+            'emergency_return_start_refuse_m',
+            default_value='0.300',
+            description='Refuse all automatic motion above this distance to session home in m.',
+        ),
+        DeclareLaunchArgument(
+            'return_only_if_too_far_enabled',
+            default_value='false',
+            description='Allow no-GP return-only cleanup between normal and emergency thresholds.',
+        ),
+        DeclareLaunchArgument(
+            'post_run_return_to_session_home_enabled',
+            default_value='false',
+            description='Slowly return to session home after the final round before exit.',
+        ),
+        DeclareLaunchArgument(
+            'post_run_return_linear_speed',
+            default_value='0.005',
+            description='Post-run return linear speed in m/s.',
+        ),
+        DeclareLaunchArgument(
+            'post_run_return_timeout_sec',
+            default_value='60.0',
+            description='Post-run return timeout in seconds.',
+        ),
+        DeclareLaunchArgument(
+            'post_run_return_hold_sec',
+            default_value='2.0',
+            description='Hold time at session home before zero torque in seconds.',
+        ),
+        DeclareLaunchArgument(
+            'post_run_return_tolerance_m',
+            default_value='0.015',
+            description='Position tolerance for post-run return completion in m.',
+        ),
+        DeclareLaunchArgument(
+            'post_run_return_disable_gp_compensation',
+            default_value='true',
+            description='Disable GP compensation during post-run return.',
+        ),
+        DeclareLaunchArgument(
+            'post_run_return_disable_online_update',
+            default_value='true',
+            description='Disable GP online update during post-run return.',
+        ),
+        DeclareLaunchArgument(
+            'post_run_return_wait_timeout_sec',
+            default_value='90.0',
+            description='trajectory_publisher wait timeout for post-run return in seconds.',
         ),
         DeclareLaunchArgument(
             'gp_model_dir',

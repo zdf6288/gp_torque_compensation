@@ -197,6 +197,36 @@ class TrajectoryPublisher(Node):
 
         self.shutdown_pub = self.create_publisher(Bool, "/shutdown_control", 10)
 
+        # Post-run return coordination: when enabled, keep this node alive after
+        # the final round so the launch-level on_exit=Shutdown does not kill the
+        # controller while it slowly returns to the session home.
+        self.declare_parameter('post_run_return_wait_enabled', False)
+        self.declare_parameter('post_run_return_wait_timeout_sec', 90.0)
+        self.post_run_return_wait_enabled = bool(
+            self.get_parameter('post_run_return_wait_enabled').value
+        )
+        self.post_run_return_wait_timeout_sec = float(
+            self.get_parameter('post_run_return_wait_timeout_sec').value
+        )
+        if (
+            not np.isfinite(self.post_run_return_wait_timeout_sec)
+            or self.post_run_return_wait_timeout_sec <= 0.0
+        ):
+            self.get_logger().warning(
+                'Invalid post_run_return_wait_timeout_sec='
+                f'{self.post_run_return_wait_timeout_sec}; falling back to 90.0 s.'
+            )
+            self.post_run_return_wait_timeout_sec = 90.0
+        self.run_finished = False
+        self.run_finished_time = None
+        self.post_run_return_complete_received = False
+        self.post_run_return_complete_sub = self.create_subscription(
+            Bool,
+            '/post_run_return_complete',
+            self.post_run_return_complete_callback,
+            10,
+        )
+
 
         self.get_logger().info('Trajectory publisher node started')
         self.get_logger().info(
@@ -509,8 +539,45 @@ class TrajectoryPublisher(Node):
 
         return x_des, dx_des, ddx_des
     
+    def post_run_return_complete_callback(self, msg):
+        if msg.data and not self.post_run_return_complete_received:
+            self.post_run_return_complete_received = True
+            self.get_logger().info(
+                '[TrajectoryPublisher] Controller reported post-run return '
+                'complete.'
+            )
+
+    def _handle_post_run_return_wait(self):
+        """After the final round, wait for controller return before exiting."""
+        # 持续广播 recording=False，防止晚加入的订阅者误以为还在录数。
+        stop_msg = Bool()
+        stop_msg.data = False
+        self.data_recording_publisher.publish(stop_msg)
+
+        wait_elapsed = (
+            self.get_clock().now() - self.run_finished_time
+        ).nanoseconds / 1e9
+        if self.post_run_return_complete_received:
+            self.get_logger().info(
+                '[TrajectoryPublisher] Post-run return complete; shutting down.'
+            )
+            if rclpy.ok():
+                rclpy.shutdown()
+            return
+        if wait_elapsed > self.post_run_return_wait_timeout_sec:
+            self.get_logger().warning(
+                '[TrajectoryPublisher] Post-run return wait timed out after '
+                f'{self.post_run_return_wait_timeout_sec:.1f} s; shutting down.'
+            )
+            if rclpy.ok():
+                rclpy.shutdown()
+
     def timer_callback(self):
         """timer callback function at the configured control frequency."""
+        if self.run_finished:
+            self._handle_post_run_return_wait()
+            return
+
         try:
             # check if joint position adjustment is completed
             if not self.trajectory_enabled:
@@ -635,6 +702,19 @@ class TrajectoryPublisher(Node):
                 shutdown_msg = Bool()
                 shutdown_msg.data = True
                 self.shutdown_pub.publish(shutdown_msg)
+
+                if self.post_run_return_wait_enabled:
+                    # 控制器将执行 post-run return；本节点保持存活，
+                    # 避免 launch on_exit=Shutdown 在归位途中杀掉控制器。
+                    self.run_finished = True
+                    self.run_finished_time = self.get_clock().now()
+                    self.trajectory_enabled = False
+                    self.get_logger().info(
+                        '[TrajectoryPublisher] Waiting up to '
+                        f'{self.post_run_return_wait_timeout_sec:.1f} s for '
+                        'controller post-run return to session home...'
+                    )
+                    return
 
                 if rclpy.ok():
                     rclpy.shutdown()
