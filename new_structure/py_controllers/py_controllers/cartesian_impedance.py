@@ -2,6 +2,7 @@
 
 import rclpy
 from rclpy.node import Node
+from rcl_interfaces.msg import ParameterDescriptor
 from custom_msgs.msg import StateParameter, EffortCommand, TaskSpaceCommand, JointSpaceCommand
 from custom_msgs.srv import JointPositionAdjust
 from custom_msgs.srv import AsyncGPpredict
@@ -430,13 +431,20 @@ class CartesianImpedanceController(Node):
         #   z0 = 0.65 + 0.030*sin(0.2) + 0.010*sin(1.1)
         # trajectory_publisher 加载 anchor 后会用自身几何做起点一致性检查
         # （容差 0.010 m），两边不一致会 fail closed。
+        # launch/runner 以 STRING 传入这两个 vec3（ParameterValue value_type=str），
+        # 但默认值是 list[float] 会让 rclpy 推断为 DOUBLE_ARRAY，导致 STRING 覆盖时
+        # 抛 InvalidParameterTypeException。用 dynamic_typing 同时接受 STRING 与
+        # DOUBLE_ARRAY；实际解析统一走 _get_vec3_parameter（支持 JSON 字符串与
+        # list[float]，并校验恰好 3 个有限数）。
         self.declare_parameter(
             'session_relative_nominal_trajectory_start_xyz',
             [0.3077306122468523, 0.043799833015107294, 0.6648721535244662],
+            ParameterDescriptor(dynamic_typing=True),
         )
         self.declare_parameter(
             'session_relative_nominal_circle_center_xyz',
             [0.3, 0.0, 0.65],
+            ParameterDescriptor(dynamic_typing=True),
         )
 
         self.trajectory_reference_mode = str(

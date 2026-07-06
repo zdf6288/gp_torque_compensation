@@ -2,6 +2,7 @@
 
 import rclpy
 from rclpy.node import Node
+from rcl_interfaces.msg import ParameterDescriptor
 from custom_msgs.msg import TaskSpaceCommand, StateParameter
 from custom_msgs.srv import JointPositionAdjust, GetFutureTrajectory
 from std_msgs.msg import Header, Bool
@@ -84,13 +85,20 @@ class TrajectoryPublisher(Node):
         self.declare_parameter('session_anchor_path', '')
         self.declare_parameter('session_relative_apply_to_trajectory_center', True)
         self.declare_parameter('session_relative_max_anchor_delta_m', 0.250)
+        # launch/runner 以 STRING 传入这两个 vec3（ParameterValue value_type=str），
+        # 但默认值是 list[float] 会让 rclpy 推断为 DOUBLE_ARRAY，导致 STRING 覆盖时
+        # 抛 InvalidParameterTypeException。用 dynamic_typing 同时接受 STRING 与
+        # DOUBLE_ARRAY；实际解析统一走 _parse_vec3_parameter（支持 JSON 字符串与
+        # list[float]，并校验恰好 3 个有限数）。
         self.declare_parameter(
             'session_relative_nominal_trajectory_start_xyz',
             [0.3077306122468523, 0.043799833015107294, 0.6648721535244662],
+            ParameterDescriptor(dynamic_typing=True),
         )
         self.declare_parameter(
             'session_relative_nominal_circle_center_xyz',
             [0.3, 0.0, 0.65],
+            ParameterDescriptor(dynamic_typing=True),
         )
         # Stage 3A default-off：planar_circle 保持 Stage 1 / Stage 2A 的平面圆轨迹行为。
         # z_modulated_circle 只在显式设置 trajectory_mode 时启用。
