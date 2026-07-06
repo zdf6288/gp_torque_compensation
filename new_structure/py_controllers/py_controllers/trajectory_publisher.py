@@ -12,6 +12,10 @@ import time
 from pathlib import Path
 from rclpy.duration import Duration
 from std_msgs.msg import String
+from py_controllers.session_anchor_utils import (
+    parse_vec3_parameter,
+    read_anchor_vec3,
+)
 
 # session_relative 模式下，平移后的轨迹起点必须与 JSON 里的
 # session_trajectory_start_xyz 一致；超过该容差说明控制器写 anchor 时用的
@@ -470,42 +474,16 @@ class TrajectoryPublisher(Node):
 
     @staticmethod
     def _parse_vec3_parameter(value, name):
-        if isinstance(value, str):
-            try:
-                value = json.loads(value)
-            except json.JSONDecodeError as e:
-                raise ValueError(
-                    f"Parameter '{name}' must be a JSON-style 3-vector, "
-                    f"got {value!r}: {e}"
-                )
-        try:
-            vec = np.asarray(value, dtype=float)
-        except (TypeError, ValueError):
-            raise ValueError(
-                f"Parameter '{name}' must be 3 finite numeric values, "
-                f"got {value!r}."
-            )
-        if vec.shape != (3,) or not np.all(np.isfinite(vec)):
-            raise ValueError(
-                f"Parameter '{name}' must be 3 finite numeric values, "
-                f"got {value!r}."
-            )
-        return vec
-    
+        # 纯解析逻辑抽到 session_anchor_utils.parse_vec3_parameter；解析/校验
+        # 语义（STRING JSON 与 list 兼容、恰好 3 个有限数）保持不变。
+        return parse_vec3_parameter(value, name)
+
     @staticmethod
     def _session_anchor_vec3(payload, key):
         """Read one finite 3-vector field from the anchor JSON; raise on failure."""
-        value = payload.get(key)
-        try:
-            vec = np.asarray(value, dtype=float)
-        except (TypeError, ValueError):
-            raise ValueError(f"session anchor field '{key}' is not numeric.")
-        if vec.shape != (3,) or not np.all(np.isfinite(vec)):
-            raise ValueError(
-                f"session anchor field '{key}' must be 3 finite values, "
-                f"got {value!r}."
-            )
-        return vec
+        # 校验逻辑抽到 session_anchor_utils.read_anchor_vec3；保留原有的
+        # "session anchor " 错误前缀，错误文案逐字节不变。
+        return read_anchor_vec3(payload, key, "session anchor ")
 
     def _load_and_apply_session_anchor(self):
         """Load the session anchor JSON and shift the whole trajectory by anchor_delta.

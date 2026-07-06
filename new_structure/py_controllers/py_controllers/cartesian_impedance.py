@@ -22,6 +22,10 @@ import threading, time
 from pathlib import Path
 from std_msgs.msg import String
 from collections import deque
+from py_controllers.session_anchor_utils import (
+    parse_vec3_parameter,
+    read_anchor_vec3,
+)
 
 GOAL12_TIMING_FIELDS = [
     "event",
@@ -1750,28 +1754,10 @@ class CartesianImpedanceController(Node):
         return bool(value)
 
     def _get_vec3_parameter(self, name):
+        # 纯解析逻辑已抽到 session_anchor_utils.parse_vec3_parameter，
+        # 这里只负责取出 ROS 参数值，解析/校验语义保持不变。
         value = self.get_parameter(name).value
-        if isinstance(value, str):
-            try:
-                value = json.loads(value)
-            except json.JSONDecodeError as e:
-                raise ValueError(
-                    f"Parameter '{name}' must be a JSON-style 3-vector, "
-                    f"got {value!r}: {e}"
-                )
-        try:
-            array = np.asarray(value, dtype=float)
-        except (TypeError, ValueError):
-            raise ValueError(
-                f"Parameter '{name}' must be 3 finite numeric values, "
-                f"got {value!r}."
-            )
-        if array.shape != (3,) or not np.all(np.isfinite(array)):
-            raise ValueError(
-                f"Parameter '{name}' must be 3 finite numeric values, "
-                f"got {value!r}."
-            )
-        return array
+        return parse_vec3_parameter(value, name)
 
     def _disable_timing_logging(self, error):
         if not self._timing_disabled_after_error:
@@ -3666,19 +3652,11 @@ class CartesianImpedanceController(Node):
     @staticmethod
     def _session_anchor_vec3(payload, key, file_path):
         """Read one finite 3-vector field from the anchor JSON; raise on failure."""
-        value = payload.get(key)
-        try:
-            vec = np.asarray(value, dtype=float)
-        except (TypeError, ValueError):
-            raise ValueError(
-                f"[SessionAnchor] '{file_path}': field '{key}' is not numeric."
-            )
-        if vec.shape != (3,) or not np.all(np.isfinite(vec)):
-            raise ValueError(
-                f"[SessionAnchor] '{file_path}': field '{key}' must be 3 "
-                f"finite values, got {value!r}."
-            )
-        return vec
+        # 校验逻辑抽到 session_anchor_utils.read_anchor_vec3；这里保留原有的
+        # [SessionAnchor] 前缀，错误文案逐字节不变。
+        return read_anchor_vec3(
+            payload, key, f"[SessionAnchor] '{file_path}': "
+        )
 
     def _validate_session_anchor_payload(self, payload, file_path):
         """Validate a session-relative anchor JSON; return the session start pose.
