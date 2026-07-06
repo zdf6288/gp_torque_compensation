@@ -15,6 +15,7 @@ from std_msgs.msg import String
 from py_controllers.session_anchor_utils import (
     parse_vec3_parameter,
     read_anchor_vec3,
+    compute_anchor_internal_residuals,
 )
 
 # session_relative 模式下，平移后的轨迹起点必须与 JSON 里的
@@ -552,14 +553,16 @@ class TrajectoryPublisher(Node):
         )
         self._session_anchor_vec3(payload, 'nominal_fixed_start_xyz')
 
+        # 内部自洽残差计算抽到 session_anchor_utils.compute_anchor_internal_residuals
+        # （与 cartesian 共用同一份设计 B 不变量数学）；阈值判断与错误文案保持本节点
+        # 原样不变。
         internal_tol = 1e-6
-        ee_pose_residual = float(np.linalg.norm(ee_pose - session_start))
-        start_residual = float(np.linalg.norm(
-            session_start - (nominal_start_json + anchor_delta)
-        ))
-        center_residual = float(np.linalg.norm(
-            shifted_center - (nominal_center_json + anchor_delta)
-        ))
+        ee_pose_residual, start_residual, center_residual = (
+            compute_anchor_internal_residuals(
+                ee_pose, session_start, nominal_start_json,
+                nominal_center_json, shifted_center, anchor_delta,
+            )
+        )
         if (
             ee_pose_residual > internal_tol
             or start_residual > internal_tol

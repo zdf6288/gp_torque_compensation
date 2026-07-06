@@ -70,3 +70,152 @@ def read_anchor_vec3(payload, key, error_prefix):
             f"got {value!r}."
         )
     return vec
+
+
+def compute_anchor_internal_residuals(
+    ee_pose, session_start, nominal_start, nominal_center,
+    shifted_center, anchor_delta,
+):
+    """计算 anchor JSON 内部自洽性的三个残差（设计 B 不变量），只算不判阈值。
+
+    正常应全部 ~0：
+        ee_pose_residual = |ee_pose - session_start|
+        start_residual   = |session_start - (nominal_start + anchor_delta)|
+        center_residual  = |shifted_center - (nominal_center + anchor_delta)|
+    这三条编码设计 B：current pose == session_trajectory_start，start 与 center
+    都按同一个 anchor_delta 从名义几何整体平移。这里只做纯 numpy 计算、不设阈值、
+    不抛错；阈值与错误文案由各调用方保留（cartesian / trajectory 文案不同）。
+    ``nominal_start`` / ``nominal_center`` 传入的是 anchor JSON 里记录的名义几何。
+    """
+    ee_pose_residual = float(np.linalg.norm(ee_pose - session_start))
+    start_residual = float(np.linalg.norm(
+        session_start - (nominal_start + anchor_delta)
+    ))
+    center_residual = float(np.linalg.norm(
+        shifted_center - (nominal_center + anchor_delta)
+    ))
+    return ee_pose_residual, start_residual, center_residual
+
+
+def validate_session_anchor_payload(
+    payload, file_path, nominal_start, nominal_center,
+):
+    """校验 session-relative anchor JSON 的纯逻辑，返回 session_trajectory_start。
+
+    从 cartesian_impedance._validate_session_anchor_payload 抽出的纯部分：模式/
+    版本/必填字段检查、7 个 vec3 字段读取、q_at_capture 校验、内部自洽性残差、
+    以及“采集时名义几何 vs 当前 run 名义几何”一致性检查。任何失败抛 ValueError，
+    错误文案与原实现逐字节一致。
+
+    刻意不包含依赖 node 配置/日志的 z 范围 + anchor_delta 上限/警告安全门
+    （原 _validate_session_relative_start）——那部分仍由 node 侧在本函数返回后
+    调用，避免把 realtime/日志行为搬进纯模块。
+
+    ``nominal_start`` / ``nominal_center`` 是当前 run 配置的名义几何
+    （node.session_relative_nominal_trajectory_start / _circle_center）。
+    """
+    file_mode = str(
+        payload.get('trajectory_reference_mode', '')
+    ).strip().lower()
+    if file_mode != 'session_relative':
+        raise ValueError(
+            f"[SessionAnchor] '{file_path}': trajectory_reference_mode="
+            f"'{file_mode}' does not match controller mode "
+            "'session_relative'. Re-capture the anchor or switch modes."
+        )
+    for key in ('version', 'created_at', 'source', 'notes'):
+        if key not in payload:
+            raise ValueError(
+                f"[SessionAnchor] '{file_path}': missing required field "
+                f"'{key}'."
+            )
+    try:
+        version = int(payload.get('version'))
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"[SessionAnchor] '{file_path}': field 'version' must be an "
+            "integer."
+        )
+    if version < 2:
+        raise ValueError(
+            f"[SessionAnchor] '{file_path}': version={version} is too old "
+            "for session_relative anchors; re-capture the anchor."
+        )
+
+    error_prefix = f"[SessionAnchor] '{file_path}': "
+    session_start = read_anchor_vec3(
+        payload, 'session_trajectory_start_xyz', error_prefix
+    )
+    ee_pose = read_anchor_vec3(payload, 'ee_pose_xyz', error_prefix)
+    nominal_start_json = read_anchor_vec3(
+        payload, 'nominal_trajectory_start_xyz', error_prefix
+    )
+    nominal_center_json = read_anchor_vec3(
+        payload, 'nominal_circle_center_xyz', error_prefix
+    )
+    shifted_center = read_anchor_vec3(
+        payload, 'shifted_circle_center_xyz', error_prefix
+    )
+    anchor_delta = read_anchor_vec3(
+        payload, 'anchor_delta_xyz', error_prefix
+    )
+    read_anchor_vec3(payload, 'nominal_fixed_start_xyz', error_prefix)
+
+    q_at_capture = payload.get('q_at_capture')
+    if q_at_capture is not None:
+        try:
+            q_vec = np.asarray(q_at_capture, dtype=float)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"[SessionAnchor] '{file_path}': q_at_capture must be "
+                "null or 7 finite values."
+            )
+        if q_vec.shape != (7,) or not np.all(np.isfinite(q_vec)):
+            raise ValueError(
+                f"[SessionAnchor] '{file_path}': q_at_capture must be "
+                f"null or 7 finite values, got {q_at_capture!r}."
+            )
+
+    # 文件内部一致性：session_start/shifted_center 必须与 anchor_delta 自洽。
+    internal_tol = 1e-6
+    ee_pose_residual, start_residual, center_residual = (
+        compute_anchor_internal_residuals(
+            ee_pose, session_start, nominal_start_json, nominal_center_json,
+            shifted_center, anchor_delta,
+        )
+    )
+    if (
+        ee_pose_residual > internal_tol
+        or start_residual > internal_tol
+        or center_residual > internal_tol
+    ):
+        raise ValueError(
+            f"[SessionAnchor] '{file_path}': internally inconsistent "
+            f"anchor JSON (ee_pose_residual={ee_pose_residual:.2e} m, "
+            f"start_residual={start_residual:.2e} m, "
+            f"center_residual={center_residual:.2e} m)."
+        )
+
+    # 采集时的名义几何必须与当前 launch 的名义几何一致，否则平移后的
+    # 轨迹会不同，跨 run 不可比。
+    geometry_tol = 0.005
+    nominal_start_mismatch = float(np.linalg.norm(
+        nominal_start_json - nominal_start
+    ))
+    nominal_center_mismatch = float(np.linalg.norm(
+        nominal_center_json - nominal_center
+    ))
+    if (
+        nominal_start_mismatch > geometry_tol
+        or nominal_center_mismatch > geometry_tol
+    ):
+        raise ValueError(
+            f"[SessionAnchor] '{file_path}': nominal geometry in the "
+            "anchor JSON does not match this run "
+            f"(start mismatch {nominal_start_mismatch:.4f} m, center "
+            f"mismatch {nominal_center_mismatch:.4f} m > "
+            f"{geometry_tol:.3f} m). Re-capture the anchor for the "
+            "current geometry."
+        )
+
+    return session_start

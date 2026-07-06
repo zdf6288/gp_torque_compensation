@@ -2,7 +2,6 @@
 
 import rclpy
 from rclpy.node import Node
-from rcl_interfaces.msg import ParameterDescriptor
 from custom_msgs.msg import StateParameter, EffortCommand, TaskSpaceCommand, JointSpaceCommand
 from custom_msgs.srv import JointPositionAdjust
 from custom_msgs.srv import AsyncGPpredict
@@ -24,7 +23,11 @@ from std_msgs.msg import String
 from collections import deque
 from py_controllers.session_anchor_utils import (
     parse_vec3_parameter,
-    read_anchor_vec3,
+    validate_session_anchor_payload,
+)
+from py_controllers.session_relative_config import (
+    declare_session_relative_parameters,
+    read_session_relative_config,
 )
 
 GOAL12_TIMING_FIELDS = [
@@ -415,88 +418,17 @@ class CartesianImpedanceController(Node):
         # 整条轨迹（含 circle center）平移 anchor_delta；后续 load 复用同一
         # anchor JSON，所有 source/scale 跑同一条平移后的轨迹。只平移，不改形状。
         self.declare_parameter('trajectory_reference_mode', 'fixed_absolute')
-        self.declare_parameter('session_relative_capture_enabled', False)
-        self.declare_parameter('session_relative_max_anchor_delta_m', 0.250)
-        self.declare_parameter('session_relative_warn_anchor_delta_m', 0.150)
-        self.declare_parameter('session_relative_min_z', 0.45)
-        self.declare_parameter('session_relative_max_z', 0.85)
-        self.declare_parameter('session_relative_requires_stable_state', True)
-        self.declare_parameter('session_relative_stability_samples', 10)
-        self.declare_parameter(
-            'session_relative_stability_position_std_m', 0.003
-        )
-        self.declare_parameter(
-            'session_relative_apply_to_startup_and_return', True
-        )
-        # 名义轨迹几何参考点。默认值必须与 trajectory_publisher 默认
-        # goal1_spatial_multisine 几何在 t=0 的起点严格一致：
-        #   x0 = 0.3 + 0.012*sin(0.7)
-        #   y0 = 0.035*cos(0.4) + 0.012*sin(1.3)
-        #   z0 = 0.65 + 0.030*sin(0.2) + 0.010*sin(1.1)
-        # trajectory_publisher 加载 anchor 后会用自身几何做起点一致性检查
-        # （容差 0.010 m），两边不一致会 fail closed。
-        # launch/runner 以 STRING 传入这两个 vec3（ParameterValue value_type=str），
-        # 但默认值是 list[float] 会让 rclpy 推断为 DOUBLE_ARRAY，导致 STRING 覆盖时
-        # 抛 InvalidParameterTypeException。用 dynamic_typing 同时接受 STRING 与
-        # DOUBLE_ARRAY；实际解析统一走 _get_vec3_parameter（支持 JSON 字符串与
-        # list[float]，并校验恰好 3 个有限数）。
-        self.declare_parameter(
-            'session_relative_nominal_trajectory_start_xyz',
-            [0.3077306122468523, 0.043799833015107294, 0.6648721535244662],
-            ParameterDescriptor(dynamic_typing=True),
-        )
-        self.declare_parameter(
-            'session_relative_nominal_circle_center_xyz',
-            [0.3, 0.0, 0.65],
-            ParameterDescriptor(dynamic_typing=True),
-        )
+        # session_relative_* 参数组的 declare / read 抽到
+        # session_relative_config.py（只搬语句、参数名/默认值/类型语义不变），
+        # 让 __init__ 只保留一次调用。trajectory_reference_mode 与下面的校验、
+        # session_anchor_delta 初始化仍留在这里，因为它们门控更广的 session_home
+        # 流程，不属于 session_relative_* 参数组。
+        declare_session_relative_parameters(self)
 
         self.trajectory_reference_mode = str(
             self.get_parameter('trajectory_reference_mode').value
         ).strip().lower()
-        self.session_relative_capture_enabled = self._get_bool_parameter(
-            'session_relative_capture_enabled'
-        )
-        self.session_relative_max_anchor_delta_m = (
-            self._get_positive_float_parameter(
-                'session_relative_max_anchor_delta_m', 0.250
-            )
-        )
-        self.session_relative_warn_anchor_delta_m = (
-            self._get_nonnegative_float_parameter(
-                'session_relative_warn_anchor_delta_m', 0.150
-            )
-        )
-        self.session_relative_min_z = self._get_nonnegative_float_parameter(
-            'session_relative_min_z', 0.45
-        )
-        self.session_relative_max_z = self._get_positive_float_parameter(
-            'session_relative_max_z', 0.85
-        )
-        self.session_relative_requires_stable_state = self._get_bool_parameter(
-            'session_relative_requires_stable_state'
-        )
-        self.session_relative_stability_samples = self._get_bounded_int_parameter(
-            'session_relative_stability_samples', 10, 2, 1000
-        )
-        self.session_relative_stability_position_std_m = (
-            self._get_positive_float_parameter(
-                'session_relative_stability_position_std_m', 0.003
-            )
-        )
-        self.session_relative_apply_to_startup_and_return = (
-            self._get_bool_parameter(
-                'session_relative_apply_to_startup_and_return'
-            )
-        )
-        self.session_relative_nominal_trajectory_start = (
-            self._get_vec3_parameter(
-                'session_relative_nominal_trajectory_start_xyz'
-            )
-        )
-        self.session_relative_nominal_circle_center = (
-            self._get_vec3_parameter('session_relative_nominal_circle_center_xyz')
-        )
+        read_session_relative_config(self)
         if self.trajectory_reference_mode not in (
             'fixed_absolute', 'session_relative'
         ):
@@ -3649,126 +3581,21 @@ class CartesianImpedanceController(Node):
         )
         return pose, payload
 
-    @staticmethod
-    def _session_anchor_vec3(payload, key, file_path):
-        """Read one finite 3-vector field from the anchor JSON; raise on failure."""
-        # 校验逻辑抽到 session_anchor_utils.read_anchor_vec3；这里保留原有的
-        # [SessionAnchor] 前缀，错误文案逐字节不变。
-        return read_anchor_vec3(
-            payload, key, f"[SessionAnchor] '{file_path}': "
-        )
-
     def _validate_session_anchor_payload(self, payload, file_path):
         """Validate a session-relative anchor JSON; return the session start pose.
 
+        纯校验逻辑（模式/版本/必填字段/内部自洽/名义几何一致性）抽到
+        session_anchor_utils.validate_session_anchor_payload；这里只在校验通过后
+        补上依赖 node 配置/日志的 z 范围 + anchor_delta 上限/警告安全门。
         任何字段缺失/模式不匹配/delta 超限/内部不一致都抛 ValueError；
         校验失败时不发布任何力矩（构造期抛出 → 节点直接退出）。
         """
-        file_mode = str(
-            payload.get('trajectory_reference_mode', '')
-        ).strip().lower()
-        if file_mode != 'session_relative':
-            raise ValueError(
-                f"[SessionAnchor] '{file_path}': trajectory_reference_mode="
-                f"'{file_mode}' does not match controller mode "
-                "'session_relative'. Re-capture the anchor or switch modes."
-            )
-        for key in ('version', 'created_at', 'source', 'notes'):
-            if key not in payload:
-                raise ValueError(
-                    f"[SessionAnchor] '{file_path}': missing required field "
-                    f"'{key}'."
-                )
-        try:
-            version = int(payload.get('version'))
-        except (TypeError, ValueError):
-            raise ValueError(
-                f"[SessionAnchor] '{file_path}': field 'version' must be an "
-                "integer."
-            )
-        if version < 2:
-            raise ValueError(
-                f"[SessionAnchor] '{file_path}': version={version} is too old "
-                "for session_relative anchors; re-capture the anchor."
-            )
-        session_start = self._session_anchor_vec3(
-            payload, 'session_trajectory_start_xyz', file_path
+        session_start = validate_session_anchor_payload(
+            payload,
+            file_path,
+            self.session_relative_nominal_trajectory_start,
+            self.session_relative_nominal_circle_center,
         )
-        ee_pose = self._session_anchor_vec3(payload, 'ee_pose_xyz', file_path)
-        nominal_start = self._session_anchor_vec3(
-            payload, 'nominal_trajectory_start_xyz', file_path
-        )
-        nominal_center = self._session_anchor_vec3(
-            payload, 'nominal_circle_center_xyz', file_path
-        )
-        shifted_center = self._session_anchor_vec3(
-            payload, 'shifted_circle_center_xyz', file_path
-        )
-        anchor_delta = self._session_anchor_vec3(
-            payload, 'anchor_delta_xyz', file_path
-        )
-        self._session_anchor_vec3(
-            payload, 'nominal_fixed_start_xyz', file_path
-        )
-
-        q_at_capture = payload.get('q_at_capture')
-        if q_at_capture is not None:
-            try:
-                q_vec = np.asarray(q_at_capture, dtype=float)
-            except (TypeError, ValueError):
-                raise ValueError(
-                    f"[SessionAnchor] '{file_path}': q_at_capture must be "
-                    "null or 7 finite values."
-                )
-            if q_vec.shape != (7,) or not np.all(np.isfinite(q_vec)):
-                raise ValueError(
-                    f"[SessionAnchor] '{file_path}': q_at_capture must be "
-                    f"null or 7 finite values, got {q_at_capture!r}."
-                )
-
-        # 文件内部一致性：session_start/shifted_center 必须与 anchor_delta 自洽。
-        internal_tol = 1e-6
-        ee_pose_residual = float(np.linalg.norm(ee_pose - session_start))
-        start_residual = float(np.linalg.norm(
-            session_start - (nominal_start + anchor_delta)
-        ))
-        center_residual = float(np.linalg.norm(
-            shifted_center - (nominal_center + anchor_delta)
-        ))
-        if (
-            ee_pose_residual > internal_tol
-            or start_residual > internal_tol
-            or center_residual > internal_tol
-        ):
-            raise ValueError(
-                f"[SessionAnchor] '{file_path}': internally inconsistent "
-                f"anchor JSON (ee_pose_residual={ee_pose_residual:.2e} m, "
-                f"start_residual={start_residual:.2e} m, "
-                f"center_residual={center_residual:.2e} m)."
-            )
-
-        # 采集时的名义几何必须与当前 launch 的名义几何一致，否则平移后的
-        # 轨迹会不同，跨 run 不可比。
-        geometry_tol = 0.005
-        nominal_start_mismatch = float(np.linalg.norm(
-            nominal_start - self.session_relative_nominal_trajectory_start
-        ))
-        nominal_center_mismatch = float(np.linalg.norm(
-            nominal_center - self.session_relative_nominal_circle_center
-        ))
-        if (
-            nominal_start_mismatch > geometry_tol
-            or nominal_center_mismatch > geometry_tol
-        ):
-            raise ValueError(
-                f"[SessionAnchor] '{file_path}': nominal geometry in the "
-                "anchor JSON does not match this run "
-                f"(start mismatch {nominal_start_mismatch:.4f} m, center "
-                f"mismatch {nominal_center_mismatch:.4f} m > "
-                f"{geometry_tol:.3f} m). Re-capture the anchor for the "
-                "current geometry."
-            )
-
         # z 范围 + anchor_delta 上限/警告（与 capture 相同的安全门）。
         _, recomputed_delta = self._validate_session_relative_start(
             session_start, f"load '{file_path}'"
