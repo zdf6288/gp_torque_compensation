@@ -17,6 +17,10 @@ from py_controllers.session_anchor_utils import (
     read_anchor_vec3,
     compute_anchor_internal_residuals,
 )
+from py_controllers.session_relative_config import (
+    DEFAULT_SESSION_RELATIVE_ANCHOR_DELTA_LIMIT_MODE,
+    normalize_anchor_delta_limit_mode,
+)
 
 # session_relative 模式下，平移后的轨迹起点必须与 JSON 里的
 # session_trajectory_start_xyz 一致；超过该容差说明控制器写 anchor 时用的
@@ -90,6 +94,13 @@ class TrajectoryPublisher(Node):
         self.declare_parameter('session_anchor_path', '')
         self.declare_parameter('session_relative_apply_to_trajectory_center', True)
         self.declare_parameter('session_relative_max_anchor_delta_m', 0.250)
+        # anchor_delta norm 超限策略（refuse|warn|off），默认 refuse 保持旧
+        # hard-refuse 行为；与 cartesian 节点共用 session_relative_config 的
+        # 默认值与归一化，保证两个节点语义一致。
+        self.declare_parameter(
+            'session_relative_anchor_delta_limit_mode',
+            DEFAULT_SESSION_RELATIVE_ANCHOR_DELTA_LIMIT_MODE,
+        )
         # launch/runner 以 STRING 传入这两个 vec3（ParameterValue value_type=str），
         # 但默认值是 list[float] 会让 rclpy 推断为 DOUBLE_ARRAY，导致 STRING 覆盖时
         # 抛 InvalidParameterTypeException。用 dynamic_typing 同时接受 STRING 与
@@ -150,6 +161,14 @@ class TrajectoryPublisher(Node):
         )
         self.session_relative_max_anchor_delta_m = float(
             self.get_parameter('session_relative_max_anchor_delta_m').value
+        )
+        # 非法值在这里 fail fast（构造期抛 ValueError → 节点拒绝启动）。
+        self.session_relative_anchor_delta_limit_mode = (
+            normalize_anchor_delta_limit_mode(
+                self.get_parameter(
+                    'session_relative_anchor_delta_limit_mode'
+                ).value
+            )
         )
         self.session_relative_nominal_trajectory_start = (
             self._parse_vec3_parameter(
@@ -576,11 +595,27 @@ class TrajectoryPublisher(Node):
             )
 
         anchor_delta_norm = float(np.linalg.norm(anchor_delta))
-        if anchor_delta_norm > self.session_relative_max_anchor_delta_m:
-            raise ValueError(
-                f"anchor_delta norm {anchor_delta_norm:.4f} m exceeds "
+        # anchor_delta norm 策略与 cartesian 一致：refuse 保持旧 hard-refuse；
+        # warn 只告警并继续（floating anchor）；off 跳过该 norm 检查。上方的
+        # 内部自洽残差与下方的 nominal geometry / 起点一致性检查不受影响。
+        if (
+            self.session_relative_anchor_delta_limit_mode != 'off'
+            and anchor_delta_norm > self.session_relative_max_anchor_delta_m
+        ):
+            if self.session_relative_anchor_delta_limit_mode == 'refuse':
+                raise ValueError(
+                    f"anchor_delta norm {anchor_delta_norm:.4f} m exceeds "
+                    "session_relative_max_anchor_delta_m="
+                    f"{self.session_relative_max_anchor_delta_m:.4f} m "
+                    "(session_relative_anchor_delta_limit_mode=refuse)."
+                )
+            self.get_logger().warn(
+                '[TrajectoryPublisher] anchor_delta norm '
+                f"{anchor_delta_norm:.4f} m exceeds "
                 "session_relative_max_anchor_delta_m="
-                f"{self.session_relative_max_anchor_delta_m:.4f} m."
+                f"{self.session_relative_max_anchor_delta_m:.4f} m but "
+                "session_relative_anchor_delta_limit_mode=warn; continuing "
+                "with floating session anchor."
             )
 
         configured_start_mismatch = float(np.linalg.norm(

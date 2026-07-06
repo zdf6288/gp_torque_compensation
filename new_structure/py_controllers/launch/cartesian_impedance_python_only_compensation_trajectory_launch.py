@@ -65,6 +65,9 @@ def generate_launch_description():
     session_relative_warn_anchor_delta_m = LaunchConfiguration(
         'session_relative_warn_anchor_delta_m'
     )
+    session_relative_anchor_delta_limit_mode = LaunchConfiguration(
+        'session_relative_anchor_delta_limit_mode'
+    )
     session_relative_min_z = LaunchConfiguration('session_relative_min_z')
     session_relative_max_z = LaunchConfiguration('session_relative_max_z')
     session_relative_requires_stable_state = LaunchConfiguration(
@@ -510,6 +513,9 @@ def generate_launch_description():
             'session_relative_warn_anchor_delta_m': ParameterValue(
                 session_relative_warn_anchor_delta_m, value_type=float
             ),
+            'session_relative_anchor_delta_limit_mode': ParameterValue(
+                session_relative_anchor_delta_limit_mode, value_type=str
+            ),
             'session_relative_min_z': ParameterValue(
                 session_relative_min_z, value_type=float
             ),
@@ -623,6 +629,9 @@ def generate_launch_description():
             ),
             'session_relative_max_anchor_delta_m': ParameterValue(
                 session_relative_max_anchor_delta_m, value_type=float
+            ),
+            'session_relative_anchor_delta_limit_mode': ParameterValue(
+                session_relative_anchor_delta_limit_mode, value_type=str
             ),
             'session_relative_nominal_trajectory_start_xyz': ParameterValue(
                 session_relative_nominal_trajectory_start_xyz, value_type=str
@@ -776,6 +785,17 @@ def generate_launch_description():
             'session_relative_warn_anchor_delta_m',
             default_value='0.150',
             description='Warn threshold for session-relative anchor_delta norm in m.',
+        ),
+        DeclareLaunchArgument(
+            'session_relative_anchor_delta_limit_mode',
+            default_value='refuse',
+            description=(
+                'Policy when anchor_delta norm exceeds '
+                'session_relative_max_anchor_delta_m: refuse keeps legacy '
+                'behavior; warn allows floating-anchor session_relative runs '
+                'from the current pose while warning when the shift exceeds '
+                'the nominal-start limit; off disables this norm check.'
+            ),
         ),
         DeclareLaunchArgument(
             'session_relative_min_z',

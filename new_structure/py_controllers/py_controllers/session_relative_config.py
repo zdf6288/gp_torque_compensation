@@ -20,12 +20,40 @@
 
 from rcl_interfaces.msg import ParameterDescriptor
 
+# anchor_delta norm 超过 session_relative_max_anchor_delta_m 时的处理策略。
+# refuse 保持旧的 hard-refuse 行为（node/launch 默认）；warn 只告警并继续
+# （floating-anchor session，从当前摆好的 pose 整体平移轨迹）；off 完全不做
+# 该 norm 检查。z 范围 / stable-state / 内部自洽等其余安全门不受此策略影响。
+SESSION_RELATIVE_ANCHOR_DELTA_LIMIT_MODES = ('refuse', 'warn', 'off')
+DEFAULT_SESSION_RELATIVE_ANCHOR_DELTA_LIMIT_MODE = 'refuse'
+
+
+def normalize_anchor_delta_limit_mode(value):
+    """把 session_relative_anchor_delta_limit_mode 归一化为小写并校验合法值。
+
+    非法值直接抛 ValueError（fail fast，构造期抛出 → 节点拒绝启动），错误
+    信息包含参数名、允许值和实际值。cartesian 与 trajectory_publisher 共用
+    本函数，保证两个节点对该参数的解析/默认语义一致。
+    """
+    mode = str(value).strip().lower()
+    if mode not in SESSION_RELATIVE_ANCHOR_DELTA_LIMIT_MODES:
+        raise ValueError(
+            "session_relative_anchor_delta_limit_mode must be one of "
+            f"{list(SESSION_RELATIVE_ANCHOR_DELTA_LIMIT_MODES)}, "
+            f"got '{value}'."
+        )
+    return mode
+
 
 def declare_session_relative_parameters(node):
     """声明 session_relative_* 参数组（默认值与原 __init__ 内联声明完全一致）。"""
     node.declare_parameter('session_relative_capture_enabled', False)
     node.declare_parameter('session_relative_max_anchor_delta_m', 0.250)
     node.declare_parameter('session_relative_warn_anchor_delta_m', 0.150)
+    node.declare_parameter(
+        'session_relative_anchor_delta_limit_mode',
+        DEFAULT_SESSION_RELATIVE_ANCHOR_DELTA_LIMIT_MODE,
+    )
     node.declare_parameter('session_relative_min_z', 0.45)
     node.declare_parameter('session_relative_max_z', 0.85)
     node.declare_parameter('session_relative_requires_stable_state', True)
@@ -77,6 +105,13 @@ def read_session_relative_config(node):
     node.session_relative_warn_anchor_delta_m = (
         node._get_nonnegative_float_parameter(
             'session_relative_warn_anchor_delta_m', 0.150
+        )
+    )
+    node.session_relative_anchor_delta_limit_mode = (
+        normalize_anchor_delta_limit_mode(
+            node.get_parameter(
+                'session_relative_anchor_delta_limit_mode'
+            ).value
         )
     )
     node.session_relative_min_z = node._get_nonnegative_float_parameter(

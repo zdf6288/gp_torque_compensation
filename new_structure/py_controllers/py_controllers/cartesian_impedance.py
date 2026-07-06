@@ -568,6 +568,8 @@ class CartesianImpedanceController(Node):
                 f"{self.session_relative_max_anchor_delta_m:.3f}, "
                 "warn_anchor_delta_m="
                 f"{self.session_relative_warn_anchor_delta_m:.3f}, "
+                "anchor_delta_limit_mode="
+                f"{self.session_relative_anchor_delta_limit_mode}, "
                 f"min_z={self.session_relative_min_z:.3f}, "
                 f"max_z={self.session_relative_max_z:.3f}, "
                 "requires_stable_state="
@@ -3530,23 +3532,38 @@ class CartesianImpedanceController(Node):
             )
         anchor_delta = pose - self.session_relative_nominal_trajectory_start
         anchor_delta_norm = float(np.linalg.norm(anchor_delta))
-        if anchor_delta_norm > self.session_relative_max_anchor_delta_m:
-            raise ValueError(
-                f"[SessionAnchor] {context}: anchor_delta norm "
-                f"{anchor_delta_norm:.4f} m exceeds "
-                "session_relative_max_anchor_delta_m="
-                f"{self.session_relative_max_anchor_delta_m:.4f} m; "
-                f"pose={pose.tolist()}, nominal_trajectory_start="
-                f"{self.session_relative_nominal_trajectory_start.tolist()}."
-            )
-        if anchor_delta_norm > self.session_relative_warn_anchor_delta_m:
-            self.get_logger().warn(
-                f"[SessionAnchor] {context}: anchor_delta norm "
-                f"{anchor_delta_norm:.4f} m exceeds warn threshold "
-                "session_relative_warn_anchor_delta_m="
-                f"{self.session_relative_warn_anchor_delta_m:.4f} m; the "
-                "whole trajectory will be shifted by this offset."
-            )
+        # anchor_delta norm 策略：refuse 保持旧 hard-refuse；warn 只告警一次并
+        # 继续（floating anchor）；off 跳过整个 norm 检查。z 范围（上方）与其余
+        # 安全门不受影响。elif 保证超 hard limit 时 warn 分支只发一条告警，
+        # 不与下方 soft warn 重复刷屏。
+        if self.session_relative_anchor_delta_limit_mode != 'off':
+            if anchor_delta_norm > self.session_relative_max_anchor_delta_m:
+                if self.session_relative_anchor_delta_limit_mode == 'refuse':
+                    raise ValueError(
+                        f"[SessionAnchor] {context}: anchor_delta norm "
+                        f"{anchor_delta_norm:.4f} m exceeds "
+                        "session_relative_max_anchor_delta_m="
+                        f"{self.session_relative_max_anchor_delta_m:.4f} m "
+                        "(session_relative_anchor_delta_limit_mode=refuse); "
+                        f"pose={pose.tolist()}, nominal_trajectory_start="
+                        f"{self.session_relative_nominal_trajectory_start.tolist()}."
+                    )
+                self.get_logger().warn(
+                    f"[SessionAnchor] {context}: anchor_delta norm "
+                    f"{anchor_delta_norm:.4f} m exceeds "
+                    "session_relative_max_anchor_delta_m="
+                    f"{self.session_relative_max_anchor_delta_m:.4f} m but "
+                    "session_relative_anchor_delta_limit_mode=warn; "
+                    "continuing with floating session anchor."
+                )
+            elif anchor_delta_norm > self.session_relative_warn_anchor_delta_m:
+                self.get_logger().warn(
+                    f"[SessionAnchor] {context}: anchor_delta norm "
+                    f"{anchor_delta_norm:.4f} m exceeds warn threshold "
+                    "session_relative_warn_anchor_delta_m="
+                    f"{self.session_relative_warn_anchor_delta_m:.4f} m; the "
+                    "whole trajectory will be shifted by this offset."
+                )
         return pose, anchor_delta
 
     def _load_session_home(self, path):

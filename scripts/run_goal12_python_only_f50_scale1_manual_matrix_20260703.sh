@@ -33,6 +33,10 @@ SESSION_HOME_MODE_EXPLICIT=0
 SESSION_HOME_PATH=""
 SESSION_RELATIVE_MAX_ANCHOR_DELTA_M="0.250"
 SESSION_RELATIVE_WARN_ANCHOR_DELTA_M="0.150"
+# raw 默认 refuse 保持旧 hard-refuse 行为；--session-relative shortcut 在用户
+# 未显式覆盖时改为 warn（floating anchor：从当前摆好的 pose 整体平移轨迹）。
+SESSION_RELATIVE_ANCHOR_DELTA_LIMIT_MODE="refuse"
+SESSION_RELATIVE_ANCHOR_DELTA_LIMIT_MODE_EXPLICIT=0
 SESSION_RELATIVE_MIN_Z="0.45"
 SESSION_RELATIVE_MAX_Z="0.85"
 SESSION_RELATIVE_REQUIRES_STABLE_STATE="true"
@@ -97,6 +101,20 @@ Options:
                          emergency_return_start_refuse_m=0.300. If
                          --session-home-mode was not explicit, the first case
                          uses capture_first and later cases load the same JSON.
+                         Unless --session-relative-anchor-delta-limit-mode is
+                         explicit, this shortcut also sets it to warn so the
+                         current manually placed pose can serve as a floating
+                         session home even when it is far from the nominal
+                         trajectory start.
+  --session-relative-anchor-delta-limit-mode refuse|warn|off
+                         Policy when anchor_delta norm exceeds
+                         session_relative_max_anchor_delta_m. refuse keeps the
+                         legacy hard refuse (default in raw mode without the
+                         --session-relative shortcut); warn only warns and
+                         continues (default with --session-relative; suits
+                         starting from the current pose as a floating session
+                         home); off disables this norm check. Has no effect
+                         when trajectory_reference_mode=fixed_absolute.
   --session-home-mode fixed|capture_first|load
                          Session home source. capture_first captures the
                          current safe EE pose on the first case and later
@@ -242,6 +260,12 @@ while (($# > 0)); do
       EMERGENCY_RETURN_START_REFUSE_M="0.300"
       POST_RUN_RETURN="true"
       ;;
+    --session-relative-anchor-delta-limit-mode)
+      [[ $# -ge 2 ]] || die "--session-relative-anchor-delta-limit-mode requires refuse, warn, or off"
+      SESSION_RELATIVE_ANCHOR_DELTA_LIMIT_MODE="$2"
+      SESSION_RELATIVE_ANCHOR_DELTA_LIMIT_MODE_EXPLICIT=1
+      shift
+      ;;
     --session-home-mode)
       [[ $# -ge 2 ]] || die "--session-home-mode requires fixed, capture_first, or load"
       SESSION_HOME_MODE="$2"
@@ -324,6 +348,21 @@ esac
 if ((SESSION_RELATIVE_SHORTCUT)) && [[ "${TRAJECTORY_REFERENCE_MODE}" != "session_relative" ]]; then
   die "--session-relative conflicts with --trajectory-reference-mode fixed_absolute"
 fi
+
+# --session-relative shortcut 默认 floating anchor（warn）；显式
+# --session-relative-anchor-delta-limit-mode 始终优先，与选项顺序无关。
+# raw 模式（含显式 --trajectory-reference-mode session_relative）保持 refuse。
+if ((SESSION_RELATIVE_SHORTCUT)) && (( ! SESSION_RELATIVE_ANCHOR_DELTA_LIMIT_MODE_EXPLICIT )); then
+  SESSION_RELATIVE_ANCHOR_DELTA_LIMIT_MODE="warn"
+fi
+
+case "${SESSION_RELATIVE_ANCHOR_DELTA_LIMIT_MODE}" in
+  refuse|warn|off)
+    ;;
+  *)
+    die "--session-relative-anchor-delta-limit-mode must be refuse, warn, or off"
+    ;;
+esac
 
 case "${STARTUP_DISTANCE_REFUSE_ENABLED}" in
   true|false)
@@ -531,6 +570,7 @@ run_one_case() {
     "session_relative_capture_enabled:=${effective_session_relative_capture_enabled}"
     "session_relative_max_anchor_delta_m:=${SESSION_RELATIVE_MAX_ANCHOR_DELTA_M}"
     "session_relative_warn_anchor_delta_m:=${SESSION_RELATIVE_WARN_ANCHOR_DELTA_M}"
+    "session_relative_anchor_delta_limit_mode:=${SESSION_RELATIVE_ANCHOR_DELTA_LIMIT_MODE}"
     "session_relative_min_z:=${SESSION_RELATIVE_MIN_Z}"
     "session_relative_max_z:=${SESSION_RELATIVE_MAX_Z}"
     "session_relative_requires_stable_state:=${SESSION_RELATIVE_REQUIRES_STABLE_STATE}"
@@ -577,6 +617,7 @@ run_one_case() {
   echo "session_relative_capture_enabled=${effective_session_relative_capture_enabled}"
   echo "session_relative_max_anchor_delta_m=${SESSION_RELATIVE_MAX_ANCHOR_DELTA_M}"
   echo "session_relative_warn_anchor_delta_m=${SESSION_RELATIVE_WARN_ANCHOR_DELTA_M}"
+  echo "session_relative_anchor_delta_limit_mode=${SESSION_RELATIVE_ANCHOR_DELTA_LIMIT_MODE}"
   echo "session_relative_min_z=${SESSION_RELATIVE_MIN_Z}"
   echo "session_relative_max_z=${SESSION_RELATIVE_MAX_Z}"
   echo "session_relative_requires_stable_state=${SESSION_RELATIVE_REQUIRES_STABLE_STATE}"
@@ -658,6 +699,7 @@ main() {
   echo "session_home/session_anchor path=${SESSION_HOME_PATH}"
   echo "session_relative_max_anchor_delta_m=${SESSION_RELATIVE_MAX_ANCHOR_DELTA_M}"
   echo "session_relative_warn_anchor_delta_m=${SESSION_RELATIVE_WARN_ANCHOR_DELTA_M}"
+  echo "session_relative_anchor_delta_limit_mode=${SESSION_RELATIVE_ANCHOR_DELTA_LIMIT_MODE}"
   echo "session_relative_min_z=${SESSION_RELATIVE_MIN_Z}"
   echo "session_relative_max_z=${SESSION_RELATIVE_MAX_Z}"
   echo "session_relative_requires_stable_state=${SESSION_RELATIVE_REQUIRES_STABLE_STATE}"
