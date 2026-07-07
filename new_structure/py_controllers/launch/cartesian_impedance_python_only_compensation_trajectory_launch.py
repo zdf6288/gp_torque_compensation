@@ -13,6 +13,7 @@ def generate_launch_description():
     csv_output_profile = LaunchConfiguration('csv_output_profile')
     trajectory_mode = LaunchConfiguration('trajectory_mode')
     circle_frequency = LaunchConfiguration('circle_frequency')
+    rounds_per_mode = LaunchConfiguration('rounds_per_mode')
     control_frequency = LaunchConfiguration('control_frequency')
     trajectory_publish_rate = LaunchConfiguration('trajectory_publish_rate')
     state_parameter_publish_rate = LaunchConfiguration(
@@ -129,6 +130,9 @@ def generate_launch_description():
         'post_run_return_wait_timeout_sec'
     )
     gp_model_dir = LaunchConfiguration('gp_model_dir')
+    gp_prediction_enabled = LaunchConfiguration('gp_prediction_enabled')
+    gp_online_update_enabled = LaunchConfiguration('gp_online_update_enabled')
+    gp_compensation_enabled = LaunchConfiguration('gp_compensation_enabled')
     gp_compensation_source = LaunchConfiguration('gp_compensation_source')
     gp_compensation_scale = LaunchConfiguration('gp_compensation_scale')
     gp_compensation_clip_nm = LaunchConfiguration('gp_compensation_clip_nm')
@@ -270,9 +274,15 @@ def generate_launch_description():
         parameters=[{
             'effort_output_mode': 'active',
             'reference_mode': 'cartesian',
-            'gp_prediction_enabled': True,
-            'gp_online_update_enabled': True,
-            'gp_compensation_enabled': True,
+            'gp_prediction_enabled': ParameterValue(
+                gp_prediction_enabled, value_type=bool
+            ),
+            'gp_online_update_enabled': ParameterValue(
+                gp_online_update_enabled, value_type=bool
+            ),
+            'gp_compensation_enabled': ParameterValue(
+                gp_compensation_enabled, value_type=bool
+            ),
             'gp_compensation_source': ParameterValue(
                 gp_compensation_source, value_type=str
             ),
@@ -609,6 +619,12 @@ def generate_launch_description():
             'circle_frequency': ParameterValue(
                 circle_frequency, value_type=float
             ),
+            # One launch runs this many full trajectory rounds before the
+            # publisher stops recording and triggers the single post-run
+            # return; the runner wires --repeat to this value.
+            'rounds_per_mode': ParameterValue(
+                rounds_per_mode, value_type=int
+            ),
             'transition_duration': ParameterValue(
                 transition_duration, value_type=float
             ),
@@ -675,6 +691,15 @@ def generate_launch_description():
             'circle_frequency',
             default_value='0.05',
             description='Base trajectory frequency in Hz.',
+        ),
+        DeclareLaunchArgument(
+            'rounds_per_mode',
+            default_value='6',
+            description=(
+                'Full trajectory rounds executed inside one launch before the '
+                'trajectory publisher stops and post-run return starts. '
+                'Default 6 matches the previous trajectory_publisher default.'
+            ),
         ),
         DeclareLaunchArgument(
             'control_frequency',
@@ -911,6 +936,32 @@ def generate_launch_description():
             'gp_model_dir',
             default_value='./new_structure/gp/gp_models',
             description='Directory containing offline GP model pickle files.',
+        ),
+        DeclareLaunchArgument(
+            'gp_prediction_enabled',
+            default_value='true',
+            description=(
+                'Master GP prediction switch. false gives true GP-off (no '
+                'prediction, no online update, no compensation) for clean '
+                'historical-DB raw runs. Default true keeps the previous '
+                'hardcoded launch behavior.'
+            ),
+        ),
+        DeclareLaunchArgument(
+            'gp_online_update_enabled',
+            default_value='true',
+            description=(
+                'Enable GP online update. Default true keeps the previous '
+                'hardcoded launch behavior.'
+            ),
+        ),
+        DeclareLaunchArgument(
+            'gp_compensation_enabled',
+            default_value='true',
+            description=(
+                'Enable active GP compensation torque. Default true keeps '
+                'the previous hardcoded launch behavior.'
+            ),
         ),
         DeclareLaunchArgument(
             'gp_compensation_source',

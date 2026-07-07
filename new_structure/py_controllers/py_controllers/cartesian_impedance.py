@@ -652,6 +652,10 @@ class CartesianImpedanceController(Node):
 
         # data recording control
         self.data_recording_enabled = False         # flag indicating whether to record data (controlled by trajectory_publisher)
+        self._state_parameter_received = False
+        self._historical_pre_recording_preflight_done = False
+        self._historical_pre_recording_preflight_failed = False
+        self._historical_pre_recording_abort_requested = False
 
         self.effort_msg = EffortCommand()
         self.get_logger().info('Cartesian Impedance controller node started')
@@ -2209,20 +2213,186 @@ class CartesianImpedanceController(Node):
         
     def dataRecordingCallback(self, msg):
         """callback function for /data_recording_enabled subscriber"""
-        self.data_recording_enabled = msg.data
+        requested_enable = bool(msg.data)
+
+        if requested_enable:
+            if not self._ensure_historical_ready_before_recording():
+                self.data_recording_enabled = False
+                self.gp_active = False
+                return
+            self.data_recording_enabled = True
+        else:
+            self.data_recording_enabled = False
+            self._historical_pre_recording_preflight_done = False
+            self._historical_pre_recording_preflight_failed = False
+            self._historical_pre_recording_abort_requested = False
 
         # 当 TrajectoryPublisher 认为“transition 完成”时，会发 True
-        if msg.data and not self.gp_active:
+        if requested_enable and not self.gp_active:
             self.gp_active = True
             self.get_logger().info(
                 "[Controller] Data recording enabled -> "
                 f"gp_prediction_enabled={self.gp_prediction_enabled}, "
                 f"gp_compensation_enabled={self.gp_compensation_enabled}"
             )
-        elif not msg.data and self.gp_active:
+        elif not requested_enable and self.gp_active:
             # 如果你希望停轨迹时也关掉 GP，可以顺便关掉
             self.gp_active = False
             self.get_logger().info("[Controller] Data recording disabled -> GP compensation DEACTIVATED")
+
+    def _historical_pre_recording_required(self):
+        return (
+            bool(self.gp_prediction_enabled)
+            and bool(self.gp_compensation_enabled)
+            and bool(self.gp_historical_db_enabled)
+            and bool(self.gp_historical_db_preflight_enabled)
+            and self.gp_compensation_source in ("hist_db", "triple", "triple_dynamic")
+        )
+
+    def _current_joint_state_for_historical_preflight(self):
+        if not self._state_parameter_received:
+            return None, None, "state_parameter_not_received"
+
+        try:
+            q = np.asarray(self.q, dtype=float)
+            dq = np.asarray(self.dq, dtype=float)
+        except (TypeError, ValueError):
+            return None, None, "state_parameter_invalid"
+
+        if (
+            q.shape != (7,)
+            or dq.shape != (7,)
+            or not np.all(np.isfinite(q))
+            or not np.all(np.isfinite(dq))
+        ):
+            return None, None, "state_parameter_invalid"
+
+        return q.copy(), dq.copy(), ""
+
+    def _request_historical_pre_recording_abort(self, reason):
+        if self._historical_pre_recording_abort_requested:
+            return
+        self._historical_pre_recording_abort_requested = True
+        self._historical_pre_recording_preflight_failed = True
+        self.data_recording_enabled = False
+        self.gp_active = False
+        self.get_logger().error(
+            "[GP Hist DB] HIST_DB_PREFLIGHT_FAIL before active recording: "
+            f"source='{self.gp_compensation_source}', reason='{reason}', "
+            f"disable_silent_fallback={int(self.gp_disable_silent_hist_fallback)}"
+        )
+
+        if (
+            self.gp_disable_silent_hist_fallback
+            and self.post_run_return_to_session_home_enabled
+            and self.session_home_resolved
+        ):
+            x_curr = self._last_ee_pose
+            if (
+                x_curr is not None
+                and x_curr.shape == (3,)
+                and np.all(np.isfinite(x_curr))
+            ):
+                distance_to_home = float(np.linalg.norm(x_curr - self.session_home))
+                if distance_to_home <= self.emergency_return_start_refuse_m:
+                    self.get_logger().error(
+                        "[GP Hist DB] Pre-recording preflight failed; "
+                        "starting safe session-home return before trajectory "
+                        "data recording."
+                    )
+                    self._enter_session_home_return("hist_db_preflight_failed")
+                    return
+
+        self.get_logger().error(
+            "[GP Hist DB] Pre-recording preflight failed before data recording; "
+            "publishing zero torque, saving any available data, and exiting "
+            "with failure. No historical-source CSV should be accepted as valid."
+        )
+        try:
+            zero_tau = EffortCommand()
+            zero_tau.efforts = [0.0] * 7
+            self._publish_effort(zero_tau)
+            self.get_logger().info(
+                "[GP Hist DB] Published zero torque after pre-recording "
+                "preflight failure."
+            )
+        except Exception as e:
+            self.get_logger().error(
+                f"[GP Hist DB] Error publishing zero torque after preflight failure: {e}"
+            )
+        try:
+            self.save_data_to_file()
+        except Exception as e:
+            self.get_logger().error(
+                f"[GP Hist DB] Error saving data after preflight failure: {e}"
+            )
+        time.sleep(0.2)
+        os._exit(1)
+
+    def _ensure_historical_ready_before_recording(self):
+        if not self._historical_pre_recording_required():
+            return True
+
+        if self._historical_pre_recording_preflight_done:
+            return True
+
+        if self._historical_pre_recording_preflight_failed:
+            return False
+
+        q, dq, reason = self._current_joint_state_for_historical_preflight()
+        if q is None or dq is None:
+            self._request_historical_pre_recording_abort(reason)
+            return False
+
+        self._reset_historical_residual_db_shadow_state()
+        self._update_historical_residual_db_shadow_state(q, dq, self.get_clock().now())
+        if (
+            not self._historical_db_active_allowed()
+            or int(self.hist_db_available) != 1
+            or int(self.hist_db_gated_source_code) != 4
+        ):
+            self._request_historical_pre_recording_abort(
+                "hist_db_preflight_unavailable"
+            )
+            return False
+
+        if self.gp_compensation_source == "hist_db":
+            self._maybe_log_hist_db_runtime_diag("hist_db")
+        elif self.gp_compensation_source in ("triple", "triple_dynamic"):
+            if self.gp_compensation_source == "triple_dynamic":
+                triple_result = self._compute_gp_triple_dynamic_prediction()
+            else:
+                triple_result = self._compute_gp_triple_prediction()
+            self._set_gp_triple_state(triple_result)
+            if (
+                int(self.gp_triple_available) != 1
+                or int(self.gp_triple_used_fallback) != 0
+            ):
+                self._request_historical_pre_recording_abort(
+                    "triple_hist_component_unavailable"
+                )
+                return False
+            if (
+                self.gp_compensation_source == "triple_dynamic"
+                and not self._triple_dynamic_active_ok_logged
+            ):
+                self._triple_dynamic_active_ok_logged = True
+                self.get_logger().info(
+                    "[GP Triple Safety] TRIPLE_DYNAMIC_ACTIVE_OK: "
+                    f"source='{self.gp_compensation_source}', "
+                    f"triple_available={int(self.gp_triple_available)}, "
+                    f"triple_used_fallback={int(self.gp_triple_used_fallback)}, "
+                    f"weight_local={self.gp_triple_weight_local:.9g}, "
+                    f"weight_cloud={self.gp_triple_weight_cloud:.9g}, "
+                    f"weight_hist={self.gp_triple_weight_hist:.9g}, "
+                    f"hist_distance={float(self.hist_db_nearest_distance):.6f}, "
+                    f"hist_distance_pass={int(self.hist_db_distance_pass)}, "
+                    f"runtime_max_distance={self.gp_historical_db_max_distance}, "
+                    "phase='pre_recording'"
+                )
+
+        self._historical_pre_recording_preflight_done = True
+        return True
 
     def _handle_joint_reference_control(
         self,
@@ -2614,6 +2784,13 @@ class CartesianImpedanceController(Node):
 
                 ddq = (dq - self.dq_buffer) / dt
                 self.dq_buffer = dq.copy()                    
+
+            self._state_parameter_received = bool(
+                q.shape == (7,)
+                and dq.shape == (7,)
+                and np.all(np.isfinite(q))
+                and np.all(np.isfinite(dq))
+            )
 
             if timing_row is not None:
                 timing_row["ros_time_s"] = t_elapsed
@@ -4697,7 +4874,11 @@ class CartesianImpedanceController(Node):
         return (
             bool(getattr(self, "gp_compensation_enabled", False))
             and bool(getattr(self, "gp_prediction_enabled", False))
-            and getattr(self, "gp_compensation_source", "") == "hist_db"
+            and getattr(self, "gp_compensation_source", "") in (
+                "hist_db",
+                "triple",
+                "triple_dynamic",
+            )
         )
 
     def _reset_historical_db_preflight_state(self):
@@ -4731,20 +4912,27 @@ class CartesianImpedanceController(Node):
         self._hist_db_preflight_probe_logged = False
         self._hist_db_preflight_final_logged = False
         self._hist_db_runtime_diag_count = 0
+        self._hist_db_active_ok_logged = False
+        self._triple_dynamic_active_ok_logged = False
 
-    def _historical_db_result_passes_preflight_distance(self, result):
+    def _historical_db_result_has_finite_prediction(self, result):
         try:
             nearest_distance = float(result["nearest_distance"])
+            prediction = np.asarray(result.get("prediction"), dtype=float)
             return bool(
                 result["loaded"]
                 and result["query_valid"]
                 and not result.get("online_disabled", 0)
                 and result["k_used"] > 0
                 and np.isfinite(nearest_distance)
-                and nearest_distance <= self.gp_historical_db_preflight_max_distance
+                and prediction.shape == (7,)
+                and np.all(np.isfinite(prediction))
             )
         except (KeyError, TypeError, ValueError):
             return False
+
+    def _historical_db_result_passes_preflight(self, result):
+        return self._historical_db_result_has_finite_prediction(result)
 
     def _historical_db_result_has_finite_distance(self, result):
         try:
@@ -4776,32 +4964,38 @@ class CartesianImpedanceController(Node):
             return "nearest_distance_invalid"
         if not np.isfinite(nearest_distance):
             return "nearest_distance_invalid"
-        if nearest_distance > self.gp_historical_db_preflight_max_distance:
-            return (
-                "nearest_distance_exceeds_preflight_max: "
-                f"{nearest_distance:.6f} > "
-                f"{self.gp_historical_db_preflight_max_distance:.6f}"
-            )
+        prediction = np.asarray(result.get("prediction"), dtype=float)
+        if prediction.shape != (7,) or not np.all(np.isfinite(prediction)):
+            return "prediction_invalid"
         return "preflight_failed"
 
     def _log_historical_db_preflight_probe_once(self, result):
         if self._hist_db_preflight_probe_logged:
             return
         self._hist_db_preflight_probe_logged = True
-        distance_pass = self._historical_db_result_passes_preflight_distance(result)
+        nearest_distance = float(result.get("nearest_distance", 0.0))
+        preflight_pass = self._historical_db_result_passes_preflight(result)
+        distance_pass = bool(
+            np.isfinite(nearest_distance)
+            and nearest_distance <= self.gp_historical_db_max_distance
+        )
         message = (
             "[GP Hist DB] Single-state preflight probe: "
             f"source='{self.gp_compensation_source}', "
             f"loaded={int(result.get('loaded', 0))}, "
             f"rows={self.gp_historical_db_row_count}, "
             f"k={result.get('k_used', 0)}, "
-            f"nearest_distance={float(result.get('nearest_distance', 0.0)):.6f}, "
-            f"max_distance={self.gp_historical_db_preflight_max_distance}, "
+            f"nearest_distance={nearest_distance:.6f}, "
+            f"runtime_max_distance={self.gp_historical_db_max_distance}, "
+            f"preflight_max_distance={self.gp_historical_db_preflight_max_distance}, "
             f"distance_pass={int(distance_pass)}, "
+            f"finite_prediction={int(self._historical_db_result_has_finite_prediction(result))}, "
+            f"online_disabled={int(result.get('online_disabled', 0))}, "
+            f"preflight_pass={int(preflight_pass)}, "
             f"required={int(self.gp_historical_db_preflight_required)}, "
             f"fallback_source='{self.gp_historical_db_fallback_source}'"
         )
-        if distance_pass:
+        if preflight_pass:
             self.get_logger().info(message)
         elif (
             self.gp_historical_db_preflight_required
@@ -4817,7 +5011,9 @@ class CartesianImpedanceController(Node):
         self._hist_db_preflight_final_logged = True
         self._refresh_historical_db_preflight_full_stats()
         message = (
-            "[GP Hist DB] Preflight "
+            "[GP Hist DB] "
+            f"{'HIST_DB_PREFLIGHT_PASS ' if passed else ''}"
+            "Preflight "
             f"{'PASS' if passed else 'FAIL'}: "
             f"source='{self.gp_compensation_source}', "
             f"phase='{self.hist_db_preflight_phase}', "
@@ -4826,6 +5022,8 @@ class CartesianImpedanceController(Node):
             f"nearest_mean={self.hist_db_preflight_nearest_mean:.6f}, "
             f"nearest_p95={self.hist_db_preflight_nearest_p95:.6f}, "
             f"nearest_max={self.hist_db_preflight_nearest_max:.6f}, "
+            f"runtime_max_distance={self.gp_historical_db_max_distance}, "
+            f"preflight_max_distance={self.gp_historical_db_preflight_max_distance}, "
             f"active_allowed={self.hist_db_preflight_active_allowed}, "
             f"required={int(self.gp_historical_db_preflight_required)}, "
             f"disable_silent_fallback={int(self.gp_disable_silent_hist_fallback)}, "
@@ -4945,7 +5143,7 @@ class CartesianImpedanceController(Node):
             return
 
         self._log_historical_db_preflight_probe_once(result)
-        single_pass = self._historical_db_result_passes_preflight_distance(result)
+        single_pass = self._historical_db_result_passes_preflight(result)
 
         if self.gp_historical_db_preflight_mode == "single":
             if single_pass:
@@ -4971,7 +5169,7 @@ class CartesianImpedanceController(Node):
         )
         elapsed_sec = self._historical_db_preflight_elapsed_sec(t_now)
 
-        if fresh_query and self._historical_db_result_has_finite_distance(result):
+        if fresh_query and self._historical_db_result_has_finite_prediction(result):
             self._update_historical_db_preflight_stats(
                 float(result["nearest_distance"])
             )
@@ -4987,29 +5185,7 @@ class CartesianImpedanceController(Node):
             return
 
         self._refresh_historical_db_preflight_full_stats()
-        pass_ratio_ok = (
-            self.hist_db_preflight_pass_ratio
-            >= self.gp_historical_db_preflight_min_pass_ratio
-        )
-        p95_ok = (
-            self.hist_db_preflight_nearest_p95
-            <= self.gp_historical_db_preflight_p95_max_distance
-        )
-        max_ok = (
-            self.hist_db_preflight_nearest_max
-            <= self.gp_historical_db_preflight_max_distance
-        )
-        if pass_ratio_ok and p95_ok and max_ok:
-            self._set_historical_db_preflight_passed("segment_pass")
-        else:
-            reason_parts = []
-            if not pass_ratio_ok:
-                reason_parts.append("pass_ratio_below_threshold")
-            if not p95_ok:
-                reason_parts.append("p95_distance_above_threshold")
-            if not max_ok:
-                reason_parts.append("max_distance_above_threshold")
-            self._set_historical_db_preflight_failed(";".join(reason_parts))
+        self._set_historical_db_preflight_passed("segment_finite_query_pass")
 
     def _historical_db_active_allowed(self):
         if not self._historical_db_source_requested():
@@ -5055,6 +5231,22 @@ class CartesianImpedanceController(Node):
                 self.get_logger().warn(message)
         else:
             self.get_logger().info(message)
+            if (
+                selected_source == "hist_db"
+                and not self._hist_db_active_ok_logged
+            ):
+                self._hist_db_active_ok_logged = True
+                self.get_logger().info(
+                    "[GP Hist DB] HIST_DB_ACTIVE_OK: "
+                    f"source='{self.gp_compensation_source}', "
+                    f"available={int(self.hist_db_available)}, "
+                    f"distance={float(self.hist_db_nearest_distance):.6f}, "
+                    f"distance_pass={int(self.hist_db_distance_pass)}, "
+                    f"runtime_max_distance={self.gp_historical_db_max_distance}, "
+                    f"preflight_pass={int(self.hist_db_preflight_pass)}, "
+                    f"active_allowed={int(self.hist_db_preflight_active_allowed)}, "
+                    f"fallback_used=0, selected_source='hist_db'"
+                )
 
     def _get_historical_residual_db_fallback_candidate(self):
         zero = np.zeros(7, dtype=float)
@@ -5095,6 +5287,7 @@ class CartesianImpedanceController(Node):
             "nearest_distance": 0.0,
             "mean_topk_distance": 0.0,
             "prediction": np.zeros(7, dtype=float),
+            "prediction_valid": 0,
             "gated_prediction": fallback_prediction,
             "gated_source_code": int(fallback_source_code),
         }
@@ -5166,11 +5359,12 @@ class CartesianImpedanceController(Node):
             return result
 
         result["prediction"] = prediction.copy()
+        result["prediction_valid"] = 1
         result["available"] = int(
             bool(
                 result["loaded"]
                 and result["query_valid"]
-                and result["distance_pass"]
+                and result["prediction_valid"]
                 and not result["online_disabled"]
             )
         )
@@ -5671,7 +5865,6 @@ class CartesianImpedanceController(Node):
             and int(self.hist_db_loaded) == 1
             and int(self.hist_db_query_valid) == 1
             and int(self.hist_db_available) == 1
-            and int(self.hist_db_distance_pass) == 1
             and int(self.hist_db_gated_source_code) == 4
             and hist_db_gated_pred.shape == (7,)
             and np.all(np.isfinite(hist_db_gated_pred))
@@ -5811,12 +6004,11 @@ class CartesianImpedanceController(Node):
         except (TypeError, ValueError):
             nearest_distance = float("inf")
 
-        distance_gate_passed = (
+        hist_query_finite = (
             hist_available
             and np.isfinite(nearest_distance)
-            and nearest_distance <= float(self.gp_historical_db_max_distance)
         )
-        if not distance_gate_passed:
+        if not hist_query_finite:
             fallback, fallback_source_code = self._get_gp_triple_non_hist_fallback_candidate()
             result.update({
                 "raw": fallback,
@@ -6525,7 +6717,6 @@ class CartesianImpedanceController(Node):
                 and int(self.hist_db_loaded) == 1
                 and int(self.hist_db_query_valid) == 1
                 and int(self.hist_db_available) == 1
-                and int(self.hist_db_distance_pass) == 1
                 and int(self.hist_db_gated_source_code) == 4
                 and hist_db_gated_pred is not None
                 and hist_db_gated_pred.shape == (7,)
@@ -6555,6 +6746,23 @@ class CartesianImpedanceController(Node):
             self._set_gp_triple_state(triple_result)
             compensation = self.gp_triple_raw
             self._gp_source_code = 6
+            if (
+                int(self.gp_triple_used_fallback) == 1
+                and self.gp_disable_silent_hist_fallback
+            ):
+                self.get_logger().error(
+                    "[GP Triple Safety] triple_dynamic fallback rejected: "
+                    f"triple_available={int(self.gp_triple_available)}, "
+                    f"triple_used_fallback={int(self.gp_triple_used_fallback)}, "
+                    "selected_source='nominal'"
+                )
+                self._gp_source_code = 0
+                self._gp_selected_raw = np.zeros(7, dtype=float)
+                self._gp_scaled = np.zeros(7, dtype=float)
+                self._gp_applied = np.zeros(7, dtype=float)
+                self._gp_clip_active = np.zeros(7, dtype=int)
+                self._log_gp_triple_debug_safety()
+                return tau
         else:
             compensation = self.y_hat_local
             self._gp_source_code = 1
@@ -6583,6 +6791,25 @@ class CartesianImpedanceController(Node):
 
         if self.gp_compensation_source in ("triple", "triple_dynamic"):
             self._log_gp_triple_debug_safety()
+            if (
+                self.gp_compensation_source == "triple_dynamic"
+                and int(self.gp_triple_available) == 1
+                and int(self.gp_triple_used_fallback) == 0
+                and not self._triple_dynamic_active_ok_logged
+            ):
+                self._triple_dynamic_active_ok_logged = True
+                self.get_logger().info(
+                    "[GP Triple Safety] TRIPLE_DYNAMIC_ACTIVE_OK: "
+                    f"source='{self.gp_compensation_source}', "
+                    f"triple_available={int(self.gp_triple_available)}, "
+                    f"triple_used_fallback={int(self.gp_triple_used_fallback)}, "
+                    f"weight_local={self.gp_triple_weight_local:.9g}, "
+                    f"weight_cloud={self.gp_triple_weight_cloud:.9g}, "
+                    f"weight_hist={self.gp_triple_weight_hist:.9g}, "
+                    f"hist_distance={float(self.hist_db_nearest_distance):.6f}, "
+                    f"hist_distance_pass={int(self.hist_db_distance_pass)}, "
+                    f"runtime_max_distance={self.gp_historical_db_max_distance}"
+                )
         if self.gp_compensation_source == "hist_db" and hist_compensation_ready:
             self._maybe_log_hist_db_runtime_diag("hist_db")
 

@@ -1077,6 +1077,16 @@ class TrajectoryPublisher(Node):
             if current_round != self.last_round:
                 self.last_round = current_round
 
+                # 每轮一条 round 边界标记，便于把单次 launch 内的 N 段重复
+                # 轨迹（--repeat → rounds_per_mode）与同一份 CSV 对齐。
+                round_marker_total = self.rounds_per_mode * len(self.modes)
+                if 0 <= current_round < round_marker_total:
+                    self.get_logger().info(
+                        '[TrajectoryPublisher] Trajectory round '
+                        f'{current_round + 1}/{round_marker_total} started '
+                        f'(t={elapsed_time:.1f}s, period={self.period:.1f}s).'
+                    )
+
                 # === 是否该切换 mode ===
                 if current_round > 0 and (current_round % self.rounds_per_mode) == 0:
                     self.current_mode_index = (self.current_mode_index + 1) % len(self.modes)

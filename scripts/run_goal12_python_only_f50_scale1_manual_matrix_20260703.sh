@@ -12,10 +12,24 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 PLAN_ONLY=0
-REPEAT_COUNT=1
+LAUNCH_REPEAT="1"
+ROUNDS_PER_LAUNCH="6"
 SOURCE_FILTER="all"
 GP_SCALE="1.0"
+GP_SCALE_EXPLICIT=0
 GP_CLIP="0.5"
+# true GP-off：--gp-off 时把 gp_prediction/online_update/compensation 全部关掉
+# 并强制 scale=0.0；与 --scale 0.0（GP 仍在预测、只是零幅值补偿）语义不同。
+GP_OFF=0
+# 频率参数化：三个 rate 独立可调，--frequency 一次性设置三者（未被显式
+# per-rate 覆盖时）。默认 50/50/50 与旧的硬编码 F50 行为一致。
+CONTROL_FREQUENCY="50"
+TRAJECTORY_PUBLISH_RATE="50"
+STATE_PARAMETER_PUBLISH_RATE="50"
+CONTROL_FREQUENCY_EXPLICIT=0
+TRAJECTORY_PUBLISH_RATE_EXPLICIT=0
+STATE_PARAMETER_PUBLISH_RATE_EXPLICIT=0
+FREQUENCY_ALL=""
 MODEL_DIR="${REPO_ROOT}/outputs/gp_models_extracted_20260625_164901/gp_models"
 OUTPUT_ROOT="outputs/manual_compensation"
 NO_CLEANUP=1
@@ -64,12 +78,41 @@ Usage:
 
 Options:
   --plan                 Print the planned Terminal-C-only runs and exit.
-  --repeat N             Repeat each selected source N times. Default: 1.
+  --launch-repeat N      Restart the whole launch N independent times per
+                         selected source. Default: 1.
+  --repeat N             Alias for --launch-repeat N, kept for compatibility.
+                         It does NOT mean internal trajectory rounds.
+  --rounds-per-launch N  Run N full trajectory rounds inside each independent
+                         launch (wired to trajectory_publisher rounds_per_mode).
+                         Default: 6. Each launch should produce one controller
+                         CSV containing all internal rounds.
   --source VALUE         local, cloud, combined, triple, triple_dynamic, or all.
                          Default: all. all preserves the older
                          local/cloud/combined matrix; use --source triple
                          explicitly for triple fusion on the same anchor.
-  --scale VALUE          GP compensation scale. Default: 1.0.
+  --scale VALUE          GP compensation scale. Default: 1.0. Note scale 0.0
+                         still runs GP prediction/online update with zero
+                         compensation amplitude; use --gp-off for true GP-off.
+  --gp-off               True GP-off for clean historical-DB raw runs. Sets
+                         gp_prediction_enabled=false,
+                         gp_online_update_enabled=false,
+                         gp_compensation_enabled=false, and forces
+                         gp_compensation_scale=0.0. Conflicts with an explicit
+                         non-zero --scale. Default: off (GP enabled as before).
+  --frequency VALUE      Convenience switch: set control frequency, trajectory
+                         publish rate, and state parameter publish rate to the
+                         same value (e.g. 50, 100, 200, 500) unless an explicit
+                         per-rate option overrides one of them. Default: 50.
+                         F500 is only a parameterized runner target; do not run
+                         it on the real robot unless ros2_control update rate,
+                         cpp_relayer, controller config, and timing have been
+                         explicitly validated.
+  --control-frequency VALUE
+                         Python controller frequency in Hz. Default: 50.
+  --trajectory-publish-rate VALUE
+                         Trajectory publisher rate in Hz. Default: 50.
+  --state-parameter-publish-rate VALUE
+                         State parameter publish rate in Hz. Default: 50.
   --clip VALUE           GP compensation clip in Nm. Default: 0.5.
   --model-dir PATH       GP model directory.
   --output-root DIR      Output root. Default: outputs/manual_compensation.
@@ -188,7 +231,17 @@ while (($# > 0)); do
       ;;
     --repeat)
       [[ $# -ge 2 ]] || die "--repeat requires a value"
-      REPEAT_COUNT="$2"
+      LAUNCH_REPEAT="$2"
+      shift
+      ;;
+    --launch-repeat)
+      [[ $# -ge 2 ]] || die "--launch-repeat requires a value"
+      LAUNCH_REPEAT="$2"
+      shift
+      ;;
+    --rounds-per-launch)
+      [[ $# -ge 2 ]] || die "--rounds-per-launch requires a value"
+      ROUNDS_PER_LAUNCH="$2"
       shift
       ;;
     --source)
@@ -199,6 +252,33 @@ while (($# > 0)); do
     --scale)
       [[ $# -ge 2 ]] || die "--scale requires a value"
       GP_SCALE="$2"
+      GP_SCALE_EXPLICIT=1
+      shift
+      ;;
+    --gp-off)
+      GP_OFF=1
+      ;;
+    --frequency)
+      [[ $# -ge 2 ]] || die "--frequency requires a value"
+      FREQUENCY_ALL="$2"
+      shift
+      ;;
+    --control-frequency)
+      [[ $# -ge 2 ]] || die "--control-frequency requires a value"
+      CONTROL_FREQUENCY="$2"
+      CONTROL_FREQUENCY_EXPLICIT=1
+      shift
+      ;;
+    --trajectory-publish-rate)
+      [[ $# -ge 2 ]] || die "--trajectory-publish-rate requires a value"
+      TRAJECTORY_PUBLISH_RATE="$2"
+      TRAJECTORY_PUBLISH_RATE_EXPLICIT=1
+      shift
+      ;;
+    --state-parameter-publish-rate)
+      [[ $# -ge 2 ]] || die "--state-parameter-publish-rate requires a value"
+      STATE_PARAMETER_PUBLISH_RATE="$2"
+      STATE_PARAMETER_PUBLISH_RATE_EXPLICIT=1
       shift
       ;;
     --clip)
@@ -327,7 +407,60 @@ while (($# > 0)); do
   shift
 done
 
-[[ "${REPEAT_COUNT}" =~ ^[1-9][0-9]*$ ]] || die "--repeat must be a positive integer"
+[[ "${LAUNCH_REPEAT}" =~ ^[1-9][0-9]*$ ]] || die "--launch-repeat/--repeat must be a positive integer"
+[[ "${ROUNDS_PER_LAUNCH}" =~ ^[1-9][0-9]*$ ]] || die "--rounds-per-launch must be a positive integer"
+
+is_positive_number() {
+  [[ "$1" =~ ^[0-9]+([.][0-9]+)?$ ]] || return 1
+  awk -v v="$1" 'BEGIN { exit (v > 0) ? 0 : 1 }'
+}
+
+# --frequency 一次性设置三个 rate；显式 per-rate 选项优先，与出现顺序无关。
+if [[ -n "${FREQUENCY_ALL}" ]]; then
+  is_positive_number "${FREQUENCY_ALL}" || die "--frequency must be a positive number, got: ${FREQUENCY_ALL}"
+  (( ! CONTROL_FREQUENCY_EXPLICIT )) && CONTROL_FREQUENCY="${FREQUENCY_ALL}"
+  (( ! TRAJECTORY_PUBLISH_RATE_EXPLICIT )) && TRAJECTORY_PUBLISH_RATE="${FREQUENCY_ALL}"
+  (( ! STATE_PARAMETER_PUBLISH_RATE_EXPLICIT )) && STATE_PARAMETER_PUBLISH_RATE="${FREQUENCY_ALL}"
+fi
+is_positive_number "${CONTROL_FREQUENCY}" || die "--control-frequency must be a positive number, got: ${CONTROL_FREQUENCY}"
+is_positive_number "${TRAJECTORY_PUBLISH_RATE}" || die "--trajectory-publish-rate must be a positive number, got: ${TRAJECTORY_PUBLISH_RATE}"
+is_positive_number "${STATE_PARAMETER_PUBLISH_RATE}" || die "--state-parameter-publish-rate must be a positive number, got: ${STATE_PARAMETER_PUBLISH_RATE}"
+
+# true GP-off 与显式非零 --scale 冲突：宁可 fail fast 也不静默覆盖操作员意图。
+if ((GP_OFF)) && ((GP_SCALE_EXPLICIT)) && [[ ! "${GP_SCALE}" =~ ^0+([.]0+)?$ ]]; then
+  die "--gp-off forces gp_compensation_scale=0.0; drop --scale or pass --scale 0.0 explicitly"
+fi
+
+if ((GP_OFF)); then
+  GP_OFF_BOOL="true"
+  EFFECTIVE_GP_PREDICTION_ENABLED="false"
+  EFFECTIVE_GP_ONLINE_UPDATE_ENABLED="false"
+  EFFECTIVE_GP_COMPENSATION_ENABLED="false"
+  EFFECTIVE_GP_SCALE="0.0"
+else
+  GP_OFF_BOOL="false"
+  EFFECTIVE_GP_PREDICTION_ENABLED="true"
+  EFFECTIVE_GP_ONLINE_UPDATE_ENABLED="true"
+  EFFECTIVE_GP_COMPENSATION_ENABLED="true"
+  EFFECTIVE_GP_SCALE="${GP_SCALE}"
+fi
+
+rate_exceeds_200() {
+  awk -v v="$1" 'BEGIN { exit (v > 200) ? 0 : 1 }'
+}
+
+print_high_frequency_warning_if_needed() {
+  if rate_exceeds_200 "${CONTROL_FREQUENCY}" \
+    || rate_exceeds_200 "${TRAJECTORY_PUBLISH_RATE}" \
+    || rate_exceeds_200 "${STATE_PARAMETER_PUBLISH_RATE}"; then
+    echo "########################################################################"
+    echo "# HIGH-FREQUENCY WARNING (>200 Hz requested)"
+    echo "# F500 is only a parameterized runner target; do not run on real robot"
+    echo "# unless ros2_control update rate, cpp_relayer, controller config, and"
+    echo "# timing have been explicitly validated."
+    echo "########################################################################"
+  fi
+}
 
 case "${SOURCE_FILTER}" in
   local|cloud|combined|triple|triple_dynamic|all)
@@ -431,11 +564,16 @@ source_environment
 
 scale_tag() {
   case "$1" in
+    0|0.0|0.00) printf '0' ;;
     1|1.0|1.00) printf '1' ;;
     0.5|.5|0.50|.50) printf '05' ;;
     0.25|.25|0.250|.250) printf '025' ;;
     *) printf '%s' "$1" | tr -cd '[:alnum:]' ;;
   esac
+}
+
+freq_tag() {
+  printf '%s' "$1" | tr -cd '[:alnum:]'
 }
 
 source_upper() {
@@ -462,7 +600,7 @@ print_repo_status() {
 
 init_manifest() {
   mkdir -p "${OUTPUT_ROOT}"
-  printf 'case_name,run_name,data_output_dir,source,scale,clip,j7_disabled,control_frequency,trajectory_publish_rate,state_parameter_publish_rate,trajectory_reference_mode,session_home_mode,session_home_path,post_run_return,status\n' > "${MANIFEST_PATH}"
+  printf 'case_name,run_name,data_output_dir,source,scale,clip,gp_off,j7_disabled,control_frequency,trajectory_publish_rate,state_parameter_publish_rate,launch_repeat,rounds_per_launch,trajectory_reference_mode,session_home_mode,session_home_path,post_run_return,status\n' > "${MANIFEST_PATH}"
 }
 
 append_manifest_row() {
@@ -472,9 +610,11 @@ append_manifest_row() {
   local source="$4"
   local effective_session_home_mode="$5"
   local status="$6"
-  printf '%s,%s,%s,%s,%s,%s,true,50,50,50,%s,%s,%s,%s,%s\n' \
+  printf '%s,%s,%s,%s,%s,%s,%s,true,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
     "${case_name}" "${run_name}" "${data_output_dir}" "${source}" \
-    "${GP_SCALE}" "${GP_CLIP}" \
+    "${EFFECTIVE_GP_SCALE}" "${GP_CLIP}" "${GP_OFF_BOOL}" \
+    "${CONTROL_FREQUENCY}" "${TRAJECTORY_PUBLISH_RATE}" \
+    "${STATE_PARAMETER_PUBLISH_RATE}" "${LAUNCH_REPEAT}" "${ROUNDS_PER_LAUNCH}" \
     "${TRAJECTORY_REFERENCE_MODE}" \
     "${effective_session_home_mode}" "${SESSION_HOME_PATH}" \
     "${POST_RUN_RETURN}" "${status}" >> "${MANIFEST_PATH}"
@@ -518,6 +658,7 @@ run_one_case() {
   local source="$1"
   local repeat_index="$2"
   local source_tag
+  local gpoff_name_tag
   local case_name
   local run_name
   local data_output_dir
@@ -544,7 +685,9 @@ run_one_case() {
   SESSION_CASE_INDEX=$((SESSION_CASE_INDEX + 1))
 
   source_tag="$(source_upper "${source}")"
-  case_name="COMP_${source_tag}_F50_SCALE$(scale_tag "${GP_SCALE}")_CLIP$(scale_tag "${GP_CLIP}")_J7OFF_1000HZ_BRIDGE_R${repeat_index}"
+  gpoff_name_tag=""
+  ((GP_OFF)) && gpoff_name_tag="_GPOFF"
+  case_name="COMP_${source_tag}_F$(freq_tag "${CONTROL_FREQUENCY}")${gpoff_name_tag}_SCALE$(scale_tag "${EFFECTIVE_GP_SCALE}")_CLIP$(scale_tag "${GP_CLIP}")_J7OFF_1000HZ_BRIDGE_ROUND${ROUNDS_PER_LAUNCH}_R${repeat_index}"
   run_name="${case_name}_${RUN_STAMP}"
   data_output_dir="${OUTPUT_ROOT}/${case_name}"
 
@@ -554,9 +697,10 @@ run_one_case() {
     "csv_output_profile:=full"
     "trajectory_mode:=goal1_spatial_multisine"
     "circle_frequency:=0.05"
-    "control_frequency:=50"
-    "trajectory_publish_rate:=50"
-    "state_parameter_publish_rate:=50"
+    "control_frequency:=${CONTROL_FREQUENCY}"
+    "trajectory_publish_rate:=${TRAJECTORY_PUBLISH_RATE}"
+    "state_parameter_publish_rate:=${STATE_PARAMETER_PUBLISH_RATE}"
+    "rounds_per_mode:=${ROUNDS_PER_LAUNCH}"
     "transition_duration:=${TRANSITION_DURATION}"
     "torque_rate_limit_nm_per_s:=${TORQUE_RATE_LIMIT_NM_PER_S}"
     "startup_linear_speed:=${STARTUP_LINEAR_SPEED}"
@@ -590,8 +734,11 @@ run_one_case() {
     "post_run_return_timeout_sec:=${POST_RUN_RETURN_TIMEOUT_SEC}"
     "post_run_return_hold_sec:=${POST_RUN_RETURN_HOLD_SEC}"
     "gp_model_dir:=${MODEL_DIR}"
+    "gp_prediction_enabled:=${EFFECTIVE_GP_PREDICTION_ENABLED}"
+    "gp_online_update_enabled:=${EFFECTIVE_GP_ONLINE_UPDATE_ENABLED}"
+    "gp_compensation_enabled:=${EFFECTIVE_GP_COMPENSATION_ENABLED}"
     "gp_compensation_source:=${source}"
-    "gp_compensation_scale:=${GP_SCALE}"
+    "gp_compensation_scale:=${EFFECTIVE_GP_SCALE}"
     "gp_compensation_clip_nm:=${GP_CLIP}"
     "gp_compensation_disable_joint7:=true"
     "delay_steps:=0"
@@ -604,7 +751,17 @@ run_one_case() {
   echo "Terminal-C-only case: ${case_name}"
   echo "run_name: ${run_name}"
   echo "data_output_dir: ${data_output_dir}"
-  echo "source: ${source}, scale: ${GP_SCALE}, clip: ${GP_CLIP}, J7OFF: true"
+  echo "source: ${source}, scale: ${EFFECTIVE_GP_SCALE}, clip: ${GP_CLIP}, J7OFF: true"
+  echo "gp_off=${GP_OFF_BOOL}"
+  echo "gp_prediction_enabled=${EFFECTIVE_GP_PREDICTION_ENABLED}"
+  echo "gp_online_update_enabled=${EFFECTIVE_GP_ONLINE_UPDATE_ENABLED}"
+  echo "gp_compensation_enabled=${EFFECTIVE_GP_COMPENSATION_ENABLED}"
+  echo "gp_compensation_scale=${EFFECTIVE_GP_SCALE}"
+  echo "control_frequency=${CONTROL_FREQUENCY}"
+  echo "trajectory_publish_rate=${TRAJECTORY_PUBLISH_RATE}"
+  echo "state_parameter_publish_rate=${STATE_PARAMETER_PUBLISH_RATE}"
+  echo "launch_repeat_index=${repeat_index}/${LAUNCH_REPEAT}"
+  echo "rounds_per_launch=${ROUNDS_PER_LAUNCH} (one launch, one controller CSV containing all rounds)"
   echo "transition_duration=${TRANSITION_DURATION}"
   echo "torque_rate_limit_nm_per_s=${TORQUE_RATE_LIMIT_NM_PER_S}"
   echo "startup_linear_speed=${STARTUP_LINEAR_SPEED}"
@@ -694,6 +851,20 @@ main() {
   echo "ROS_DOMAIN_ID=${ROS_DOMAIN_ID}"
   echo "Model dir: ${MODEL_DIR}"
   echo "Cleanup between successful runs: disabled"
+  echo "== GP compensation / frequency / repeat =="
+  echo "gp_off=${GP_OFF_BOOL}"
+  echo "gp_prediction_enabled=${EFFECTIVE_GP_PREDICTION_ENABLED}"
+  echo "gp_online_update_enabled=${EFFECTIVE_GP_ONLINE_UPDATE_ENABLED}"
+  echo "gp_compensation_enabled=${EFFECTIVE_GP_COMPENSATION_ENABLED}"
+  echo "gp_compensation_scale=${EFFECTIVE_GP_SCALE}"
+  echo "control_frequency=${CONTROL_FREQUENCY}"
+  echo "trajectory_publish_rate=${TRAJECTORY_PUBLISH_RATE}"
+  echo "state_parameter_publish_rate=${STATE_PARAMETER_PUBLISH_RATE}"
+  echo "launch_repeat=${LAUNCH_REPEAT}"
+  echo "rounds_per_launch=${ROUNDS_PER_LAUNCH}"
+  echo "NOTE: --repeat is an alias for --launch-repeat. Internal trajectory"
+  echo "rounds are controlled only by --rounds-per-launch."
+  print_high_frequency_warning_if_needed
   echo "== Trajectory reference / session anchor =="
   echo "trajectory_reference_mode=${TRAJECTORY_REFERENCE_MODE}"
   echo "session_home/session_anchor path=${SESSION_HOME_PATH}"
@@ -735,7 +906,7 @@ main() {
   local source
   local repeat_index
   for source in "${sources[@]}"; do
-    for ((repeat_index = 1; repeat_index <= REPEAT_COUNT; repeat_index++)); do
+    for ((repeat_index = 1; repeat_index <= LAUNCH_REPEAT; repeat_index++)); do
       run_one_case "${source}" "${repeat_index}"
     done
   done
