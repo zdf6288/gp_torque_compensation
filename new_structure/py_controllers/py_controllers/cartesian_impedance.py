@@ -787,6 +787,17 @@ class CartesianImpedanceController(Node):
         self.gp_triple_combined_base_shadow_norm_history = []
         self.gp_triple_combined_base_shadow_delta_from_combined_norm_history = []
         self.gp_triple_combined_base_shadow_delta_from_legacy_triple_norm_history = []
+        self.gp_triple_gated_active_history = []
+        self.gp_triple_gated_available_history = []
+        self.gp_triple_gated_fallback_to_combined_history = []
+        self.gp_triple_gated_hist_weight_eff_history = []
+        self.gp_triple_gated_hist_cap_history = []
+        self.gp_triple_gated_distance_gate_history = []
+        self.gp_triple_gated_disagreement_gate_history = []
+        self.gp_triple_gated_disagreement_norm_history = []
+        self.gp_triple_gated_correction_norm_history = []
+        self.gp_triple_gated_delta_raw_norm_history = []
+        self.gp_triple_gated_distance_ratio_history = []
         # set signal handler
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
@@ -874,6 +885,13 @@ class CartesianImpedanceController(Node):
         self.declare_parameter("gp_triple_combined_base_shadow_enabled", False)
         self.declare_parameter("gp_triple_combined_base_hist_weight_cap", 0.50)
         self.declare_parameter("gp_triple_combined_base_hist_weight_ramp_sec", 0.0)
+        self.declare_parameter("gp_triple_gated_hist_cap_f50", 0.25)
+        self.declare_parameter("gp_triple_gated_hist_cap_f100", 0.10)
+        self.declare_parameter("gp_triple_gated_hist_cap_f200", 0.0)
+        self.declare_parameter("gp_triple_gated_disagreement_ref_norm", 0.80)
+        self.declare_parameter("gp_triple_gated_disagreement_hard_max_norm", 1.50)
+        self.declare_parameter("gp_triple_gated_correction_clip_norm", 0.30)
+        self.declare_parameter("gp_triple_gated_use_distance_gate", True)
         self.declare_parameter("gp_historical_soft_shadow_enabled", False)
         self.declare_parameter("gp_historical_soft_alpha", 1.0)
         self.declare_parameter("gp_historical_soft_distance_threshold", 0.2)
@@ -1086,6 +1104,33 @@ class CartesianImpedanceController(Node):
                 "gp_triple_combined_base_hist_weight_ramp_sec", 0.0
             )
         )
+        self.gp_triple_gated_hist_cap_f50 = self._get_bounded_float_parameter(
+            "gp_triple_gated_hist_cap_f50", 0.25, 0.0, 1.0
+        )
+        self.gp_triple_gated_hist_cap_f100 = self._get_bounded_float_parameter(
+            "gp_triple_gated_hist_cap_f100", 0.10, 0.0, 1.0
+        )
+        self.gp_triple_gated_hist_cap_f200 = self._get_bounded_float_parameter(
+            "gp_triple_gated_hist_cap_f200", 0.0, 0.0, 1.0
+        )
+        self.gp_triple_gated_disagreement_ref_norm = (
+            self._get_positive_float_parameter(
+                "gp_triple_gated_disagreement_ref_norm", 0.80
+            )
+        )
+        self.gp_triple_gated_disagreement_hard_max_norm = (
+            self._get_positive_float_parameter(
+                "gp_triple_gated_disagreement_hard_max_norm", 1.50
+            )
+        )
+        self.gp_triple_gated_correction_clip_norm = (
+            self._get_nonnegative_float_parameter(
+                "gp_triple_gated_correction_clip_norm", 0.30
+            )
+        )
+        self.gp_triple_gated_use_distance_gate = self._get_bool_parameter(
+            "gp_triple_gated_use_distance_gate"
+        )
         self.gp_historical_soft_shadow_enabled = self._get_bool_parameter(
             "gp_historical_soft_shadow_enabled"
         )
@@ -1181,6 +1226,7 @@ class CartesianImpedanceController(Node):
             "hist_db",
             "triple",
             "triple_dynamic",
+            "triple_dynamic_gated",
         )
         if self.gp_compensation_source not in valid_gp_compensation_sources:
             self.get_logger().warn(
@@ -1251,6 +1297,18 @@ class CartesianImpedanceController(Node):
         }[self.gp_triple_fallback_source]
         self.gp_triple_weights = self._compute_gp_triple_weights()
 
+        if (
+            self.gp_triple_gated_disagreement_hard_max_norm
+            <= self.gp_triple_gated_disagreement_ref_norm
+        ):
+            self.get_logger().warn(
+                "[GP Triple Gated] disagreement_hard_max_norm must exceed "
+                "disagreement_ref_norm; using hard_max = ref + 0.1"
+            )
+            self.gp_triple_gated_disagreement_hard_max_norm = (
+                self.gp_triple_gated_disagreement_ref_norm + 0.1
+            )
+
         if self.csv_output_profile not in ("full", "final"):
             self.get_logger().warn(
                 f"[CSV] Invalid csv_output_profile='{self.csv_output_profile}', "
@@ -1279,11 +1337,13 @@ class CartesianImpedanceController(Node):
         self._gp_local_prediction_sequence_shadow = 0
         self._gp_hist_last_appended_sequence_shadow = 0
         self._reset_gp_triple_state()
+        self._reset_gp_triple_gated_state()
         self._gp_triple_combined_base_shadow_start_time = None
         self._reset_gp_triple_combined_base_shadow_state()
 
         # Persistent residual DB is separate from runtime prediction-pool paper fusion.
         # It enters active torque only through explicit hist_db/triple/triple_dynamic source selection.
+        # triple_dynamic_gated reuses the same hist DB gate as a small residual on combined.
         self.gp_historical_db_loaded = False
         self.gp_historical_db_row_count = 0
         self.gp_historical_db_x_scaled = None
@@ -1382,7 +1442,12 @@ class CartesianImpedanceController(Node):
             or self.gp_historical_db_enabled
             or self.gp_historical_db_loaded
             or self.gp_historical_db_preflight_enabled
-            or self.gp_compensation_source in ("hist_db", "triple", "triple_dynamic")
+            or self.gp_compensation_source in (
+                "hist_db",
+                "triple",
+                "triple_dynamic",
+                "triple_dynamic_gated",
+            )
         ):
             self.get_logger().info(
                 "[GP Hist DB] Persistent residual DB controls: "
@@ -1401,11 +1466,13 @@ class CartesianImpedanceController(Node):
                 f"preflight_required={self.gp_historical_db_preflight_required}, "
                 f"preflight_mode='{self.gp_historical_db_preflight_mode}', "
                 f"disable_silent_fallback={self.gp_disable_silent_hist_fallback}; "
-                "active only with explicit hist_db/triple/triple_dynamic source"
+                "active only with explicit hist_db/triple/triple_dynamic/"
+                "triple_dynamic_gated source"
             )
         if self._csv_profile_is_full() or self.gp_compensation_source in (
             "triple",
             "triple_dynamic",
+            "triple_dynamic_gated",
         ):
             self.get_logger().info(
                 "[GP Triple] Fusion controls: "
@@ -1430,8 +1497,22 @@ class CartesianImpedanceController(Node):
                 f"fallback_source='{self.gp_triple_fallback_source}', "
                 f"debug_safety_log_enabled={self.gp_triple_debug_safety_log_enabled}, "
                 f"debug_safety_log_first_n={self.gp_triple_debug_safety_log_first_n}; "
-                "active only with gp_compensation_source='triple' or 'triple_dynamic' "
-                "and compensation enabled"
+                "active only with gp_compensation_source='triple', "
+                "'triple_dynamic', or 'triple_dynamic_gated' and compensation enabled"
+            )
+        if self._csv_profile_is_full() or self.gp_compensation_source == "triple_dynamic_gated":
+            self.get_logger().info(
+                "[GP Triple Gated] Controls: "
+                f"hist_cap_f50={self.gp_triple_gated_hist_cap_f50}, "
+                f"hist_cap_f100={self.gp_triple_gated_hist_cap_f100}, "
+                f"hist_cap_f200={self.gp_triple_gated_hist_cap_f200}, "
+                "disagreement_ref_norm="
+                f"{self.gp_triple_gated_disagreement_ref_norm}, "
+                "disagreement_hard_max_norm="
+                f"{self.gp_triple_gated_disagreement_hard_max_norm}, "
+                f"correction_clip_norm={self.gp_triple_gated_correction_clip_norm}, "
+                f"use_distance_gate={self.gp_triple_gated_use_distance_gate}; "
+                "active source uses self.y_hat_combined as backbone"
             )
         if self._csv_profile_is_full() or self.gp_triple_combined_base_shadow_enabled:
             self.get_logger().info(
@@ -2246,7 +2327,12 @@ class CartesianImpedanceController(Node):
             and bool(self.gp_compensation_enabled)
             and bool(self.gp_historical_db_enabled)
             and bool(self.gp_historical_db_preflight_enabled)
-            and self.gp_compensation_source in ("hist_db", "triple", "triple_dynamic")
+            and self.gp_compensation_source in (
+                "hist_db",
+                "triple",
+                "triple_dynamic",
+                "triple_dynamic_gated",
+            )
         )
 
     def _current_joint_state_for_historical_preflight(self):
@@ -2358,8 +2444,15 @@ class CartesianImpedanceController(Node):
 
         if self.gp_compensation_source == "hist_db":
             self._maybe_log_hist_db_runtime_diag("hist_db")
-        elif self.gp_compensation_source in ("triple", "triple_dynamic"):
-            if self.gp_compensation_source == "triple_dynamic":
+        elif self.gp_compensation_source in (
+            "triple",
+            "triple_dynamic",
+            "triple_dynamic_gated",
+        ):
+            if self.gp_compensation_source == "triple_dynamic_gated":
+                triple_result = self._compute_gp_triple_dynamic_gated_prediction()
+                self._reset_gp_triple_gated_state(triple_result)
+            elif self.gp_compensation_source == "triple_dynamic":
                 triple_result = self._compute_gp_triple_dynamic_prediction()
             else:
                 triple_result = self._compute_gp_triple_prediction()
@@ -2370,6 +2463,14 @@ class CartesianImpedanceController(Node):
             ):
                 self._request_historical_pre_recording_abort(
                     "triple_hist_component_unavailable"
+                )
+                return False
+            if (
+                self.gp_compensation_source == "triple_dynamic_gated"
+                and int(self.gp_triple_gated_fallback_to_combined) != 0
+            ):
+                self._request_historical_pre_recording_abort(
+                    "triple_dynamic_gated_fallback_to_combined"
                 )
                 return False
             if (
@@ -2388,6 +2489,26 @@ class CartesianImpedanceController(Node):
                     f"hist_distance={float(self.hist_db_nearest_distance):.6f}, "
                     f"hist_distance_pass={int(self.hist_db_distance_pass)}, "
                     f"runtime_max_distance={self.gp_historical_db_max_distance}, "
+                    "phase='pre_recording'"
+                )
+            if (
+                self.gp_compensation_source == "triple_dynamic_gated"
+                and not self._triple_dynamic_active_ok_logged
+            ):
+                self._triple_dynamic_active_ok_logged = True
+                self.get_logger().info(
+                    "[GP Triple Gated Safety] TRIPLE_DYNAMIC_GATED_ACTIVE_OK: "
+                    f"source='{self.gp_compensation_source}', "
+                    f"available={int(self.gp_triple_gated_available)}, "
+                    "fallback_to_combined="
+                    f"{int(self.gp_triple_gated_fallback_to_combined)}, "
+                    f"hist_weight_eff={self.gp_triple_gated_hist_weight_eff:.9g}, "
+                    f"hist_cap={self.gp_triple_gated_hist_cap:.9g}, "
+                    f"distance_gate={self.gp_triple_gated_distance_gate:.9g}, "
+                    "disagreement_gate="
+                    f"{self.gp_triple_gated_disagreement_gate:.9g}, "
+                    "disagreement_norm="
+                    f"{self.gp_triple_gated_disagreement_norm:.9g}, "
                     "phase='pre_recording'"
                 )
 
@@ -3282,6 +3403,39 @@ class CartesianImpedanceController(Node):
                     float(
                         self.gp_triple_combined_base_shadow_delta_from_legacy_triple_norm
                     )
+                )
+                self.gp_triple_gated_active_history.append(
+                    int(self.gp_triple_gated_active)
+                )
+                self.gp_triple_gated_available_history.append(
+                    int(self.gp_triple_gated_available)
+                )
+                self.gp_triple_gated_fallback_to_combined_history.append(
+                    int(self.gp_triple_gated_fallback_to_combined)
+                )
+                self.gp_triple_gated_hist_weight_eff_history.append(
+                    float(self.gp_triple_gated_hist_weight_eff)
+                )
+                self.gp_triple_gated_hist_cap_history.append(
+                    float(self.gp_triple_gated_hist_cap)
+                )
+                self.gp_triple_gated_distance_gate_history.append(
+                    float(self.gp_triple_gated_distance_gate)
+                )
+                self.gp_triple_gated_disagreement_gate_history.append(
+                    float(self.gp_triple_gated_disagreement_gate)
+                )
+                self.gp_triple_gated_disagreement_norm_history.append(
+                    float(self.gp_triple_gated_disagreement_norm)
+                )
+                self.gp_triple_gated_correction_norm_history.append(
+                    float(self.gp_triple_gated_correction_norm)
+                )
+                self.gp_triple_gated_delta_raw_norm_history.append(
+                    float(self.gp_triple_gated_delta_raw_norm)
+                )
+                self.gp_triple_gated_distance_ratio_history.append(
+                    float(self.gp_triple_gated_distance_ratio)
                 )
                 self.gp_shadow_historical_available_history.append(
                     int(self.gp_shadow_historical_available)
@@ -4878,6 +5032,7 @@ class CartesianImpedanceController(Node):
                 "hist_db",
                 "triple",
                 "triple_dynamic",
+                "triple_dynamic_gated",
             )
         )
 
@@ -5853,6 +6008,37 @@ class CartesianImpedanceController(Node):
             result.get("dynamic_mode_code", 0)
         )
 
+    def _reset_gp_triple_gated_state(self, result=None):
+        if result is None:
+            result = {}
+        self.gp_triple_gated_active = int(result.get("active", 0))
+        self.gp_triple_gated_available = int(result.get("available", 0))
+        self.gp_triple_gated_fallback_to_combined = int(
+            result.get("fallback_to_combined", 0)
+        )
+        self.gp_triple_gated_hist_weight_eff = float(
+            result.get("hist_weight_eff", 0.0)
+        )
+        self.gp_triple_gated_hist_cap = float(result.get("hist_cap", 0.0))
+        self.gp_triple_gated_distance_gate = float(
+            result.get("distance_gate", 0.0)
+        )
+        self.gp_triple_gated_disagreement_gate = float(
+            result.get("disagreement_gate", 0.0)
+        )
+        self.gp_triple_gated_disagreement_norm = float(
+            result.get("disagreement_norm", 0.0)
+        )
+        self.gp_triple_gated_correction_norm = float(
+            result.get("correction_norm", 0.0)
+        )
+        self.gp_triple_gated_delta_raw_norm = float(
+            result.get("delta_raw_norm", 0.0)
+        )
+        self.gp_triple_gated_distance_ratio = float(
+            result.get("distance_ratio", 0.0)
+        )
+
     def _get_gp_triple_hist_candidate(self):
         zero = np.zeros(7, dtype=float)
         try:
@@ -6060,6 +6246,181 @@ class CartesianImpedanceController(Node):
         })
         return result
 
+    def _gp_triple_gated_hist_cap_for_frequency(self):
+        try:
+            frequency = float(self.control_frequency)
+        except (TypeError, ValueError):
+            return float(self.gp_triple_gated_hist_cap_f200)
+        if not np.isfinite(frequency) or frequency <= 0.0:
+            return float(self.gp_triple_gated_hist_cap_f200)
+        if frequency <= 75.0:
+            return float(self.gp_triple_gated_hist_cap_f50)
+        if frequency <= 150.0:
+            return float(self.gp_triple_gated_hist_cap_f100)
+        return float(self.gp_triple_gated_hist_cap_f200)
+
+    def _gp_triple_gated_distance_gate(self, nearest_distance):
+        if not self.gp_triple_gated_use_distance_gate:
+            return 1.0, 0.0, True
+        try:
+            distance = float(nearest_distance)
+            distance_scale = float(self.gp_triple_hist_distance_scale)
+        except (TypeError, ValueError):
+            return 0.0, 0.0, False
+        if (
+            not np.isfinite(distance)
+            or distance < 0.0
+            or not np.isfinite(distance_scale)
+            or distance_scale <= 0.0
+        ):
+            return 0.0, 0.0, False
+        with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+            ratio = distance / distance_scale
+            gate = 1.0 / (1.0 + ratio * ratio)
+        if not np.isfinite(ratio) or not np.isfinite(gate):
+            return 0.0, 0.0, False
+        return float(gate), float(ratio), True
+
+    def _gp_triple_gated_disagreement_gate(self, disagreement):
+        try:
+            value = float(disagreement)
+            ref = float(self.gp_triple_gated_disagreement_ref_norm)
+            hard_max = float(self.gp_triple_gated_disagreement_hard_max_norm)
+        except (TypeError, ValueError):
+            return 0.0, False
+        if (
+            not np.isfinite(value)
+            or value < 0.0
+            or not np.isfinite(ref)
+            or ref <= 0.0
+            or not np.isfinite(hard_max)
+            or hard_max <= ref
+        ):
+            return 0.0, False
+        if value <= ref:
+            return 1.0, True
+        if value >= hard_max:
+            return 0.0, True
+        t = (value - ref) / (hard_max - ref)
+        smooth = t * t * (3.0 - 2.0 * t)
+        gate = 1.0 - smooth
+        if not np.isfinite(gate):
+            return 0.0, False
+        return float(np.clip(gate, 0.0, 1.0)), True
+
+    def _norm_clip_7d(self, value, clip_norm):
+        vec = self._as_finite_7d(value, 0.0)
+        try:
+            limit = float(clip_norm)
+            norm = float(np.linalg.norm(vec))
+        except (TypeError, ValueError):
+            return np.zeros(7, dtype=float), 0.0, False
+        if not np.isfinite(limit) or limit < 0.0 or not np.isfinite(norm):
+            return np.zeros(7, dtype=float), 0.0, False
+        if norm <= limit or norm <= 1e-12:
+            return vec.copy(), norm, True
+        if limit <= 0.0:
+            return np.zeros(7, dtype=float), 0.0, True
+        clipped = vec * (limit / norm)
+        if clipped.shape != (7,) or not np.all(np.isfinite(clipped)):
+            return np.zeros(7, dtype=float), 0.0, False
+        return clipped.copy(), float(np.linalg.norm(clipped)), True
+
+    def _compute_gp_triple_dynamic_gated_prediction(self):
+        base = self._as_finite_7d(self.y_hat_combined, 0.0)
+        result = {
+            "raw": base.copy(),
+            "weights": np.zeros(3, dtype=float),
+            "available": 0,
+            "used_fallback": 1,
+            "fallback_source_code": 3,
+            "active": 1,
+            "fallback_to_combined": 1,
+            "hist_weight_eff": 0.0,
+            "hist_cap": self._gp_triple_gated_hist_cap_for_frequency(),
+            "distance_gate": 0.0,
+            "disagreement_gate": 0.0,
+            "disagreement_norm": 0.0,
+            "correction_norm": 0.0,
+            "delta_raw_norm": 0.0,
+            "distance_ratio": 0.0,
+        }
+
+        try:
+            combined_arr = np.asarray(self.y_hat_combined, dtype=float)
+        except (TypeError, ValueError):
+            return result
+        if combined_arr.shape != (7,) or not np.all(np.isfinite(combined_arr)):
+            return result
+        base = combined_arr.copy()
+        result["raw"] = base.copy()
+
+        hist_candidate, hist_available = self._get_gp_triple_hist_candidate()
+        preflight_allowed = (
+            not self.gp_historical_db_preflight_required
+            or self._historical_db_active_allowed()
+        )
+        hist_gate_ok = (
+            bool(hist_available)
+            and bool(preflight_allowed)
+            and int(self.hist_db_runtime_fallback_used) == 0
+        )
+        if not hist_gate_ok:
+            return result
+
+        distance_gate, distance_ratio, distance_ok = (
+            self._gp_triple_gated_distance_gate(self.hist_db_nearest_distance)
+        )
+        result["distance_gate"] = distance_gate
+        result["distance_ratio"] = distance_ratio
+        if not distance_ok:
+            return result
+
+        delta_raw = hist_candidate - base
+        try:
+            delta_raw_norm = float(np.linalg.norm(delta_raw))
+        except (TypeError, ValueError):
+            return result
+        result["delta_raw_norm"] = delta_raw_norm
+        result["disagreement_norm"] = delta_raw_norm
+        if not np.isfinite(delta_raw_norm):
+            return result
+
+        disagreement_gate, disagreement_ok = (
+            self._gp_triple_gated_disagreement_gate(delta_raw_norm)
+        )
+        result["disagreement_gate"] = disagreement_gate
+        if not disagreement_ok:
+            return result
+
+        correction, correction_norm, correction_ok = self._norm_clip_7d(
+            delta_raw,
+            self.gp_triple_gated_correction_clip_norm,
+        )
+        result["correction_norm"] = correction_norm
+        if not correction_ok:
+            return result
+
+        hist_cap = float(np.clip(result["hist_cap"], 0.0, 1.0))
+        hist_weight_eff = hist_cap * distance_gate * disagreement_gate
+        if not np.isfinite(hist_weight_eff) or hist_weight_eff <= 0.0:
+            return result
+
+        candidate = base + hist_weight_eff * correction
+        if candidate.shape != (7,) or not np.all(np.isfinite(candidate)):
+            return result
+
+        result.update({
+            "raw": candidate.copy(),
+            "weights": np.array([0.0, 0.0, hist_weight_eff], dtype=float),
+            "available": 1,
+            "used_fallback": 0,
+            "fallback_source_code": 0,
+            "fallback_to_combined": 0,
+            "hist_weight_eff": hist_weight_eff,
+        })
+        return result
+
     def _new_gp_triple_combined_base_shadow_result(self):
         zero = np.zeros(7, dtype=float)
         return {
@@ -6229,7 +6590,8 @@ class CartesianImpedanceController(Node):
     def _log_gp_triple_debug_safety(self):
         if (
             not self.gp_triple_debug_safety_log_enabled
-            or self.gp_compensation_source not in ("triple", "triple_dynamic")
+            or self.gp_compensation_source
+            not in ("triple", "triple_dynamic", "triple_dynamic_gated")
             or not self.gp_compensation_enabled
             or (
                 self._gp_triple_debug_safety_log_count
@@ -6670,6 +7032,7 @@ class CartesianImpedanceController(Node):
 
     def _apply_gp_compensation(self, tau):
         self._reset_gp_triple_state()
+        self._reset_gp_triple_gated_state()
         # 真机安全 gate：smooth transition / 起步阶段不允许 GP compensation 进入 torque。
         # 只有 trajectory_publisher 发布 /data_recording_enabled=True 后，才开始比较各 GP source 的补偿效果。
         if (
@@ -6763,11 +7126,21 @@ class CartesianImpedanceController(Node):
                 self._gp_clip_active = np.zeros(7, dtype=int)
                 self._log_gp_triple_debug_safety()
                 return tau
+        elif self.gp_compensation_source == "triple_dynamic_gated":
+            triple_result = self._compute_gp_triple_dynamic_gated_prediction()
+            self._set_gp_triple_state(triple_result)
+            self._reset_gp_triple_gated_state(triple_result)
+            compensation = self.gp_triple_raw
+            self._gp_source_code = 7
         else:
             compensation = self.y_hat_local
             self._gp_source_code = 1
 
-        if self.gp_compensation_source in ("local", "cloud", "combined") and not self.gp_output_fresh:
+        if (
+            self.gp_compensation_source
+            in ("local", "cloud", "combined", "triple_dynamic_gated")
+            and not self.gp_output_fresh
+        ):
             self._gp_source_code = 0
             self._gp_selected_raw = np.zeros(7, dtype=float)
             self._gp_scaled = np.zeros(7, dtype=float)
@@ -6789,7 +7162,11 @@ class CartesianImpedanceController(Node):
         if self.gp_compensation_disable_joint7:
             self._gp_applied[6] = 0.0
 
-        if self.gp_compensation_source in ("triple", "triple_dynamic"):
+        if self.gp_compensation_source in (
+            "triple",
+            "triple_dynamic",
+            "triple_dynamic_gated",
+        ):
             self._log_gp_triple_debug_safety()
             if (
                 self.gp_compensation_source == "triple_dynamic"
@@ -6809,6 +7186,28 @@ class CartesianImpedanceController(Node):
                     f"hist_distance={float(self.hist_db_nearest_distance):.6f}, "
                     f"hist_distance_pass={int(self.hist_db_distance_pass)}, "
                     f"runtime_max_distance={self.gp_historical_db_max_distance}"
+                )
+            if (
+                self.gp_compensation_source == "triple_dynamic_gated"
+                and int(self.gp_triple_gated_available) == 1
+                and int(self.gp_triple_gated_fallback_to_combined) == 0
+                and not self._triple_dynamic_active_ok_logged
+            ):
+                self._triple_dynamic_active_ok_logged = True
+                self.get_logger().info(
+                    "[GP Triple Gated Safety] TRIPLE_DYNAMIC_GATED_ACTIVE_OK: "
+                    f"source='{self.gp_compensation_source}', "
+                    f"available={int(self.gp_triple_gated_available)}, "
+                    "fallback_to_combined="
+                    f"{int(self.gp_triple_gated_fallback_to_combined)}, "
+                    f"hist_weight_eff={self.gp_triple_gated_hist_weight_eff:.9g}, "
+                    f"hist_cap={self.gp_triple_gated_hist_cap:.9g}, "
+                    f"distance_gate={self.gp_triple_gated_distance_gate:.9g}, "
+                    "disagreement_gate="
+                    f"{self.gp_triple_gated_disagreement_gate:.9g}, "
+                    "disagreement_norm="
+                    f"{self.gp_triple_gated_disagreement_norm:.9g}, "
+                    f"correction_norm={self.gp_triple_gated_correction_norm:.9g}"
                 )
         if self.gp_compensation_source == "hist_db" and hist_compensation_ready:
             self._maybe_log_hist_db_runtime_diag("hist_db")
@@ -7067,6 +7466,17 @@ class CartesianImpedanceController(Node):
             "gp_triple_combined_base_shadow_norm",
             "gp_triple_combined_base_shadow_delta_from_combined_norm",
             "gp_triple_combined_base_shadow_delta_from_legacy_triple_norm",
+            "gp_triple_gated_active",
+            "gp_triple_gated_available",
+            "gp_triple_gated_fallback_to_combined",
+            "gp_triple_gated_hist_weight_eff",
+            "gp_triple_gated_hist_cap",
+            "gp_triple_gated_distance_gate",
+            "gp_triple_gated_disagreement_gate",
+            "gp_triple_gated_disagreement_norm",
+            "gp_triple_gated_correction_norm",
+            "gp_triple_gated_delta_raw_norm",
+            "gp_triple_gated_distance_ratio",
         ])
         columns.extend([
             f"gp_triple_combined_base_shadow_raw_{i+1}" for i in range(7)
@@ -7179,6 +7589,17 @@ class CartesianImpedanceController(Node):
                 self.gp_triple_combined_base_shadow_norm_history,
                 self.gp_triple_combined_base_shadow_delta_from_combined_norm_history,
                 self.gp_triple_combined_base_shadow_delta_from_legacy_triple_norm_history,
+                self.gp_triple_gated_active_history,
+                self.gp_triple_gated_available_history,
+                self.gp_triple_gated_fallback_to_combined_history,
+                self.gp_triple_gated_hist_weight_eff_history,
+                self.gp_triple_gated_hist_cap_history,
+                self.gp_triple_gated_distance_gate_history,
+                self.gp_triple_gated_disagreement_gate_history,
+                self.gp_triple_gated_disagreement_norm_history,
+                self.gp_triple_gated_correction_norm_history,
+                self.gp_triple_gated_delta_raw_norm_history,
+                self.gp_triple_gated_distance_ratio_history,
                 self.gp_shadow_historical_available_history,
                 self.gp_shadow_local_raw_history,
                 self.gp_shadow_cloud_raw_history,
@@ -7332,6 +7753,17 @@ class CartesianImpedanceController(Node):
                     'gp_triple_combined_base_shadow_norm',
                     'gp_triple_combined_base_shadow_delta_from_combined_norm',
                     'gp_triple_combined_base_shadow_delta_from_legacy_triple_norm',
+                    'gp_triple_gated_active',
+                    'gp_triple_gated_available',
+                    'gp_triple_gated_fallback_to_combined',
+                    'gp_triple_gated_hist_weight_eff',
+                    'gp_triple_gated_hist_cap',
+                    'gp_triple_gated_distance_gate',
+                    'gp_triple_gated_disagreement_gate',
+                    'gp_triple_gated_disagreement_norm',
+                    'gp_triple_gated_correction_norm',
+                    'gp_triple_gated_delta_raw_norm',
+                    'gp_triple_gated_distance_ratio',
                 ])
                 header.extend([
                     f'gp_triple_combined_base_shadow_raw_{i+1}' for i in range(7)
@@ -7813,6 +8245,77 @@ class CartesianImpedanceController(Node):
                         gp_triple_combined_base_shadow_norm,
                         gp_triple_combined_base_shadow_delta_from_combined_norm,
                         gp_triple_combined_base_shadow_delta_from_legacy_triple_norm,
+                    ])
+
+                    gp_triple_gated_active = (
+                        int(self.gp_triple_gated_active_history[i])
+                        if i < len(self.gp_triple_gated_active_history)
+                        else int(self.gp_triple_gated_active)
+                    )
+                    gp_triple_gated_available = (
+                        int(self.gp_triple_gated_available_history[i])
+                        if i < len(self.gp_triple_gated_available_history)
+                        else int(self.gp_triple_gated_available)
+                    )
+                    gp_triple_gated_fallback_to_combined = (
+                        int(self.gp_triple_gated_fallback_to_combined_history[i])
+                        if i < len(
+                            self.gp_triple_gated_fallback_to_combined_history
+                        )
+                        else int(self.gp_triple_gated_fallback_to_combined)
+                    )
+                    gp_triple_gated_hist_weight_eff = (
+                        float(self.gp_triple_gated_hist_weight_eff_history[i])
+                        if i < len(self.gp_triple_gated_hist_weight_eff_history)
+                        else float(self.gp_triple_gated_hist_weight_eff)
+                    )
+                    gp_triple_gated_hist_cap = (
+                        float(self.gp_triple_gated_hist_cap_history[i])
+                        if i < len(self.gp_triple_gated_hist_cap_history)
+                        else float(self.gp_triple_gated_hist_cap)
+                    )
+                    gp_triple_gated_distance_gate = (
+                        float(self.gp_triple_gated_distance_gate_history[i])
+                        if i < len(self.gp_triple_gated_distance_gate_history)
+                        else float(self.gp_triple_gated_distance_gate)
+                    )
+                    gp_triple_gated_disagreement_gate = (
+                        float(self.gp_triple_gated_disagreement_gate_history[i])
+                        if i < len(self.gp_triple_gated_disagreement_gate_history)
+                        else float(self.gp_triple_gated_disagreement_gate)
+                    )
+                    gp_triple_gated_disagreement_norm = (
+                        float(self.gp_triple_gated_disagreement_norm_history[i])
+                        if i < len(self.gp_triple_gated_disagreement_norm_history)
+                        else float(self.gp_triple_gated_disagreement_norm)
+                    )
+                    gp_triple_gated_correction_norm = (
+                        float(self.gp_triple_gated_correction_norm_history[i])
+                        if i < len(self.gp_triple_gated_correction_norm_history)
+                        else float(self.gp_triple_gated_correction_norm)
+                    )
+                    gp_triple_gated_delta_raw_norm = (
+                        float(self.gp_triple_gated_delta_raw_norm_history[i])
+                        if i < len(self.gp_triple_gated_delta_raw_norm_history)
+                        else float(self.gp_triple_gated_delta_raw_norm)
+                    )
+                    gp_triple_gated_distance_ratio = (
+                        float(self.gp_triple_gated_distance_ratio_history[i])
+                        if i < len(self.gp_triple_gated_distance_ratio_history)
+                        else float(self.gp_triple_gated_distance_ratio)
+                    )
+                    row.extend([
+                        gp_triple_gated_active,
+                        gp_triple_gated_available,
+                        gp_triple_gated_fallback_to_combined,
+                        gp_triple_gated_hist_weight_eff,
+                        gp_triple_gated_hist_cap,
+                        gp_triple_gated_distance_gate,
+                        gp_triple_gated_disagreement_gate,
+                        gp_triple_gated_disagreement_norm,
+                        gp_triple_gated_correction_norm,
+                        gp_triple_gated_delta_raw_norm,
+                        gp_triple_gated_distance_ratio,
                     ])
 
                     if i < len(self.gp_triple_combined_base_shadow_raw_history):

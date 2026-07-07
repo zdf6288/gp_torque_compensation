@@ -238,6 +238,27 @@ def generate_launch_description():
     gp_triple_combined_base_hist_weight_ramp_sec = LaunchConfiguration(
         'gp_triple_combined_base_hist_weight_ramp_sec'
     )
+    gp_triple_gated_hist_cap_f50 = LaunchConfiguration(
+        'gp_triple_gated_hist_cap_f50'
+    )
+    gp_triple_gated_hist_cap_f100 = LaunchConfiguration(
+        'gp_triple_gated_hist_cap_f100'
+    )
+    gp_triple_gated_hist_cap_f200 = LaunchConfiguration(
+        'gp_triple_gated_hist_cap_f200'
+    )
+    gp_triple_gated_disagreement_ref_norm = LaunchConfiguration(
+        'gp_triple_gated_disagreement_ref_norm'
+    )
+    gp_triple_gated_disagreement_hard_max_norm = LaunchConfiguration(
+        'gp_triple_gated_disagreement_hard_max_norm'
+    )
+    gp_triple_gated_correction_clip_norm = LaunchConfiguration(
+        'gp_triple_gated_correction_clip_norm'
+    )
+    gp_triple_gated_use_distance_gate = LaunchConfiguration(
+        'gp_triple_gated_use_distance_gate'
+    )
     gp_historical_shadow_enabled = LaunchConfiguration(
         'gp_historical_shadow_enabled'
     )
@@ -428,6 +449,27 @@ def generate_launch_description():
             ),
             'gp_triple_combined_base_hist_weight_ramp_sec': ParameterValue(
                 gp_triple_combined_base_hist_weight_ramp_sec, value_type=float
+            ),
+            'gp_triple_gated_hist_cap_f50': ParameterValue(
+                gp_triple_gated_hist_cap_f50, value_type=float
+            ),
+            'gp_triple_gated_hist_cap_f100': ParameterValue(
+                gp_triple_gated_hist_cap_f100, value_type=float
+            ),
+            'gp_triple_gated_hist_cap_f200': ParameterValue(
+                gp_triple_gated_hist_cap_f200, value_type=float
+            ),
+            'gp_triple_gated_disagreement_ref_norm': ParameterValue(
+                gp_triple_gated_disagreement_ref_norm, value_type=float
+            ),
+            'gp_triple_gated_disagreement_hard_max_norm': ParameterValue(
+                gp_triple_gated_disagreement_hard_max_norm, value_type=float
+            ),
+            'gp_triple_gated_correction_clip_norm': ParameterValue(
+                gp_triple_gated_correction_clip_norm, value_type=float
+            ),
+            'gp_triple_gated_use_distance_gate': ParameterValue(
+                gp_triple_gated_use_distance_gate, value_type=bool
             ),
             'gp_historical_soft_shadow_enabled': ParameterValue(
                 gp_historical_soft_shadow_enabled, value_type=bool
@@ -1197,6 +1239,41 @@ def generate_launch_description():
             'gp_triple_combined_base_hist_weight_ramp_sec',
             default_value='0.0',
             description='Ramp time for combined-base shadow hist weight.',
+        ),
+        DeclareLaunchArgument(
+            'gp_triple_gated_hist_cap_f50',
+            default_value='0.25',
+            description='Hist residual weight cap for F50 triple_dynamic_gated.',
+        ),
+        DeclareLaunchArgument(
+            'gp_triple_gated_hist_cap_f100',
+            default_value='0.10',
+            description='Hist residual weight cap for F100 triple_dynamic_gated.',
+        ),
+        DeclareLaunchArgument(
+            'gp_triple_gated_hist_cap_f200',
+            default_value='0.0',
+            description='Hist residual weight cap for F200 triple_dynamic_gated.',
+        ),
+        DeclareLaunchArgument(
+            'gp_triple_gated_disagreement_ref_norm',
+            default_value='0.80',
+            description='Full-weight disagreement norm reference for triple_dynamic_gated.',
+        ),
+        DeclareLaunchArgument(
+            'gp_triple_gated_disagreement_hard_max_norm',
+            default_value='1.50',
+            description='Hard-zero disagreement norm for triple_dynamic_gated.',
+        ),
+        DeclareLaunchArgument(
+            'gp_triple_gated_correction_clip_norm',
+            default_value='0.30',
+            description='Norm clip for hist residual correction in triple_dynamic_gated.',
+        ),
+        DeclareLaunchArgument(
+            'gp_triple_gated_use_distance_gate',
+            default_value='true',
+            description='Enable soft hist distance gate in triple_dynamic_gated.',
         ),
         DeclareLaunchArgument(
             'gp_historical_shadow_enabled',
