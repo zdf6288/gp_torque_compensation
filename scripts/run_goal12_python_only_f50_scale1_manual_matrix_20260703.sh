@@ -32,6 +32,7 @@ STATE_PARAMETER_PUBLISH_RATE_EXPLICIT=0
 FREQUENCY_ALL=""
 MODEL_DIR="${REPO_ROOT}/outputs/gp_models_extracted_20260625_164901/gp_models"
 OUTPUT_ROOT="outputs/manual_compensation"
+HIST_DB_PATH=""
 NO_CLEANUP=1
 TRANSITION_DURATION="60.0"
 TORQUE_RATE_LIMIT_NM_PER_S="20.0"
@@ -86,7 +87,8 @@ Options:
                          launch (wired to trajectory_publisher rounds_per_mode).
                          Default: 6. Each launch should produce one controller
                          CSV containing all internal rounds.
-  --source VALUE         local, cloud, combined, triple, triple_dynamic, or all.
+  --source VALUE         local, cloud, combined, triple, triple_dynamic,
+                         triple_dynamic_gated, or all.
                          Default: all. all preserves the older
                          local/cloud/combined matrix; use --source triple
                          explicitly for triple fusion on the same anchor.
@@ -116,6 +118,8 @@ Options:
   --clip VALUE           GP compensation clip in Nm. Default: 0.5.
   --model-dir PATH       GP model directory.
   --output-root DIR      Output root. Default: outputs/manual_compensation.
+  --hist-db-path PATH    Historical residual DB .npz path. Required only for
+                         --source triple_dynamic_gated in this runner.
   --transition-duration VALUE
                          Fixed-start to trajectory-start transition duration
                          in seconds. Default: 60.0.
@@ -296,6 +300,11 @@ while (($# > 0)); do
       OUTPUT_ROOT="$2"
       shift
       ;;
+    --hist-db-path)
+      [[ $# -ge 2 ]] || die "--hist-db-path requires a value"
+      HIST_DB_PATH="$2"
+      shift
+      ;;
     --transition-duration)
       [[ $# -ge 2 ]] || die "--transition-duration requires a value"
       TRANSITION_DURATION="$2"
@@ -463,12 +472,17 @@ print_high_frequency_warning_if_needed() {
 }
 
 case "${SOURCE_FILTER}" in
-  local|cloud|combined|triple|triple_dynamic|all)
+  local|cloud|combined|triple|triple_dynamic|triple_dynamic_gated|all)
     ;;
   *)
-    die "--source must be local, cloud, combined, triple, triple_dynamic, or all"
+    die "--source must be local, cloud, combined, triple, triple_dynamic, triple_dynamic_gated, or all"
     ;;
 esac
+
+if [[ "${SOURCE_FILTER}" == "triple_dynamic_gated" ]]; then
+  [[ -n "${HIST_DB_PATH}" ]] || die "--source triple_dynamic_gated requires --hist-db-path"
+  [[ -f "${HIST_DB_PATH}" ]] || die "--hist-db-path does not exist or is not a regular file: ${HIST_DB_PATH}"
+fi
 
 case "${TRAJECTORY_REFERENCE_MODE}" in
   fixed_absolute|session_relative)
@@ -747,6 +761,16 @@ run_one_case() {
     "gp_output_timeout_sec:=0.5"
   )
 
+  if [[ "${source}" == "triple_dynamic_gated" ]]; then
+    launch_args+=(
+      "gp_historical_db_enabled:=true"
+      "gp_historical_db_path:=${HIST_DB_PATH}"
+      "gp_historical_db_preflight_enabled:=true"
+      "gp_historical_db_preflight_required:=true"
+      "gp_disable_silent_hist_fallback:=true"
+    )
+  fi
+
   echo "========================================================================"
   echo "Terminal-C-only case: ${case_name}"
   echo "run_name: ${run_name}"
@@ -757,6 +781,11 @@ run_one_case() {
   echo "gp_online_update_enabled=${EFFECTIVE_GP_ONLINE_UPDATE_ENABLED}"
   echo "gp_compensation_enabled=${EFFECTIVE_GP_COMPENSATION_ENABLED}"
   echo "gp_compensation_scale=${EFFECTIVE_GP_SCALE}"
+  if [[ "${source}" == "triple_dynamic_gated" ]]; then
+    echo "hist_db_path=${HIST_DB_PATH}"
+    echo "hist_db_preflight_required=true"
+    echo "gp_disable_silent_hist_fallback=true"
+  fi
   echo "control_frequency=${CONTROL_FREQUENCY}"
   echo "trajectory_publish_rate=${TRAJECTORY_PUBLISH_RATE}"
   echo "state_parameter_publish_rate=${STATE_PARAMETER_PUBLISH_RATE}"
@@ -850,6 +879,9 @@ main() {
   echo "RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION}"
   echo "ROS_DOMAIN_ID=${ROS_DOMAIN_ID}"
   echo "Model dir: ${MODEL_DIR}"
+  if [[ -n "${HIST_DB_PATH}" ]]; then
+    echo "Hist DB path: ${HIST_DB_PATH}"
+  fi
   echo "Cleanup between successful runs: disabled"
   echo "== GP compensation / frequency / repeat =="
   echo "gp_off=${GP_OFF_BOOL}"
