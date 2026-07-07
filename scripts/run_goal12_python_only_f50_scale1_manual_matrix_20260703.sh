@@ -767,6 +767,7 @@ run_one_case() {
       "gp_historical_db_path:=${HIST_DB_PATH}"
       "gp_historical_db_preflight_enabled:=true"
       "gp_historical_db_preflight_required:=true"
+      "gp_historical_db_disable_when_online_update:=false"
       "gp_disable_silent_hist_fallback:=true"
     )
   fi
@@ -784,6 +785,7 @@ run_one_case() {
   if [[ "${source}" == "triple_dynamic_gated" ]]; then
     echo "hist_db_path=${HIST_DB_PATH}"
     echo "hist_db_preflight_required=true"
+    echo "gp_historical_db_disable_when_online_update=false"
     echo "gp_disable_silent_hist_fallback=true"
   fi
   echo "control_frequency=${CONTROL_FREQUENCY}"
