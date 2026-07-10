@@ -1,6 +1,8 @@
 """Parity tests for extracted GOAL12 controller parameter configuration."""
 
 import ast
+import hashlib
+import json
 from pathlib import Path
 import sys
 import unittest
@@ -10,6 +12,7 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PACKAGE_ROOT))
 
 from py_controllers.cartesian_impedance_config import (  # noqa: E402
+    GP_PARAMETER_SPECS,
     HIST_SUPPORT_PARAMETER_SPECS,
     HOME_SUPPORT_PARAMETER_SPECS,
     declare_parameter_specs,
@@ -35,6 +38,20 @@ EXPECTED_SPECS = (
 
 
 class ControllerConfigParityTest(unittest.TestCase):
+    def test_all_gp_declarations_preserve_name_default_type_and_order(self):
+        pairs = [(spec.name, spec.default) for spec in GP_PARAMETER_SPECS]
+        digest = hashlib.sha256(
+            json.dumps(pairs, separators=(",", ":")).encode()
+        ).hexdigest()
+        self.assertEqual(len(pairs), 99)
+        self.assertEqual(len({name for name, _ in pairs}), 99)
+        self.assertEqual(
+            digest,
+            "17d631b7cf6f1cfd8551e6e25eb928b10bfe94219c4a81f911353dbc5af133a3",
+        )
+        for spec in GP_PARAMETER_SPECS:
+            self.assertIs(type(spec.default), spec.value_type, spec.name)
+
     def test_parameter_names_defaults_types_and_declaration_order(self):
         specs = HOME_SUPPORT_PARAMETER_SPECS + HIST_SUPPORT_PARAMETER_SPECS
         actual = tuple(
