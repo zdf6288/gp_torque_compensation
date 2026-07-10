@@ -45,7 +45,13 @@ from py_controllers.session_home_feasibility import (
     classify_joint_home,
     compute_joint_home_metrics,
     format_joint_home_report,
-    validate_joint_home_thresholds,
+)
+from py_controllers.cartesian_impedance_config import (
+    HIST_SUPPORT_PARAMETER_SPECS,
+    HOME_SUPPORT_PARAMETER_SPECS,
+    declare_parameter_specs,
+    read_historical_support_config,
+    read_home_support_config,
 )
 from py_controllers.session_relative_config import (
     declare_session_relative_parameters,
@@ -354,19 +360,8 @@ class CartesianImpedanceController(Node):
         self.declare_parameter('normal_run_start_gate_enabled', False)
         self.declare_parameter('normal_run_start_warn_m', 0.100)
         self.declare_parameter('normal_run_start_refuse_m', 0.150)
-        self.declare_parameter('session_home_joint_check_enabled', False)
-        self.declare_parameter(
-            'session_home_joint_check_required_for_hist', True
-        )
-        self.declare_parameter('session_home_joint_max_abs_warn_rad', 0.10)
-        self.declare_parameter('session_home_joint_max_abs_refuse_rad', 0.30)
-        self.declare_parameter('session_home_joint_l2_warn_rad', 0.20)
-        self.declare_parameter('session_home_joint_l2_refuse_rad', 0.50)
-        self.declare_parameter(
-            'session_home_dq_stillness_warn_rad_s', 0.02
-        )
-        self.declare_parameter(
-            'session_home_dq_stillness_refuse_rad_s', 0.05
+        declare_parameter_specs(
+            self.declare_parameter, HOME_SUPPORT_PARAMETER_SPECS
         )
         self.declare_parameter('emergency_return_start_refuse_m', 0.300)
         self.declare_parameter('return_only_if_too_far_enabled', False)
@@ -418,32 +413,19 @@ class CartesianImpedanceController(Node):
         self.normal_run_start_refuse_m = self._get_nonnegative_float_parameter(
             'normal_run_start_refuse_m', 0.150
         )
-        self.session_home_joint_check_enabled = self._get_bool_parameter(
-            'session_home_joint_check_enabled'
+        home_support_config = read_home_support_config(
+            self._get_bool_parameter,
+            self._get_nonnegative_float_parameter,
         )
-        self.session_home_joint_check_required_for_hist = self._get_bool_parameter(
-            'session_home_joint_check_required_for_hist'
+        self.session_home_joint_check_enabled = (
+            home_support_config.joint_check_enabled
         )
-        self.session_home_joint_thresholds = validate_joint_home_thresholds({
-            'max_abs_warn_rad': self._get_nonnegative_float_parameter(
-                'session_home_joint_max_abs_warn_rad', 0.10
-            ),
-            'max_abs_refuse_rad': self._get_nonnegative_float_parameter(
-                'session_home_joint_max_abs_refuse_rad', 0.30
-            ),
-            'l2_warn_rad': self._get_nonnegative_float_parameter(
-                'session_home_joint_l2_warn_rad', 0.20
-            ),
-            'l2_refuse_rad': self._get_nonnegative_float_parameter(
-                'session_home_joint_l2_refuse_rad', 0.50
-            ),
-            'dq_warn_rad_s': self._get_nonnegative_float_parameter(
-                'session_home_dq_stillness_warn_rad_s', 0.02
-            ),
-            'dq_refuse_rad_s': self._get_nonnegative_float_parameter(
-                'session_home_dq_stillness_refuse_rad_s', 0.05
-            ),
-        })
+        self.session_home_joint_check_required_for_hist = (
+            home_support_config.joint_check_required_for_hist
+        )
+        self.session_home_joint_thresholds = (
+            home_support_config.joint_thresholds
+        )
         self.emergency_return_start_refuse_m = self._get_nonnegative_float_parameter(
             'emergency_return_start_refuse_m', 0.300
         )
@@ -933,15 +915,8 @@ class CartesianImpedanceController(Node):
         self.declare_parameter("gp_historical_db_q_scale", 0.1)
         self.declare_parameter("gp_historical_db_dq_scale", 0.1)
         self.declare_parameter("gp_historical_db_max_distance", 1.0)
-        self.declare_parameter(
-            "gp_historical_db_require_distance_pass_for_active", False
-        )
-        self.declare_parameter(
-            "gp_historical_db_distance_contribution_logging", False
-        )
-        self.declare_parameter("gp_historical_db_metadata_path", "")
-        self.declare_parameter(
-            "gp_historical_db_metadata_enforcement_enabled", False
+        declare_parameter_specs(
+            self.declare_parameter, HIST_SUPPORT_PARAMETER_SPECS
         )
         self.declare_parameter("gp_historical_db_query_stride", 1)
         self.declare_parameter("gp_historical_db_disable_when_online_update", True)
@@ -1080,23 +1055,21 @@ class CartesianImpedanceController(Node):
         self.gp_historical_db_max_distance = self._get_positive_float_parameter(
             "gp_historical_db_max_distance", 1.0
         )
+        historical_support_config = read_historical_support_config(
+            self._get_bool_parameter,
+            lambda name: str(self.get_parameter(name).value),
+        )
         self.gp_historical_db_require_distance_pass_for_active = (
-            self._get_bool_parameter(
-                "gp_historical_db_require_distance_pass_for_active"
-            )
+            historical_support_config.require_distance_pass_for_active
         )
         self.gp_historical_db_distance_contribution_logging = (
-            self._get_bool_parameter(
-                "gp_historical_db_distance_contribution_logging"
-            )
+            historical_support_config.distance_contribution_logging
         )
-        self.gp_historical_db_metadata_path = str(
-            self.get_parameter("gp_historical_db_metadata_path").value
-        ).strip()
+        self.gp_historical_db_metadata_path = (
+            historical_support_config.metadata_path
+        )
         self.gp_historical_db_metadata_enforcement_enabled = (
-            self._get_bool_parameter(
-                "gp_historical_db_metadata_enforcement_enabled"
-            )
+            historical_support_config.metadata_enforcement_enabled
         )
         self.gp_historical_db_query_stride = self._get_bounded_int_parameter(
             "gp_historical_db_query_stride", 1, 1, 1000000
