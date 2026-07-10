@@ -33,6 +33,8 @@ FREQUENCY_ALL=""
 MODEL_DIR="${REPO_ROOT}/outputs/gp_models_extracted_20260625_164901/gp_models"
 OUTPUT_ROOT="outputs/manual_compensation"
 HIST_DB_PATH=""
+HOME_PREFLIGHT_CURRENT_Q=""
+HOME_PREFLIGHT_CURRENT_DQ=""
 NO_CLEANUP=1
 TRANSITION_DURATION="60.0"
 TORQUE_RATE_LIMIT_NM_PER_S="20.0"
@@ -118,8 +120,12 @@ Options:
   --clip VALUE           GP compensation clip in Nm. Default: 0.5.
   --model-dir PATH       GP model directory.
   --output-root DIR      Output root. Default: outputs/manual_compensation.
-  --hist-db-path PATH    Historical residual DB .npz path. Required only for
-                         --source triple_dynamic_gated in this runner.
+  --hist-db-path PATH    Historical residual DB .npz path. Required for
+                         triple, triple_dynamic, and triple_dynamic_gated.
+  --home-preflight-current-q CSV
+                         Current q1..q7 for read-only pre-START gate.
+  --home-preflight-current-dq CSV
+                         Current dq1..dq7 for read-only pre-START gate.
   --transition-duration VALUE
                          Fixed-start to trajectory-start transition duration
                          in seconds. Default: 60.0.
@@ -305,6 +311,16 @@ while (($# > 0)); do
       HIST_DB_PATH="$2"
       shift
       ;;
+    --home-preflight-current-q)
+      [[ $# -ge 2 ]] || die "--home-preflight-current-q requires 7 CSV values"
+      HOME_PREFLIGHT_CURRENT_Q="$2"
+      shift
+      ;;
+    --home-preflight-current-dq)
+      [[ $# -ge 2 ]] || die "--home-preflight-current-dq requires 7 CSV values"
+      HOME_PREFLIGHT_CURRENT_DQ="$2"
+      shift
+      ;;
     --transition-duration)
       [[ $# -ge 2 ]] || die "--transition-duration requires a value"
       TRANSITION_DURATION="$2"
@@ -479,9 +495,18 @@ case "${SOURCE_FILTER}" in
     ;;
 esac
 
-if [[ "${SOURCE_FILTER}" == "triple_dynamic_gated" ]]; then
-  [[ -n "${HIST_DB_PATH}" ]] || die "--source triple_dynamic_gated requires --hist-db-path"
+source_needs_hist_db() {
+  case "$1" in
+    triple|triple_dynamic|triple_dynamic_gated) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+if source_needs_hist_db "${SOURCE_FILTER}"; then
+  [[ -n "${HIST_DB_PATH}" ]] || die "--source ${SOURCE_FILTER} requires --hist-db-path"
   [[ -f "${HIST_DB_PATH}" ]] || die "--hist-db-path does not exist or is not a regular file: ${HIST_DB_PATH}"
+  [[ -f "${HIST_DB_PATH%.npz}_metadata.json" ]] \
+    || die "hist DB metadata sidecar does not exist: ${HIST_DB_PATH%.npz}_metadata.json"
 fi
 
 case "${TRAJECTORY_REFERENCE_MODE}" in
@@ -761,7 +786,7 @@ run_one_case() {
     "gp_output_timeout_sec:=0.5"
   )
 
-  if [[ "${source}" == "triple_dynamic_gated" ]]; then
+  if source_needs_hist_db "${source}"; then
     launch_args+=(
       "gp_historical_db_enabled:=true"
       "gp_historical_db_path:=${HIST_DB_PATH}"
@@ -769,6 +794,11 @@ run_one_case() {
       "gp_historical_db_preflight_required:=true"
       "gp_historical_db_disable_when_online_update:=false"
       "gp_disable_silent_hist_fallback:=true"
+      "gp_historical_db_require_distance_pass_for_active:=true"
+      "gp_historical_db_distance_contribution_logging:=true"
+      "gp_historical_db_metadata_enforcement_enabled:=true"
+      "session_home_joint_check_enabled:=true"
+      "session_home_joint_check_required_for_hist:=true"
     )
   fi
 
@@ -782,9 +812,13 @@ run_one_case() {
   echo "gp_online_update_enabled=${EFFECTIVE_GP_ONLINE_UPDATE_ENABLED}"
   echo "gp_compensation_enabled=${EFFECTIVE_GP_COMPENSATION_ENABLED}"
   echo "gp_compensation_scale=${EFFECTIVE_GP_SCALE}"
-  if [[ "${source}" == "triple_dynamic_gated" ]]; then
+  if source_needs_hist_db "${source}"; then
     echo "hist_db_path=${HIST_DB_PATH}"
     echo "hist_db_preflight_required=true"
+    echo "hist_db_require_distance_pass_for_active=true"
+    echo "hist_db_metadata_enforcement_enabled=true"
+    echo "session_home_joint_check_enabled=true"
+    echo "session_home_joint_check_required_for_hist=true"
     echo "gp_historical_db_disable_when_online_update=false"
     echo "gp_disable_silent_hist_fallback=true"
   fi
@@ -827,10 +861,29 @@ run_one_case() {
   echo "========================================================================"
 
   if ((PLAN_ONLY)); then
+    if source_needs_hist_db "${source}"; then
+      echo "Pre-START home feasibility requires --home-preflight-current-q/dq."
+    fi
     printf 'ros2 launch py_controllers cartesian_impedance_python_only_compensation_trajectory_launch.py'
     printf ' %q' "${launch_args[@]}"
     printf '\n'
     return 0
+  fi
+
+  if source_needs_hist_db "${source}"; then
+    [[ "${effective_session_home_mode}" == "load" ]] \
+      || die "active hist source requires --session-home-mode load"
+    [[ -f "${SESSION_HOME_PATH}" ]] \
+      || die "session home does not exist: ${SESSION_HOME_PATH}"
+    [[ -n "${HOME_PREFLIGHT_CURRENT_Q}" ]] \
+      || die "active hist source requires --home-preflight-current-q"
+    [[ -n "${HOME_PREFLIGHT_CURRENT_DQ}" ]] \
+      || die "active hist source requires --home-preflight-current-dq"
+    echo "== Read-only session-home joint preflight before START =="
+    python3 scripts/check_canonical_home_feasibility.py \
+      --session-home "${SESSION_HOME_PATH}" \
+      --current-q "${HOME_PREFLIGHT_CURRENT_Q}" \
+      --current-dq "${HOME_PREFLIGHT_CURRENT_DQ}"
   fi
 
   check_cpp_relayer_active

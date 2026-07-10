@@ -9,6 +9,8 @@ FREQUENCIES="50,100,200"
 FREQUENCY_OVERRIDE=0
 ANCHOR="outputs/session_relative_floating_anchor_scale0_smoke_20260706_144203/session_home.json"
 HIST_DB_PATH=""
+HOME_PREFLIGHT_CURRENT_Q=""
+HOME_PREFLIGHT_CURRENT_DQ=""
 OUTPUT_ROOT=""
 PLAN_ONLY=0
 NO_PROMPT=0
@@ -37,6 +39,9 @@ Options:
                                  stress=500 unless overridden.
   --anchor PATH                  Existing session_home.json anchor to load.
   --hist-db-path PATH            Required for real hist_db/triple_dynamic cases.
+  --home-preflight-current-q CSV Current q1..q7 for read-only pre-START gate.
+  --home-preflight-current-dq CSV
+                                 Current dq1..dq7 for read-only pre-START gate.
   --output-root DIR              Output root for logs, CSVs, and manifest.
   --launch-repeat N              Independent launches per official case. Default: 1.
   --start-index N                First global matrix case number to run. Default: 1.
@@ -95,6 +100,16 @@ while (($# > 0)); do
     --hist-db-path)
       [[ $# -ge 2 ]] || die "--hist-db-path requires a path"
       HIST_DB_PATH="$2"
+      shift
+      ;;
+    --home-preflight-current-q)
+      [[ $# -ge 2 ]] || die "--home-preflight-current-q requires 7 CSV values"
+      HOME_PREFLIGHT_CURRENT_Q="$2"
+      shift
+      ;;
+    --home-preflight-current-dq)
+      [[ $# -ge 2 ]] || die "--home-preflight-current-dq requires 7 CSV values"
+      HOME_PREFLIGHT_CURRENT_DQ="$2"
       shift
       ;;
     --output-root)
@@ -261,7 +276,7 @@ SPECS
 
 source_needs_hist_db() {
   case "$1" in
-    hist_db|triple_dynamic)
+    hist_db|triple_dynamic|triple_dynamic_gated)
       return 0
       ;;
     *)
@@ -390,6 +405,11 @@ build_launch_args() {
       "gp_historical_db_q_scale:=0.1"
       "gp_historical_db_dq_scale:=0.1"
       "gp_historical_db_max_distance:=2.0"
+      "gp_historical_db_require_distance_pass_for_active:=true"
+      "gp_historical_db_distance_contribution_logging:=true"
+      "gp_historical_db_metadata_enforcement_enabled:=true"
+      "session_home_joint_check_enabled:=true"
+      "session_home_joint_check_required_for_hist:=true"
       "gp_historical_db_preflight_mode:=single"
       "gp_historical_db_preflight_max_distance:=2.0"
       "gp_historical_db_preflight_p95_max_distance:=2.0"
@@ -611,6 +631,7 @@ print_plan() {
   echo "true_gp_off_flags=gp_prediction_enabled=false,gp_online_update_enabled=false,gp_compensation_enabled=false,gp_compensation_scale=0.0"
   echo "session_relative=true"
   echo "session_home_mode=load"
+  echo "hist_home_support_contract=joint_check+distance_pass+metadata_binding"
   echo "session_relative_anchor_delta_limit_mode=warn"
   echo "post_run_return_to_session_home_enabled=true"
   echo "stop_on_failure=${STOP_ON_FAILURE}"
@@ -719,7 +740,7 @@ run_one_launch() {
 preflight_real_run_or_die() {
   [[ -f "${ANCHOR}" ]] || die "anchor does not exist: ${ANCHOR}"
 
-  local frequency spec source needs_gp_models=0
+  local frequency spec source needs_gp_models=0 needs_hist_db=0
   while IFS= read -r frequency; do
     if rate_gt_200 "${frequency}"; then
       if [[ "${MODE}" != "stress" ]]; then
@@ -735,10 +756,25 @@ preflight_real_run_or_die() {
       needs_gp_models=1
     fi
     if source_needs_hist_db "${source}"; then
+      needs_hist_db=1
       [[ -n "${HIST_DB_PATH}" ]] || die "${source} real run requires --hist-db-path"
       [[ -f "${HIST_DB_PATH}" ]] || die "hist DB path does not exist: ${HIST_DB_PATH}"
+      [[ -f "${HIST_DB_PATH%.npz}_metadata.json" ]] \
+        || die "hist DB metadata sidecar does not exist: ${HIST_DB_PATH%.npz}_metadata.json"
     fi
   done < <(case_specs_for_mode)
+
+  if ((needs_hist_db)); then
+    [[ -n "${HOME_PREFLIGHT_CURRENT_Q}" ]] \
+      || die "active hist matrix requires --home-preflight-current-q"
+    [[ -n "${HOME_PREFLIGHT_CURRENT_DQ}" ]] \
+      || die "active hist matrix requires --home-preflight-current-dq"
+    echo "== Read-only session-home joint preflight before START =="
+    python3 scripts/check_canonical_home_feasibility.py \
+      --session-home "${ANCHOR}" \
+      --current-q "${HOME_PREFLIGHT_CURRENT_Q}" \
+      --current-dq "${HOME_PREFLIGHT_CURRENT_DQ}"
+  fi
 
   if ((needs_gp_models)); then
     [[ -d "${GP_MODEL_DIR}" ]] || die "GP model dir does not exist: ${GP_MODEL_DIR}"

@@ -54,6 +54,30 @@ def generate_launch_description():
     session_home_capture_max_z = LaunchConfiguration(
         'session_home_capture_max_z'
     )
+    session_home_joint_check_enabled = LaunchConfiguration(
+        'session_home_joint_check_enabled'
+    )
+    session_home_joint_check_required_for_hist = LaunchConfiguration(
+        'session_home_joint_check_required_for_hist'
+    )
+    session_home_joint_max_abs_warn_rad = LaunchConfiguration(
+        'session_home_joint_max_abs_warn_rad'
+    )
+    session_home_joint_max_abs_refuse_rad = LaunchConfiguration(
+        'session_home_joint_max_abs_refuse_rad'
+    )
+    session_home_joint_l2_warn_rad = LaunchConfiguration(
+        'session_home_joint_l2_warn_rad'
+    )
+    session_home_joint_l2_refuse_rad = LaunchConfiguration(
+        'session_home_joint_l2_refuse_rad'
+    )
+    session_home_dq_stillness_warn_rad_s = LaunchConfiguration(
+        'session_home_dq_stillness_warn_rad_s'
+    )
+    session_home_dq_stillness_refuse_rad_s = LaunchConfiguration(
+        'session_home_dq_stillness_refuse_rad_s'
+    )
     trajectory_reference_mode = LaunchConfiguration(
         'trajectory_reference_mode'
     )
@@ -152,6 +176,18 @@ def generate_launch_description():
     gp_historical_db_dq_scale = LaunchConfiguration('gp_historical_db_dq_scale')
     gp_historical_db_max_distance = LaunchConfiguration(
         'gp_historical_db_max_distance'
+    )
+    gp_historical_db_require_distance_pass_for_active = LaunchConfiguration(
+        'gp_historical_db_require_distance_pass_for_active'
+    )
+    gp_historical_db_distance_contribution_logging = LaunchConfiguration(
+        'gp_historical_db_distance_contribution_logging'
+    )
+    gp_historical_db_metadata_path = LaunchConfiguration(
+        'gp_historical_db_metadata_path'
+    )
+    gp_historical_db_metadata_enforcement_enabled = LaunchConfiguration(
+        'gp_historical_db_metadata_enforcement_enabled'
     )
     gp_historical_db_query_stride = LaunchConfiguration(
         'gp_historical_db_query_stride'
@@ -350,6 +386,21 @@ def generate_launch_description():
             ),
             'gp_historical_db_max_distance': ParameterValue(
                 gp_historical_db_max_distance, value_type=float
+            ),
+            'gp_historical_db_require_distance_pass_for_active': ParameterValue(
+                gp_historical_db_require_distance_pass_for_active,
+                value_type=bool,
+            ),
+            'gp_historical_db_distance_contribution_logging': ParameterValue(
+                gp_historical_db_distance_contribution_logging,
+                value_type=bool,
+            ),
+            'gp_historical_db_metadata_path': ParameterValue(
+                gp_historical_db_metadata_path, value_type=str
+            ),
+            'gp_historical_db_metadata_enforcement_enabled': ParameterValue(
+                gp_historical_db_metadata_enforcement_enabled,
+                value_type=bool,
             ),
             'gp_historical_db_query_stride': ParameterValue(
                 gp_historical_db_query_stride, value_type=int
@@ -552,6 +603,30 @@ def generate_launch_description():
             ),
             'session_home_capture_max_z': ParameterValue(
                 session_home_capture_max_z, value_type=float
+            ),
+            'session_home_joint_check_enabled': ParameterValue(
+                session_home_joint_check_enabled, value_type=bool
+            ),
+            'session_home_joint_check_required_for_hist': ParameterValue(
+                session_home_joint_check_required_for_hist, value_type=bool
+            ),
+            'session_home_joint_max_abs_warn_rad': ParameterValue(
+                session_home_joint_max_abs_warn_rad, value_type=float
+            ),
+            'session_home_joint_max_abs_refuse_rad': ParameterValue(
+                session_home_joint_max_abs_refuse_rad, value_type=float
+            ),
+            'session_home_joint_l2_warn_rad': ParameterValue(
+                session_home_joint_l2_warn_rad, value_type=float
+            ),
+            'session_home_joint_l2_refuse_rad': ParameterValue(
+                session_home_joint_l2_refuse_rad, value_type=float
+            ),
+            'session_home_dq_stillness_warn_rad_s': ParameterValue(
+                session_home_dq_stillness_warn_rad_s, value_type=float
+            ),
+            'session_home_dq_stillness_refuse_rad_s': ParameterValue(
+                session_home_dq_stillness_refuse_rad_s, value_type=float
             ),
             'trajectory_reference_mode': ParameterValue(
                 trajectory_reference_mode, value_type=str
@@ -834,6 +909,40 @@ def generate_launch_description():
             description='Maximum z for a valid session home in m.',
         ),
         DeclareLaunchArgument(
+            'session_home_joint_check_enabled',
+            default_value='false',
+            description='Enable read-only q/dq gate against q_at_capture.',
+        ),
+        DeclareLaunchArgument(
+            'session_home_joint_check_required_for_hist',
+            default_value='true',
+            description='Require q_at_capture joint gate for active hist sources.',
+        ),
+        DeclareLaunchArgument(
+            'session_home_joint_max_abs_warn_rad',
+            default_value='0.10',
+        ),
+        DeclareLaunchArgument(
+            'session_home_joint_max_abs_refuse_rad',
+            default_value='0.30',
+        ),
+        DeclareLaunchArgument(
+            'session_home_joint_l2_warn_rad',
+            default_value='0.20',
+        ),
+        DeclareLaunchArgument(
+            'session_home_joint_l2_refuse_rad',
+            default_value='0.50',
+        ),
+        DeclareLaunchArgument(
+            'session_home_dq_stillness_warn_rad_s',
+            default_value='0.02',
+        ),
+        DeclareLaunchArgument(
+            'session_home_dq_stillness_refuse_rad_s',
+            default_value='0.05',
+        ),
+        DeclareLaunchArgument(
             'trajectory_reference_mode',
             default_value='fixed_absolute',
             description='Trajectory reference mode: fixed_absolute or session_relative.',
@@ -1074,6 +1183,26 @@ def generate_launch_description():
             'gp_historical_db_max_distance',
             default_value='1.0',
             description='Maximum scaled nearest-neighbor distance for hist DB availability.',
+        ),
+        DeclareLaunchArgument(
+            'gp_historical_db_require_distance_pass_for_active',
+            default_value='false',
+            description='Require distance_pass before active hist correction.',
+        ),
+        DeclareLaunchArgument(
+            'gp_historical_db_distance_contribution_logging',
+            default_value='false',
+            description='Log per-dimension scaled nearest-distance contributions.',
+        ),
+        DeclareLaunchArgument(
+            'gp_historical_db_metadata_path',
+            default_value='',
+            description='Optional hist DB metadata sidecar JSON path.',
+        ),
+        DeclareLaunchArgument(
+            'gp_historical_db_metadata_enforcement_enabled',
+            default_value='false',
+            description='Require DB/session metadata identity match.',
         ),
         DeclareLaunchArgument(
             'gp_historical_db_query_stride',

@@ -24,14 +24,28 @@ from collections import deque
 from py_controllers.session_anchor_utils import (
     load_session_home_payload,
     parse_vec3_parameter,
+    read_optional_q_at_capture,
     validate_session_anchor_payload,
 )
 from py_controllers.historical_db_support import (
+    DEFAULT_FEATURE_NAMES,
     build_joint_feature,
+    compute_scaled_delta_contributions,
+    format_distance_contribution_report,
     query_scaled_nearest_support,
     scale_feature,
     scale_feature_matrix,
-    select_legacy_gated_prediction,
+    select_active_gated_prediction,
+)
+from py_controllers.historical_db_metadata import (
+    load_metadata_sidecar,
+    validate_historical_db_metadata,
+)
+from py_controllers.session_home_feasibility import (
+    classify_joint_home,
+    compute_joint_home_metrics,
+    format_joint_home_report,
+    validate_joint_home_thresholds,
 )
 from py_controllers.session_relative_config import (
     declare_session_relative_parameters,
@@ -340,6 +354,20 @@ class CartesianImpedanceController(Node):
         self.declare_parameter('normal_run_start_gate_enabled', False)
         self.declare_parameter('normal_run_start_warn_m', 0.100)
         self.declare_parameter('normal_run_start_refuse_m', 0.150)
+        self.declare_parameter('session_home_joint_check_enabled', False)
+        self.declare_parameter(
+            'session_home_joint_check_required_for_hist', True
+        )
+        self.declare_parameter('session_home_joint_max_abs_warn_rad', 0.10)
+        self.declare_parameter('session_home_joint_max_abs_refuse_rad', 0.30)
+        self.declare_parameter('session_home_joint_l2_warn_rad', 0.20)
+        self.declare_parameter('session_home_joint_l2_refuse_rad', 0.50)
+        self.declare_parameter(
+            'session_home_dq_stillness_warn_rad_s', 0.02
+        )
+        self.declare_parameter(
+            'session_home_dq_stillness_refuse_rad_s', 0.05
+        )
         self.declare_parameter('emergency_return_start_refuse_m', 0.300)
         self.declare_parameter('return_only_if_too_far_enabled', False)
         self.declare_parameter('post_run_return_to_session_home_enabled', False)
@@ -390,6 +418,32 @@ class CartesianImpedanceController(Node):
         self.normal_run_start_refuse_m = self._get_nonnegative_float_parameter(
             'normal_run_start_refuse_m', 0.150
         )
+        self.session_home_joint_check_enabled = self._get_bool_parameter(
+            'session_home_joint_check_enabled'
+        )
+        self.session_home_joint_check_required_for_hist = self._get_bool_parameter(
+            'session_home_joint_check_required_for_hist'
+        )
+        self.session_home_joint_thresholds = validate_joint_home_thresholds({
+            'max_abs_warn_rad': self._get_nonnegative_float_parameter(
+                'session_home_joint_max_abs_warn_rad', 0.10
+            ),
+            'max_abs_refuse_rad': self._get_nonnegative_float_parameter(
+                'session_home_joint_max_abs_refuse_rad', 0.30
+            ),
+            'l2_warn_rad': self._get_nonnegative_float_parameter(
+                'session_home_joint_l2_warn_rad', 0.20
+            ),
+            'l2_refuse_rad': self._get_nonnegative_float_parameter(
+                'session_home_joint_l2_refuse_rad', 0.50
+            ),
+            'dq_warn_rad_s': self._get_nonnegative_float_parameter(
+                'session_home_dq_stillness_warn_rad_s', 0.02
+            ),
+            'dq_refuse_rad_s': self._get_nonnegative_float_parameter(
+                'session_home_dq_stillness_refuse_rad_s', 0.05
+            ),
+        })
         self.emergency_return_start_refuse_m = self._get_nonnegative_float_parameter(
             'emergency_return_start_refuse_m', 0.300
         )
@@ -449,12 +503,14 @@ class CartesianImpedanceController(Node):
 
         self.x_nominal_fixed_start = self.x_start_des.copy()
         self.session_home = None
+        self.session_home_q_at_capture = None
         self.session_home_resolved = False
         self.session_home_source = ''
         self._session_home_capture_positions = []
         self._session_home_capture_last_q = None
         self._session_home_refused = False
         self._normal_run_gate_decision = None
+        self._session_home_joint_gate_decision = None
         self.session_home_return_active = False
         self.session_home_return_reason = ''
         self._session_home_return_start_time = None
@@ -520,7 +576,21 @@ class CartesianImpedanceController(Node):
 
         if self.session_home_mode == 'load':
             pose, payload = self._load_session_home(self.session_home_path)
-            self._adopt_session_home(pose, 'load')
+            try:
+                q_at_capture = read_optional_q_at_capture(
+                    payload,
+                    f"[SessionHome] '{self.session_home_path}': ",
+                )
+            except ValueError:
+                if self.session_home_joint_check_enabled:
+                    raise
+                q_at_capture = None
+                self.get_logger().warn(
+                    "[SessionHome] Ignoring invalid q_at_capture while the "
+                    "generic joint check is disabled; active hist sources "
+                    "will still fail closed at the runtime joint gate."
+                )
+            self._adopt_session_home(pose, 'load', q_at_capture)
             self.get_logger().warn(
                 "[SessionHome] Loaded session home from "
                 f"'{self.session_home_path}': pose={pose.tolist()}, "
@@ -546,7 +616,9 @@ class CartesianImpedanceController(Node):
                 "validation."
             )
         else:
-            self._adopt_session_home(self.x_nominal_fixed_start, 'fixed')
+            self._adopt_session_home(
+                self.x_nominal_fixed_start, 'fixed', None
+            )
 
         self.get_logger().warn(
             "[SessionHome] Configuration: "
@@ -558,6 +630,10 @@ class CartesianImpedanceController(Node):
             f"normal_run_start_refuse_m={self.normal_run_start_refuse_m:.3f}, "
             f"emergency_return_start_refuse_m={self.emergency_return_start_refuse_m:.3f}, "
             f"return_only_if_too_far_enabled={self.return_only_if_too_far_enabled}, "
+            "session_home_joint_check_enabled="
+            f"{self.session_home_joint_check_enabled}, "
+            "session_home_joint_check_required_for_hist="
+            f"{self.session_home_joint_check_required_for_hist}, "
             "post_run_return_to_session_home_enabled="
             f"{self.post_run_return_to_session_home_enabled}, "
             f"post_run_return_linear_speed={self.post_run_return_linear_speed:.4f}, "
@@ -857,6 +933,16 @@ class CartesianImpedanceController(Node):
         self.declare_parameter("gp_historical_db_q_scale", 0.1)
         self.declare_parameter("gp_historical_db_dq_scale", 0.1)
         self.declare_parameter("gp_historical_db_max_distance", 1.0)
+        self.declare_parameter(
+            "gp_historical_db_require_distance_pass_for_active", False
+        )
+        self.declare_parameter(
+            "gp_historical_db_distance_contribution_logging", False
+        )
+        self.declare_parameter("gp_historical_db_metadata_path", "")
+        self.declare_parameter(
+            "gp_historical_db_metadata_enforcement_enabled", False
+        )
         self.declare_parameter("gp_historical_db_query_stride", 1)
         self.declare_parameter("gp_historical_db_disable_when_online_update", True)
         self.declare_parameter("gp_historical_db_fallback_source", "cloud")
@@ -993,6 +1079,24 @@ class CartesianImpedanceController(Node):
         )
         self.gp_historical_db_max_distance = self._get_positive_float_parameter(
             "gp_historical_db_max_distance", 1.0
+        )
+        self.gp_historical_db_require_distance_pass_for_active = (
+            self._get_bool_parameter(
+                "gp_historical_db_require_distance_pass_for_active"
+            )
+        )
+        self.gp_historical_db_distance_contribution_logging = (
+            self._get_bool_parameter(
+                "gp_historical_db_distance_contribution_logging"
+            )
+        )
+        self.gp_historical_db_metadata_path = str(
+            self.get_parameter("gp_historical_db_metadata_path").value
+        ).strip()
+        self.gp_historical_db_metadata_enforcement_enabled = (
+            self._get_bool_parameter(
+                "gp_historical_db_metadata_enforcement_enabled"
+            )
         )
         self.gp_historical_db_query_stride = self._get_bounded_int_parameter(
             "gp_historical_db_query_stride", 1, 1, 1000000
@@ -1354,8 +1458,12 @@ class CartesianImpedanceController(Node):
         # triple_dynamic_gated reuses the same hist DB gate as a small residual on combined.
         self.gp_historical_db_loaded = False
         self.gp_historical_db_row_count = 0
+        self.gp_historical_db_x = None
         self.gp_historical_db_x_scaled = None
         self.gp_historical_db_y_residual = None
+        self.gp_historical_db_metadata_validation = {}
+        self.gp_historical_db_metadata_sidecar_path = ""
+        self._hist_db_contribution_log_count = 0
         # hist DB 查询节流状态；默认 stride=1 时每个 callback 查询，保持旧行为。
         self._hist_db_query_counter = 0
         self._hist_db_last_query_result = None
@@ -1467,6 +1575,14 @@ class CartesianImpedanceController(Node):
                 f"q_scale={self.gp_historical_db_q_scale}, "
                 f"dq_scale={self.gp_historical_db_dq_scale}, "
                 f"max_distance={self.gp_historical_db_max_distance}, "
+                "require_distance_pass_for_active="
+                f"{self.gp_historical_db_require_distance_pass_for_active}, "
+                "distance_contribution_logging="
+                f"{self.gp_historical_db_distance_contribution_logging}, "
+                "metadata_enforcement_enabled="
+                f"{self.gp_historical_db_metadata_enforcement_enabled}, "
+                "metadata_sidecar_path="
+                f"'{self.gp_historical_db_metadata_sidecar_path}', "
                 "disable_when_online_update="
                 f"{self.gp_historical_db_disable_when_online_update}, "
                 f"fallback_source='{self.gp_historical_db_fallback_source}'; "
@@ -2440,11 +2556,27 @@ class CartesianImpedanceController(Node):
 
         self._reset_historical_residual_db_shadow_state()
         self._update_historical_residual_db_shadow_state(q, dq, self.get_clock().now())
-        if (
-            not self._historical_db_active_allowed()
-            or int(self.hist_db_available) != 1
-            or int(self.hist_db_gated_source_code) != 4
-        ):
+        hist_ready = bool(
+            self._historical_db_active_allowed()
+            and int(self.hist_db_available) == 1
+            and int(self.hist_db_gated_source_code) == 4
+        )
+        if not hist_ready:
+            gated_distance_fallback = bool(
+                self.gp_compensation_source == "triple_dynamic_gated"
+                and self.gp_historical_db_require_distance_pass_for_active
+                and int(self.hist_db_loaded) == 1
+                and int(self.hist_db_query_valid) == 1
+                and int(self.hist_db_k_used) > 0
+                and int(self.hist_db_distance_pass) == 0
+            )
+            if gated_distance_fallback:
+                self._historical_pre_recording_preflight_done = True
+                self.get_logger().warn(
+                    "[GP Triple Gated Safety] Hist distance support failed; "
+                    "allowing combined backbone with hist weight zero."
+                )
+                return True
             self._request_historical_pre_recording_abort(
                 "hist_db_preflight_unavailable"
             )
@@ -2971,7 +3103,9 @@ class CartesianImpedanceController(Node):
                         return
 
                 if not self.session_home_return_active:
-                    if not self._evaluate_normal_run_start_gate(o_t_f[:3, 3]):
+                    if not self._evaluate_normal_run_start_gate(
+                        o_t_f[:3, 3], q, dq
+                    ):
                         self._mark_effort_publish_skipped(
                             "normal_run_start_refused"
                         )
@@ -4023,8 +4157,13 @@ class CartesianImpedanceController(Node):
                 f"[SessionHome] Saved captured session home to '{file_path}'."
             )
 
-    def _adopt_session_home(self, pose, source):
+    def _adopt_session_home(self, pose, source, q_at_capture=None):
         self.session_home = np.asarray(pose, dtype=float).copy()
+        self.session_home_q_at_capture = (
+            None
+            if q_at_capture is None
+            else np.asarray(q_at_capture, dtype=float).copy()
+        )
         self.session_home_resolved = True
         self.session_home_source = source
         if (
@@ -4131,11 +4270,61 @@ class CartesianImpedanceController(Node):
             )
             return False
 
-        self._adopt_session_home(pose, 'capture_first')
+        self._adopt_session_home(
+            pose, 'capture_first', self._session_home_capture_last_q
+        )
         return True
 
-    def _evaluate_normal_run_start_gate(self, x_curr):
+    def _evaluate_session_home_joint_gate(self, x_curr, q, dq):
+        if self._session_home_joint_gate_decision is not None:
+            return bool(self._session_home_joint_gate_decision["allowed"])
+        required_for_hist = bool(
+            self.session_home_joint_check_required_for_hist
+            and self._historical_db_source_requested()
+        )
+        enabled = bool(
+            self.session_home_joint_check_enabled or required_for_hist
+        )
+        metrics = compute_joint_home_metrics(
+            q, dq, self.session_home_q_at_capture
+        )
+        classification = classify_joint_home(
+            metrics,
+            self.session_home_joint_thresholds,
+            enabled=enabled,
+            require_q_home=required_for_hist,
+        )
+        self._session_home_joint_gate_decision = classification
+        if classification["decision"] == "NOT_ENABLED":
+            return True
+        try:
+            ee_distance = float(
+                np.linalg.norm(np.asarray(x_curr) - self.session_home)
+            )
+        except (TypeError, ValueError):
+            ee_distance = float("nan")
+        label = {
+            "WARN_ONLY": "WARN",
+        }.get(classification["decision"], classification["decision"])
+        message = (
+            f"SESSION_HOME_JOINT_GATE_{label}: "
+            f"distance_to_session_home={ee_distance:.6f} m, "
+            f"required_for_hist={int(required_for_hist)}, "
+            f"{format_joint_home_report(metrics, classification)}"
+        )
+        if not classification["allowed"]:
+            self.get_logger().error(message + "; no automatic motion requested.")
+        elif classification["decision"] in ("WARN_ONLY", "NO_Q_AT_CAPTURE"):
+            self.get_logger().warn(message)
+        else:
+            self.get_logger().info(message)
+        return bool(classification["allowed"])
+
+    def _evaluate_normal_run_start_gate(self, x_curr, q=None, dq=None):
         """Three-tier run-start gate against session home. True allows effort."""
+        if not self._evaluate_session_home_joint_gate(x_curr, q, dq):
+            self._normal_run_gate_decision = 'refused'
+            return False
         if not self.normal_run_start_gate_enabled:
             return True
         if self._normal_run_gate_decision == 'normal':
@@ -4596,22 +4785,30 @@ class CartesianImpedanceController(Node):
         self.get_logger().info(
             "[GP Hist DB] Metadata summary: "
             f"path='{db_path}', "
+            f"db_id='{metadata.get('db_id', '')}', "
             f"target_key='{self.gp_historical_db_target_key}', "
             f"source_files={source_files_count if source_files_count is not None else 'unknown'}, "
             f"load_group='{metadata.get('load_group', '')}', "
             f"load_gripper={metadata.get('load_gripper', '')}, "
             f"ee_load_model='{metadata.get('ee_load_model', '')}', "
             f"q_scale_recommended={metadata.get('q_scale_recommended', '')}, "
-            f"dq_scale_recommended={metadata.get('dq_scale_recommended', '')}"
+            f"dq_scale_recommended={metadata.get('dq_scale_recommended', '')}, "
+            "session_home_sha256="
+            f"'{metadata.get('session_home_sha256', '')}', "
+            "validation_valid="
+            f"{int(bool(self.gp_historical_db_metadata_validation.get('valid')))}"
         )
 
     def _load_historical_residual_db(self):
         """Load a persistent residual DB once for shadow-only KNN queries."""
         self.gp_historical_db_loaded = False
         self.gp_historical_db_row_count = 0
+        self.gp_historical_db_x = None
         self.gp_historical_db_x_scaled = None
         self.gp_historical_db_y_residual = None
         self.gp_historical_db_metadata = {}
+        self.gp_historical_db_metadata_validation = {}
+        self.gp_historical_db_metadata_sidecar_path = ""
         self.gp_historical_db_target_key = ""
 
         if not self.gp_historical_db_enabled:
@@ -4653,10 +4850,44 @@ class CartesianImpedanceController(Node):
             if not np.all(np.isfinite(x)) or not np.all(np.isfinite(y_residual)):
                 raise ValueError(f"X and {target_key} must contain only finite values")
 
+            sidecar_metadata, sidecar_path = load_metadata_sidecar(
+                db_path, self.gp_historical_db_metadata_path
+            )
+            self.gp_historical_db_metadata_sidecar_path = str(sidecar_path)
+            if sidecar_metadata:
+                metadata.update(sidecar_metadata)
+            metadata_validation = validate_historical_db_metadata(
+                metadata,
+                db_path,
+                session_home_path=self.session_home_path,
+                expected_feature_schema=DEFAULT_FEATURE_NAMES,
+                q_scale=self.gp_historical_db_q_scale,
+                dq_scale=self.gp_historical_db_dq_scale,
+                require_metadata=(
+                    self.gp_historical_db_metadata_enforcement_enabled
+                ),
+                require_session_binding=(
+                    self.gp_historical_db_metadata_enforcement_enabled
+                ),
+            )
+            self.gp_historical_db_metadata_validation = metadata_validation
+            metadata_messages = (
+                metadata_validation["errors"]
+                + metadata_validation["warnings"]
+            )
+            if metadata_messages:
+                message = "; ".join(metadata_messages)
+                if self.gp_historical_db_metadata_enforcement_enabled:
+                    raise ValueError(f"metadata enforcement failed: {message}")
+                self.get_logger().warn(
+                    f"[GP Hist DB] Metadata warning: {message}"
+                )
+
             x_scaled = scale_feature_matrix(
                 x, self.gp_historical_db_feature_scale
             )
 
+            self.gp_historical_db_x = np.ascontiguousarray(x, dtype=float)
             self.gp_historical_db_x_scaled = x_scaled
             self.gp_historical_db_y_residual = np.ascontiguousarray(
                 y_residual,
@@ -4675,9 +4906,11 @@ class CartesianImpedanceController(Node):
         except Exception as e:
             self.gp_historical_db_loaded = False
             self.gp_historical_db_row_count = 0
+            self.gp_historical_db_x = None
             self.gp_historical_db_x_scaled = None
             self.gp_historical_db_y_residual = None
             self.gp_historical_db_metadata = {}
+            self.gp_historical_db_metadata_validation = {}
             self.gp_historical_db_target_key = ""
             self.get_logger().error(
                 "[GP Hist DB] Failed to load persistent residual DB; "
@@ -5434,8 +5667,10 @@ class CartesianImpedanceController(Node):
             ),
             "distance_pass": 0,
             "k_used": 0,
+            "nearest_index": -1,
             "nearest_distance": 0.0,
             "mean_topk_distance": 0.0,
+            "distance_contributions": None,
             "prediction": np.zeros(7, dtype=float),
             "prediction_valid": 0,
             "gated_prediction": fallback_prediction,
@@ -5475,18 +5710,30 @@ class CartesianImpedanceController(Node):
         if not support["valid"]:
             return result
         result["k_used"] = int(support["k_used"])
+        result["nearest_index"] = int(support["nearest_index"])
         result["nearest_distance"] = float(support["nearest_distance"])
         result["mean_topk_distance"] = float(support["mean_topk_distance"])
         result["distance_pass"] = int(support["distance_pass"])
         result["prediction"] = np.asarray(
             support["prediction"], dtype=float
         ).copy()
+        if (
+            self.gp_historical_db_distance_contribution_logging
+            and self.gp_historical_db_x is not None
+        ):
+            result["distance_contributions"] = (
+                compute_scaled_delta_contributions(
+                    self.gp_historical_db_x[result["nearest_index"]],
+                    x_query,
+                    self.gp_historical_db_feature_scale,
+                )
+            )
         result["prediction_valid"] = 1
         (
             result["available"],
             result["gated_prediction"],
             result["gated_source_code"],
-        ) = select_legacy_gated_prediction(
+        ) = select_active_gated_prediction(
             result["prediction"],
             result["gated_prediction"],
             result["gated_source_code"],
@@ -5494,6 +5741,8 @@ class CartesianImpedanceController(Node):
             result["query_valid"],
             result["prediction_valid"],
             result["online_disabled"],
+            result["distance_pass"],
+            self.gp_historical_db_require_distance_pass_for_active,
         )
         return result
 
@@ -5510,14 +5759,33 @@ class CartesianImpedanceController(Node):
         )
         self.hist_db_distance_pass = 0
         self.hist_db_k_used = 0
+        self.hist_db_nearest_index = -1
         self.hist_db_nearest_distance = 0.0
         self.hist_db_mean_topk_distance = 0.0
+        self.hist_db_distance_contributions = None
         self.hist_db_pred = zero.copy()
         self.hist_db_gated_pred = zero.copy()
         self.hist_db_gated_source_code = 0
         self.hist_db_query_updated_this_tick = 0
         self._reset_historical_soft_shadow_state()
         self._reset_gp_triple_combined_base_shadow_state()
+
+    def _maybe_log_hist_db_distance_contributions(self, fresh_query):
+        if (
+            not self.gp_historical_db_distance_contribution_logging
+            or not fresh_query
+            or self.hist_db_distance_contributions is None
+            or self._hist_db_contribution_log_count
+            >= self.gp_historical_db_preflight_log_first_n
+        ):
+            return
+        self._hist_db_contribution_log_count += 1
+        self.get_logger().info(
+            "[GP Hist DB] HIST_DB_DISTANCE_CONTRIBUTIONS: "
+            + format_distance_contribution_report(
+                self.hist_db_distance_contributions
+            )
+        )
 
     def _update_historical_residual_db_shadow_state(self, q, dq, t_now=None):
         # 为降低真机 callback 负载，可按 stride 降频查询 hist DB。
@@ -5560,14 +5828,19 @@ class CartesianImpedanceController(Node):
         self.hist_db_online_disabled = int(result["online_disabled"])
         self.hist_db_distance_pass = int(result["distance_pass"])
         self.hist_db_k_used = int(result["k_used"])
+        self.hist_db_nearest_index = int(result["nearest_index"])
         self.hist_db_nearest_distance = float(result["nearest_distance"])
         self.hist_db_mean_topk_distance = float(result["mean_topk_distance"])
+        self.hist_db_distance_contributions = result[
+            "distance_contributions"
+        ]
         self.hist_db_pred = np.asarray(result["prediction"], dtype=float).copy()
         self.hist_db_gated_pred = np.asarray(
             result["gated_prediction"],
             dtype=float,
         ).copy()
         self.hist_db_gated_source_code = int(result["gated_source_code"])
+        self._maybe_log_hist_db_distance_contributions(bool(should_query))
         self._update_historical_db_preflight_state(t_now, result, bool(should_query))
         self._update_historical_soft_shadow_state()
         self._update_gp_triple_combined_base_shadow_state(t_now)

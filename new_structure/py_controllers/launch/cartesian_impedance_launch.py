@@ -245,6 +245,18 @@ def generate_launch_description():
     gp_historical_db_q_scale_parameter_name = 'gp_historical_db_q_scale'
     gp_historical_db_dq_scale_parameter_name = 'gp_historical_db_dq_scale'
     gp_historical_db_max_distance_parameter_name = 'gp_historical_db_max_distance'
+    gp_historical_db_require_distance_pass_parameter_name = (
+        'gp_historical_db_require_distance_pass_for_active'
+    )
+    gp_historical_db_contribution_logging_parameter_name = (
+        'gp_historical_db_distance_contribution_logging'
+    )
+    gp_historical_db_metadata_path_parameter_name = (
+        'gp_historical_db_metadata_path'
+    )
+    gp_historical_db_metadata_enforcement_parameter_name = (
+        'gp_historical_db_metadata_enforcement_enabled'
+    )
     gp_historical_db_query_stride_parameter_name = 'gp_historical_db_query_stride'
     gp_historical_db_disable_online_parameter_name = (
         'gp_historical_db_disable_when_online_update'
@@ -278,6 +290,30 @@ def generate_launch_description():
         'gp_historical_db_preflight_log_first_n'
     )
     gp_disable_silent_hist_fallback_parameter_name = 'gp_disable_silent_hist_fallback'
+    session_home_joint_check_enabled_parameter_name = (
+        'session_home_joint_check_enabled'
+    )
+    session_home_joint_check_required_hist_parameter_name = (
+        'session_home_joint_check_required_for_hist'
+    )
+    session_home_joint_max_abs_warn_parameter_name = (
+        'session_home_joint_max_abs_warn_rad'
+    )
+    session_home_joint_max_abs_refuse_parameter_name = (
+        'session_home_joint_max_abs_refuse_rad'
+    )
+    session_home_joint_l2_warn_parameter_name = (
+        'session_home_joint_l2_warn_rad'
+    )
+    session_home_joint_l2_refuse_parameter_name = (
+        'session_home_joint_l2_refuse_rad'
+    )
+    session_home_dq_warn_parameter_name = (
+        'session_home_dq_stillness_warn_rad_s'
+    )
+    session_home_dq_refuse_parameter_name = (
+        'session_home_dq_stillness_refuse_rad_s'
+    )
     gp_triple_weight_mode_parameter_name = 'gp_triple_weight_mode'
     gp_triple_weight_local_parameter_name = 'gp_triple_weight_local'
     gp_triple_weight_cloud_parameter_name = 'gp_triple_weight_cloud'
@@ -405,6 +441,18 @@ def generate_launch_description():
     gp_historical_db_max_distance = LaunchConfiguration(
         gp_historical_db_max_distance_parameter_name
     )
+    gp_historical_db_require_distance_pass = LaunchConfiguration(
+        gp_historical_db_require_distance_pass_parameter_name
+    )
+    gp_historical_db_contribution_logging = LaunchConfiguration(
+        gp_historical_db_contribution_logging_parameter_name
+    )
+    gp_historical_db_metadata_path = LaunchConfiguration(
+        gp_historical_db_metadata_path_parameter_name
+    )
+    gp_historical_db_metadata_enforcement = LaunchConfiguration(
+        gp_historical_db_metadata_enforcement_parameter_name
+    )
     gp_historical_db_query_stride = LaunchConfiguration(
         gp_historical_db_query_stride_parameter_name
     )
@@ -443,6 +491,30 @@ def generate_launch_description():
     )
     gp_disable_silent_hist_fallback = LaunchConfiguration(
         gp_disable_silent_hist_fallback_parameter_name
+    )
+    session_home_joint_check_enabled = LaunchConfiguration(
+        session_home_joint_check_enabled_parameter_name
+    )
+    session_home_joint_check_required_hist = LaunchConfiguration(
+        session_home_joint_check_required_hist_parameter_name
+    )
+    session_home_joint_max_abs_warn = LaunchConfiguration(
+        session_home_joint_max_abs_warn_parameter_name
+    )
+    session_home_joint_max_abs_refuse = LaunchConfiguration(
+        session_home_joint_max_abs_refuse_parameter_name
+    )
+    session_home_joint_l2_warn = LaunchConfiguration(
+        session_home_joint_l2_warn_parameter_name
+    )
+    session_home_joint_l2_refuse = LaunchConfiguration(
+        session_home_joint_l2_refuse_parameter_name
+    )
+    session_home_dq_warn = LaunchConfiguration(
+        session_home_dq_warn_parameter_name
+    )
+    session_home_dq_refuse = LaunchConfiguration(
+        session_home_dq_refuse_parameter_name
     )
     gp_triple_weight_mode = LaunchConfiguration(gp_triple_weight_mode_parameter_name)
     gp_triple_weight_local = LaunchConfiguration(gp_triple_weight_local_parameter_name)
@@ -791,6 +863,22 @@ def generate_launch_description():
             default_value='1.0',
             description='Persistent historical DB nearest-distance hard gate.'),
         DeclareLaunchArgument(
+            gp_historical_db_require_distance_pass_parameter_name,
+            default_value='false',
+            description='Require distance_pass before active hist correction.'),
+        DeclareLaunchArgument(
+            gp_historical_db_contribution_logging_parameter_name,
+            default_value='false',
+            description='Log per-dimension hist DB distance contributions.'),
+        DeclareLaunchArgument(
+            gp_historical_db_metadata_path_parameter_name,
+            default_value='',
+            description='Optional hist DB metadata sidecar JSON path.'),
+        DeclareLaunchArgument(
+            gp_historical_db_metadata_enforcement_parameter_name,
+            default_value='false',
+            description='Require DB/session metadata identity match.'),
+        DeclareLaunchArgument(
             gp_historical_db_query_stride_parameter_name,
             default_value='1',
             description=(
@@ -850,6 +938,32 @@ def generate_launch_description():
             gp_disable_silent_hist_fallback_parameter_name,
             default_value='false',
             description='Fail closed instead of silently using hist_db fallback when active hist_db is invalid.'),
+        DeclareLaunchArgument(
+            session_home_joint_check_enabled_parameter_name,
+            default_value='false',
+            description='Enable read-only q/dq gate against q_at_capture.'),
+        DeclareLaunchArgument(
+            session_home_joint_check_required_hist_parameter_name,
+            default_value='true',
+            description='Require q_at_capture gate for active hist sources.'),
+        DeclareLaunchArgument(
+            session_home_joint_max_abs_warn_parameter_name,
+            default_value='0.10'),
+        DeclareLaunchArgument(
+            session_home_joint_max_abs_refuse_parameter_name,
+            default_value='0.30'),
+        DeclareLaunchArgument(
+            session_home_joint_l2_warn_parameter_name,
+            default_value='0.20'),
+        DeclareLaunchArgument(
+            session_home_joint_l2_refuse_parameter_name,
+            default_value='0.50'),
+        DeclareLaunchArgument(
+            session_home_dq_warn_parameter_name,
+            default_value='0.02'),
+        DeclareLaunchArgument(
+            session_home_dq_refuse_parameter_name,
+            default_value='0.05'),
         DeclareLaunchArgument(
             gp_triple_weight_mode_parameter_name,
             default_value='inverse_rmse',
@@ -1152,6 +1266,18 @@ def generate_launch_description():
                 gp_historical_db_max_distance_parameter_name: ParameterValue(
                     gp_historical_db_max_distance,
                     value_type=float),
+                gp_historical_db_require_distance_pass_parameter_name: ParameterValue(
+                    gp_historical_db_require_distance_pass,
+                    value_type=bool),
+                gp_historical_db_contribution_logging_parameter_name: ParameterValue(
+                    gp_historical_db_contribution_logging,
+                    value_type=bool),
+                gp_historical_db_metadata_path_parameter_name: ParameterValue(
+                    gp_historical_db_metadata_path,
+                    value_type=str),
+                gp_historical_db_metadata_enforcement_parameter_name: ParameterValue(
+                    gp_historical_db_metadata_enforcement,
+                    value_type=bool),
                 gp_historical_db_query_stride_parameter_name: ParameterValue(
                     gp_historical_db_query_stride,
                     value_type=int),
@@ -1191,6 +1317,30 @@ def generate_launch_description():
                 gp_disable_silent_hist_fallback_parameter_name: ParameterValue(
                     gp_disable_silent_hist_fallback,
                     value_type=bool),
+                session_home_joint_check_enabled_parameter_name: ParameterValue(
+                    session_home_joint_check_enabled,
+                    value_type=bool),
+                session_home_joint_check_required_hist_parameter_name: ParameterValue(
+                    session_home_joint_check_required_hist,
+                    value_type=bool),
+                session_home_joint_max_abs_warn_parameter_name: ParameterValue(
+                    session_home_joint_max_abs_warn,
+                    value_type=float),
+                session_home_joint_max_abs_refuse_parameter_name: ParameterValue(
+                    session_home_joint_max_abs_refuse,
+                    value_type=float),
+                session_home_joint_l2_warn_parameter_name: ParameterValue(
+                    session_home_joint_l2_warn,
+                    value_type=float),
+                session_home_joint_l2_refuse_parameter_name: ParameterValue(
+                    session_home_joint_l2_refuse,
+                    value_type=float),
+                session_home_dq_warn_parameter_name: ParameterValue(
+                    session_home_dq_warn,
+                    value_type=float),
+                session_home_dq_refuse_parameter_name: ParameterValue(
+                    session_home_dq_refuse,
+                    value_type=float),
                 gp_triple_weight_mode_parameter_name: ParameterValue(
                     gp_triple_weight_mode,
                     value_type=str),

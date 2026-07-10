@@ -16,6 +16,7 @@ from py_controllers.historical_db_support import (  # noqa: E402
     query_scaled_nearest_support,
     scale_feature,
     scale_feature_matrix,
+    select_active_gated_prediction,
     select_legacy_gated_prediction,
 )
 from py_controllers.session_anchor_utils import (  # noqa: E402
@@ -110,6 +111,14 @@ class HistoricalSupportParityTest(unittest.TestCase):
                     support["prediction"], np.full(7, -3.0), 2,
                     1, 1, support["valid"], online_disabled,
                 )
+                active_default = select_active_gated_prediction(
+                    support["prediction"], np.full(7, -3.0), 2,
+                    1, 1, support["valid"], online_disabled,
+                    support["distance_pass"], False,
+                )
+                self.assertEqual(active_default[0], available)
+                np.testing.assert_array_equal(active_default[1], gated)
+                self.assertEqual(active_default[2], source_code)
                 self.assertEqual(support["k_used"], expected["k_used"])
                 self.assertEqual(
                     support["distance_pass"], expected["distance_pass"]

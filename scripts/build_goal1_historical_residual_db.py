@@ -23,10 +23,21 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import sys
 from typing import Dict, List
 
 import numpy as np
 import pandas as pd
+
+
+PACKAGE_ROOT = (
+    Path(__file__).resolve().parents[1] / "new_structure" / "py_controllers"
+)
+sys.path.insert(0, str(PACKAGE_ROOT))
+
+from py_controllers.historical_db_metadata import (  # noqa: E402
+    create_historical_db_metadata,
+)
 
 
 DEFAULT_INPUTS: Dict[str, str] = {
@@ -72,6 +83,21 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=100.0,
         help="Reject rows with abs(tau_residual) above this value.",
+    )
+    parser.add_argument(
+        "--session-home",
+        default="",
+        help="Optional session_home.json to bind by SHA-256.",
+    )
+    parser.add_argument("--trajectory-id", default="")
+    parser.add_argument("--frequency-hz", type=float, default=None)
+    parser.add_argument("--q-scale", type=float, default=0.1)
+    parser.add_argument("--dq-scale", type=float, default=0.1)
+    parser.add_argument(
+        "--notes",
+        action="append",
+        default=[],
+        help="Optional metadata note; may be repeated.",
     )
     return parser.parse_args()
 
@@ -144,6 +170,15 @@ def load_one(name: str, path: Path, args: argparse.Namespace) -> tuple[pd.DataFr
 
 def main() -> None:
     args = parse_args()
+    if (
+        not np.isfinite(args.q_scale)
+        or args.q_scale <= 0.0
+        or not np.isfinite(args.dq_scale)
+        or args.dq_scale <= 0.0
+    ):
+        raise SystemExit(
+            "--q-scale and --dq-scale must be finite and positive"
+        )
     input_map = parse_inputs(args.input)
 
     outdir = Path(args.output_dir)
@@ -186,26 +221,35 @@ def main() -> None:
         residual_names=residual_names,
     )
 
-    summary = {
-        "database_type": "goal1_historical_residual_db",
+    summary = create_historical_db_metadata(
+        npz_path,
+        source_csvs=list(input_map.values()),
+        feature_schema=feature_names.tolist(),
+        target_schema=residual_names.tolist(),
+        session_home_path=args.session_home,
+        trajectory_id=args.trajectory_id,
+        frequency_hz=args.frequency_hz,
+        q_scale=args.q_scale,
+        dq_scale=args.dq_scale,
+        notes=args.notes,
+    )
+    summary.update({
         "offline_only": True,
         "active_compensation": False,
         "description": "Persistent offline historical residual database candidate built from real GOAL1 controller CSV files.",
         "rows_total": int(len(db)),
-        "feature_dim": int(X.shape[1]),
-        "target_dim": int(Y_residual.shape[1]),
         "inputs": metas,
         "quality_thresholds": {
             "max_abs_q": args.max_abs_q,
             "max_abs_dq": args.max_abs_dq,
             "max_abs_residual": args.max_abs_residual,
         },
-        "notes": [
+        "safety_notes": [
             "This file is not loaded by the controller.",
             "This database does not enter tau_final.",
             "Use only for offline retrieval analysis until separate safety review.",
         ],
-    }
+    })
 
     json_path = outdir / "goal1_historical_residual_db_metadata.json"
     json_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")

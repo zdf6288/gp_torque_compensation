@@ -14,8 +14,29 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import sys
 
 import numpy as np
+
+
+PACKAGE_ROOT = (
+    Path(__file__).resolve().parents[1] / "new_structure" / "py_controllers"
+)
+sys.path.insert(0, str(PACKAGE_ROOT))
+
+from py_controllers.historical_db_metadata import (  # noqa: E402
+    load_metadata_sidecar,
+    validate_historical_db_metadata,
+)
+from py_controllers.historical_db_support import (  # noqa: E402
+    DEFAULT_FEATURE_NAMES,
+    build_joint_feature,
+    compute_scaled_delta_contributions,
+    format_distance_contribution_report,
+    query_scaled_nearest_support,
+    scale_feature,
+    scale_feature_matrix,
+)
 
 
 REQUIRED_ARRAYS = [
@@ -42,7 +63,94 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Optional output JSON report path.",
     )
+    p.add_argument(
+        "--metadata", default="", help="Optional metadata sidecar path."
+    )
+    p.add_argument("--require-metadata", action="store_true")
+    p.add_argument("--session-home", default="")
+    p.add_argument("--query-q", default="", help="Comma-separated q1..q7.")
+    p.add_argument("--query-dq", default="", help="Comma-separated dq1..dq7.")
+    p.add_argument("--q-scale", type=float, default=0.1)
+    p.add_argument("--dq-scale", type=float, default=0.1)
+    p.add_argument("--max-distance", type=float, default=1.0)
     return p.parse_args()
+
+
+def parse_vector(text: str, name: str) -> np.ndarray:
+    try:
+        vector = np.asarray([float(value) for value in text.split(",")])
+    except ValueError as exc:
+        raise ValueError(
+            f"{name} must contain comma-separated numbers"
+        ) from exc
+    if vector.shape != (7,) or not np.all(np.isfinite(vector)):
+        raise ValueError(f"{name} must contain 7 finite values")
+    return vector
+
+
+def add_metadata_report(report, args, db_path):
+    try:
+        metadata, metadata_path = load_metadata_sidecar(db_path, args.metadata)
+        validation = validate_historical_db_metadata(
+            metadata,
+            db_path,
+            session_home_path=args.session_home,
+            expected_feature_schema=DEFAULT_FEATURE_NAMES,
+            q_scale=args.q_scale,
+            dq_scale=args.dq_scale,
+            require_metadata=args.require_metadata,
+            require_session_binding=bool(
+                args.require_metadata and args.session_home
+            ),
+        )
+        report["metadata_path"] = str(metadata_path)
+        report["metadata"] = metadata
+        report["metadata_validation"] = validation
+        report["errors"].extend(validation["errors"])
+        report["warnings"].extend(validation["warnings"])
+    except Exception as exc:
+        report["errors"].append(f"metadata check failed: {exc}")
+
+
+def add_query_report(report, args, data):
+    if not args.query_q and not args.query_dq:
+        return
+    if not args.query_q or not args.query_dq:
+        report["errors"].append(
+            "--query-q and --query-dq must be used together"
+        )
+        return
+    try:
+        q = parse_vector(args.query_q, "--query-q")
+        dq = parse_vector(args.query_dq, "--query-dq")
+        feature = build_joint_feature(q, dq)
+        scale = np.array([args.q_scale] * 7 + [args.dq_scale] * 7)
+        x_scaled = scale_feature_matrix(data["X"], scale)
+        query_scaled = scale_feature(feature, scale)
+        support = query_scaled_nearest_support(
+            x_scaled,
+            data["Y_residual"],
+            query_scaled,
+            1,
+            args.max_distance,
+        )
+        if not support["valid"]:
+            raise ValueError("nearest-support query failed")
+        nearest = np.asarray(data["X"][support["nearest_index"]], dtype=float)
+        contributions = compute_scaled_delta_contributions(
+            nearest, feature, scale
+        )
+        report["query_support"] = {
+            "nearest_index": support["nearest_index"],
+            "nearest_distance": support["nearest_distance"],
+            "distance_pass": support["distance_pass"],
+            "feature_names": list(contributions["feature_names"]),
+            "scaled_delta": contributions["scaled_delta"].tolist(),
+            "contribution": contributions["contribution"].tolist(),
+            "diagnostic": format_distance_contribution_report(contributions),
+        }
+    except Exception as exc:
+        report["errors"].append(f"query support check failed: {exc}")
 
 
 def main() -> None:
@@ -106,6 +214,9 @@ def main() -> None:
 
         if len(X) == 0:
             report["errors"].append("DB has zero rows.")
+
+    add_metadata_report(report, args, db_path)
+    add_query_report(report, args, data)
 
     report["status"] = "PASS" if not report["errors"] else "FAIL"
 

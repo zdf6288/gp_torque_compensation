@@ -160,6 +160,26 @@ def select_legacy_gated_prediction(
     )
 
 
+def select_active_gated_prediction(
+    prediction, fallback_prediction, fallback_source_code,
+    loaded, query_valid, prediction_valid, online_disabled,
+    distance_pass, require_distance_pass,
+):
+    """Select history only when the configured support contract passes."""
+    available = legacy_active_support_available(
+        loaded, query_valid, prediction_valid, online_disabled
+    )
+    if require_distance_pass and not distance_pass:
+        available = 0
+    if available:
+        return available, np.asarray(prediction, dtype=float).copy(), 4
+    return (
+        available,
+        np.asarray(fallback_prediction, dtype=float).copy(),
+        int(fallback_source_code),
+    )
+
+
 def compute_scaled_delta_contributions(
     x_nearest, x_query, feature_scale, feature_names=None,
 ):
@@ -191,3 +211,16 @@ def compute_scaled_delta_contributions(
         "contribution": contribution,
         "total_distance": float(np.sqrt(np.sum(contribution))),
     }
+
+
+def format_distance_contribution_report(contributions):
+    """Format 14 support contributions, including explicit q7/dq7 values."""
+    names = contributions["feature_names"]
+    values = np.asarray(contributions["contribution"], dtype=float)
+    fields = [f"{name}={value:.6f}" for name, value in zip(names, values)]
+    return (
+        f"total_distance={contributions['total_distance']:.6f} "
+        f"q7_contribution={values[6]:.6f} "
+        f"dq7_contribution={values[13]:.6f} "
+        f"per_dimension={','.join(fields)}"
+    )
