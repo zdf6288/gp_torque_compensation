@@ -53,6 +53,14 @@ from py_controllers.cartesian_impedance_config import (
     read_historical_support_config,
     read_home_support_config,
 )
+from py_controllers.controller_data_recording import (
+    build_full_csv_header,
+    controller_csv_path,
+    final_csv_column_names,
+    final_csv_extra_header,
+    project_row,
+    requested_column_indices,
+)
 from py_controllers.session_relative_config import (
     declare_session_relative_parameters,
     read_session_relative_config,
@@ -7614,15 +7622,7 @@ class CartesianImpedanceController(Node):
         return self.csv_output_profile == "final"
 
     def _final_csv_extra_header(self):
-        return [
-            "ros2_control_update_rate",
-            "trajectory_publish_rate",
-            "state_parameter_publish_rate",
-            "trajectory_mode",
-            "circle_frequency",
-            "transition_duration",
-            "gp_compensation_disable_joint7",
-        ]
+        return final_csv_extra_header()
 
     def _final_csv_extra_row(self):
         return [
@@ -7636,94 +7636,17 @@ class CartesianImpedanceController(Node):
         ]
 
     def _final_csv_column_names(self):
-        columns = [
-            "Time(s)",
-            "PredTime(s)",
-            "run_name",
-            "control_frequency",
-            "ros2_control_update_rate",
-            "trajectory_publish_rate",
-            "state_parameter_publish_rate",
-            "trajectory_mode",
-            "circle_frequency",
-            "transition_duration",
-            "delay_steps",
-        ]
-        columns.extend([f"joint_pos_{i+1}" for i in range(7)])
-        columns.extend([f"joint_vel_{i+1}" for i in range(7)])
-        columns.extend(["x_actual", "y_actual", "z_actual"])
-        columns.extend(["x_desired", "y_desired", "z_desired"])
-        columns.extend(["dx_actual", "dy_actual", "dz_actual"])
-        columns.extend(["dx_desired", "dy_desired", "dz_desired"])
-        columns.extend([f"tau_final_{i+1}" for i in range(7)])
-        columns.extend([f"tau_final_raw_{i+1}" for i in range(7)])
-        columns.extend([f"tau_rate_limited_{i+1}" for i in range(7)])
-        columns.extend([
-            "gp_prediction_enabled",
-            "gp_online_update_enabled",
-            "gp_compensation_enabled",
-            "gp_compensation_source_code",
-            "gp_compensation_scale",
-            "gp_compensation_clip_nm",
-            "gp_compensation_disable_joint7",
-        ])
-        columns.extend([f"tau_residual_{i+1}" for i in range(7)])
-        columns.extend([f"y_hat_{i+1}" for i in range(7)])
-        columns.extend([f"y_hat_local_{i+1}" for i in range(7)])
-        columns.extend([f"y_hat_cloud_{i+1}" for i in range(7)])
-        columns.extend([f"hist_db_pred_{i+1}" for i in range(7)])
-        columns.extend([f"hist_db_gated_pred_{i+1}" for i in range(7)])
-        columns.extend([f"gp_shadow_combined_paper_raw_{i+1}" for i in range(7)])
-        columns.extend([
-            "gp_triple_combined_base_shadow_enabled",
-            "gp_triple_combined_base_shadow_available",
-            "gp_triple_combined_base_shadow_used_fallback",
-            "gp_triple_combined_base_shadow_w_hist",
-            "gp_triple_combined_base_shadow_hist_weight_cap",
-            "gp_triple_combined_base_shadow_norm",
-            "gp_triple_combined_base_shadow_delta_from_combined_norm",
-            "gp_triple_combined_base_shadow_delta_from_legacy_triple_norm",
-            "gp_triple_gated_active",
-            "gp_triple_gated_available",
-            "gp_triple_gated_fallback_to_combined",
-            "gp_triple_gated_hist_weight_eff",
-            "gp_triple_gated_hist_cap",
-            "gp_triple_gated_distance_gate",
-            "gp_triple_gated_disagreement_gate",
-            "gp_triple_gated_disagreement_norm",
-            "gp_triple_gated_correction_norm",
-            "gp_triple_gated_delta_raw_norm",
-            "gp_triple_gated_distance_ratio",
-        ])
-        columns.extend([
-            f"gp_triple_combined_base_shadow_raw_{i+1}" for i in range(7)
-        ])
-        columns.extend([f"gp_applied_{i+1}" for i in range(7)])
-        columns.extend([f"gp_clip_active_{i+1}" for i in range(7)])
-        columns.extend([
-            "torque_rate_limit_enabled",
-            "torque_rate_limit_nm_per_s",
-            "torque_rate_limit_active",
-            "torque_rate_limit_max_delta",
-            "torque_rate_limit_dt",
-        ])
-        return columns
+        return final_csv_column_names()
 
     def _final_csv_indices(self, header):
-        header_index = {name: index for index, name in enumerate(header)}
-        missing = [
-            name for name in self._final_csv_column_names()
-            if name not in header_index
-        ]
+        indices, missing = requested_column_indices(
+            header, self._final_csv_column_names()
+        )
         if missing:
             self.get_logger().warn(
                 "[CSV] final profile missing requested columns: " + ", ".join(missing)
             )
-        return [
-            header_index[name]
-            for name in self._final_csv_column_names()
-            if name in header_index
-        ]
+        return indices
     
     def save_data_to_file(self):
         """save data to CSV file"""
@@ -7734,15 +7657,10 @@ class CartesianImpedanceController(Node):
             return
 
         try:
-            output_dir = Path(self.data_output_dir).expanduser()
-            output_dir.mkdir(parents=True, exist_ok=True)
-            run_name_stem = Path(self.run_name).name if self.run_name else ""
-            filename_stem = (
-                f"{run_name_stem}_cartesian_impedance_controller_data.csv"
-                if run_name_stem
-                else "cartesian_impedance_controller_data.csv"
+            output_dir, filename = controller_csv_path(
+                self.data_output_dir, self.run_name
             )
-            filename = output_dir / filename_stem
+            output_dir.mkdir(parents=True, exist_ok=True)
 
             # 计算可用的最小长度，避免某些列表短导致越界
             series_list = [
@@ -7883,203 +7801,15 @@ class CartesianImpedanceController(Node):
             with open(filename, 'w', newline='') as csvfile:
                 writer = csv.writer(csvfile)
 
-                header = ['Time(s)', 'PredTime(s)']
                 n_j = len(self.tau_history[0])  # 通常是7
-                header.extend([f'tau_{i+1}' for i in range(n_j)])
-                header.extend(['x_actual', 'y_actual', 'z_actual'])
-                header.extend(['x_desired', 'y_desired', 'z_desired'])
-                header.extend(['dx_actual', 'dy_actual', 'dz_actual'])
-                header.extend(['dx_desired', 'dy_desired', 'dz_desired'])
-                header.extend([f'tau_measured_{i+1}' for i in range(n_j)])
-                header.extend([f'gravity_{i+1}' for i in range(n_j)])
-                header.extend([f'joint_pos_{i+1}' for i in range(7)])
-                header.extend([f'joint_vel_{i+1}' for i in range(7)])
-                header.extend([f'dq_des_joint_{i+1}' for i in range(7)])
-                header.extend([f'ddq_des_joint_{i+1}' for i in range(7)])
-                header.extend([f'y_hat_{i+1}' for i in range(7)])          # combined
-                header.extend([f'y_hat_local_{i+1}' for i in range(7)])    # local
-                header.extend([f'y_hat_cloud_{i+1}' for i in range(7)])    # cloud
-                header.extend([f'y_hat_mem_{i+1}' for i in range(7)])    # cloud
-                header.extend([f'tau_residual_{i+1}' for i in range(7)])
-                header.extend([f'tau_residual_raw_{i+1}' for i in range(7)])
-                header.extend([f'q_pred_{i+1}' for i in range(7)])
-                header.extend([f'dq_pred_{i+1}' for i in range(7)])
-                header.extend([f'q_future_actual_{i+1}' for i in range(7)])
-                header.extend([f'dq_future_actual_{i+1}' for i in range(7)])
-                header.extend([f'q_pred_err_{i+1}' for i in range(7)])
-                header.extend([f'dq_pred_err_{i+1}' for i in range(7)])
-                header.extend([
-                    'gp_prediction_enabled',
-                    'gp_online_update_enabled',
-                    'gp_compensation_enabled',
-                    'gp_compensation_source_code',
-                    'gp_compensation_scale',
-                    'gp_compensation_clip_nm',
-                    'gp_model_local_loaded_count',
-                    'gp_model_cloud_loaded_count',
-                    'gp_model_cloud_fallback_count',
-                    'gp_model_empty_or_prior_count',
-                    'gp_model_cloud_uses_cloud_pkl',
-                    'gp_model_cloud_uses_local_fallback',
-                    'gp_prediction_stride',
-                    'gp_prediction_updated_this_tick',
-                    'gp_prediction_age_sec',
-                    'gp_output_fresh',
-                    'future_trajectory_request_stride',
-                    'future_trajectory_updated_this_tick',
-                ])
-                header.extend([f'tau_nominal_{i+1}' for i in range(7)])
-                header.extend([f'tau_final_raw_{i+1}' for i in range(7)])
-                header.extend([f'tau_final_{i+1}' for i in range(7)])
-                header.extend([f'tau_rate_limited_{i+1}' for i in range(7)])
-                header.extend([
-                    'torque_rate_limit_enabled',
-                    'torque_rate_limit_nm_per_s',
-                    'torque_rate_limit_active',
-                    'torque_rate_limit_max_delta',
-                    'torque_rate_limit_dt',
-                ])
-                header.extend([f'gp_selected_raw_{i+1}' for i in range(7)])
-                header.extend([f'gp_scaled_{i+1}' for i in range(7)])
-                header.extend([f'gp_applied_{i+1}' for i in range(7)])
-                header.extend([f'gp_clip_active_{i+1}' for i in range(7)])
-                header.extend([f'gp_triple_raw_{i+1}' for i in range(7)])
-                header.extend([
-                    'gp_triple_weight_local',
-                    'gp_triple_weight_cloud',
-                    'gp_triple_weight_hist',
-                    'gp_triple_available',
-                    'gp_triple_used_fallback',
-                    'gp_triple_fallback_source_code',
-                    'gp_triple_weight_mode_code',
-                    'gp_triple_hist_weight_cap',
-                    'gp_triple_rmse_local',
-                    'gp_triple_rmse_cloud',
-                    'gp_triple_rmse_hist',
-                    'gp_triple_dynamic_distance_ratio',
-                    'gp_triple_dynamic_hist_penalty',
-                    'gp_triple_dynamic_mode_code',
-                    'gp_triple_combined_base_shadow_enabled',
-                    'gp_triple_combined_base_shadow_available',
-                    'gp_triple_combined_base_shadow_used_fallback',
-                    'gp_triple_combined_base_shadow_w_hist',
-                    'gp_triple_combined_base_shadow_hist_weight_cap',
-                    'gp_triple_combined_base_shadow_ramp_factor',
-                    'gp_triple_combined_base_shadow_distance_ratio',
-                    'gp_triple_combined_base_shadow_hist_penalty',
-                    'gp_triple_combined_base_shadow_norm',
-                    'gp_triple_combined_base_shadow_delta_from_combined_norm',
-                    'gp_triple_combined_base_shadow_delta_from_legacy_triple_norm',
-                    'gp_triple_gated_active',
-                    'gp_triple_gated_available',
-                    'gp_triple_gated_fallback_to_combined',
-                    'gp_triple_gated_hist_weight_eff',
-                    'gp_triple_gated_hist_cap',
-                    'gp_triple_gated_distance_gate',
-                    'gp_triple_gated_disagreement_gate',
-                    'gp_triple_gated_disagreement_norm',
-                    'gp_triple_gated_correction_norm',
-                    'gp_triple_gated_delta_raw_norm',
-                    'gp_triple_gated_distance_ratio',
-                ])
-                header.extend([
-                    f'gp_triple_combined_base_shadow_raw_{i+1}' for i in range(7)
-                ])
-                header.extend([
-                    'gp_shadow_paper_fusion_logging_enabled',
-                    'gp_historical_shadow_enabled',
-                    'gp_historical_source_mode_code',
-                    'gp_shadow_paper_formula_available',
-                    'gp_shadow_historical_available',
-                    'gp_shadow_variance_eps',
-                    'gp_shadow_hist_fallback_variance',
-                ])
-                header.extend([f'gp_shadow_local_raw_{i+1}' for i in range(7)])
-                header.extend([f'gp_shadow_cloud_raw_{i+1}' for i in range(7)])
-                header.extend([f'gp_shadow_hist_raw_{i+1}' for i in range(7)])
-                header.extend([f'gp_shadow_combined_paper_raw_{i+1}' for i in range(7)])
-                header.extend([f'gp_shadow_var_local_{i+1}' for i in range(7)])
-                header.extend([f'gp_shadow_var_cloud_{i+1}' for i in range(7)])
-                header.extend([f'gp_shadow_var_hist_{i+1}' for i in range(7)])
-                header.extend([f'gp_shadow_weight_local_{i+1}' for i in range(7)])
-                header.extend([f'gp_shadow_weight_cloud_{i+1}' for i in range(7)])
-                header.extend([f'gp_shadow_weight_hist_{i+1}' for i in range(7)])
-                header.extend([f'gp_shadow_precision_local_{i+1}' for i in range(7)])
-                header.extend([f'gp_shadow_precision_cloud_{i+1}' for i in range(7)])
-                header.extend([f'gp_shadow_precision_hist_{i+1}' for i in range(7)])
-                header.extend([f'gp_shadow_paper_scaled_{i+1}' for i in range(7)])
-                header.extend([f'gp_shadow_paper_clip_proxy_applied_{i+1}' for i in range(7)])
-                header.extend([f'gp_shadow_paper_clip_proxy_active_{i+1}' for i in range(7)])
-                header.extend([
-                    'gp_shadow_hist_pool_size',
-                    'gp_shadow_hist_k_used',
-                    'gp_shadow_hist_nearest_distance',
-                    'gp_shadow_hist_mean_distance_topk',
-                ])
-                header.extend([
-                    'hist_db_loaded',
-                    'hist_db_query_valid',
-                    'hist_db_available',
-                    'hist_db_online_disabled',
-                    'hist_db_distance_pass',
-                    'hist_db_k_used',
-                    'hist_db_nearest_distance',
-                    'hist_db_mean_topk_distance',
-                    'hist_db_q_scale',
-                    'hist_db_dq_scale',
-                    'hist_db_max_distance',
-                    'hist_db_fallback_source_code',
-                    'hist_db_gated_source_code',
-                ])
-                header.extend([f'hist_db_pred_{i+1}' for i in range(7)])
-                header.extend([f'hist_db_gated_pred_{i+1}' for i in range(7)])
-                header.extend([
-                    'hist_db_query_stride',
-                    'hist_db_query_updated_this_tick',
-                    'hist_db_query_reused',
-                    'hist_db_query_counter',
-                    'hist_db_preflight_enabled',
-                    'hist_db_preflight_required',
-                    'hist_db_preflight_mode',
-                    'hist_db_preflight_phase',
-                    'hist_db_preflight_pass',
-                    'hist_db_preflight_active_allowed',
-                    'hist_db_preflight_sample_count',
-                    'hist_db_preflight_pass_ratio',
-                    'hist_db_preflight_nearest_mean',
-                    'hist_db_preflight_nearest_p95',
-                    'hist_db_preflight_nearest_max',
-                    'hist_db_runtime_fallback_used',
-                ])
-                header.extend([
-                    'hist_soft_enabled',
-                    'hist_soft_valid',
-                    'hist_soft_online_mode',
-                    'hist_soft_alpha',
-                    'hist_soft_distance_threshold',
-                    'hist_soft_online_scale',
-                    'hist_soft_non_online_scale',
-                    'hist_soft_nearest_distance',
-                    'hist_soft_raw_w_hist',
-                    'hist_soft_norm_w_local',
-                    'hist_soft_norm_w_cloud',
-                    'hist_soft_norm_w_hist',
-                ])
-                header.extend([f'hist_soft_pred_{i+1}' for i in range(7)])
-                header.extend([
-                    f'hist_soft_delta_vs_local_cloud_{i+1}' for i in range(7)
-                ])
-                header.extend([
-                    'run_name',
-                    'control_frequency',
-                    'delay_steps',
-                    'data_output_dir',
-                ])
+                header = build_full_csv_header(n_j)
                 final_csv_indices = None
                 if self._is_final_csv_profile():
                     final_source_header = header + self._final_csv_extra_header()
                     final_csv_indices = self._final_csv_indices(final_source_header)
-                    writer.writerow([final_source_header[j] for j in final_csv_indices])
+                    writer.writerow(
+                        project_row(final_source_header, final_csv_indices)
+                    )
                 else:
                     writer.writerow(header)
 
@@ -8860,7 +8590,7 @@ class CartesianImpedanceController(Node):
 
                     if final_csv_indices is not None:
                         final_source_row = row + self._final_csv_extra_row()
-                        row = [final_source_row[j] for j in final_csv_indices]
+                        row = project_row(final_source_row, final_csv_indices)
 
                     writer.writerow(row)
 
