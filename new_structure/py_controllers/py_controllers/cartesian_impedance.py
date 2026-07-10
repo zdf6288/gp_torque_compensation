@@ -5720,6 +5720,8 @@ class CartesianImpedanceController(Node):
         if (
             self.gp_historical_db_distance_contribution_logging
             and self.gp_historical_db_x is not None
+            and self._hist_db_contribution_log_count
+            < self.gp_historical_db_preflight_log_first_n
         ):
             result["distance_contributions"] = (
                 compute_scaled_delta_contributions(
@@ -7331,8 +7333,8 @@ class CartesianImpedanceController(Node):
                 hist_compensation_ready = True
             else:
                 self.hist_db_runtime_fallback_used = 1
+                self._gp_source_code = 0
                 if self.gp_disable_silent_hist_fallback:
-                    self._gp_source_code = 0
                     self._gp_selected_raw = np.zeros(7, dtype=float)
                     self._gp_scaled = np.zeros(7, dtype=float)
                     self._gp_applied = np.zeros(7, dtype=float)
