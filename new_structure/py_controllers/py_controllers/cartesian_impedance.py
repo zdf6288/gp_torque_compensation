@@ -22,8 +22,16 @@ from pathlib import Path
 from std_msgs.msg import String
 from collections import deque
 from py_controllers.session_anchor_utils import (
+    load_session_home_payload,
     parse_vec3_parameter,
     validate_session_anchor_payload,
+)
+from py_controllers.historical_db_support import (
+    build_joint_feature,
+    query_scaled_nearest_support,
+    scale_feature,
+    scale_feature_matrix,
+    select_legacy_gated_prediction,
 )
 from py_controllers.session_relative_config import (
     declare_session_relative_parameters,
@@ -3910,17 +3918,7 @@ class CartesianImpedanceController(Node):
                 f"[SessionHome] session home file not found: '{file_path}'; "
                 "refusing to start."
             )
-        try:
-            payload = json.loads(file_path.read_text())
-        except Exception as e:
-            raise ValueError(
-                f"[SessionHome] failed to parse session home JSON "
-                f"'{file_path}': {e}"
-            )
-        if not isinstance(payload, dict):
-            raise ValueError(
-                f"[SessionHome] session home JSON '{file_path}' is not an object."
-            )
+        payload = load_session_home_payload(file_path)
         if self.trajectory_reference_mode == 'session_relative':
             pose = self._validate_session_anchor_payload(payload, file_path)
             return pose, payload
@@ -4655,12 +4653,9 @@ class CartesianImpedanceController(Node):
             if not np.all(np.isfinite(x)) or not np.all(np.isfinite(y_residual)):
                 raise ValueError(f"X and {target_key} must contain only finite values")
 
-            x_scaled = np.ascontiguousarray(
-                x / self.gp_historical_db_feature_scale.reshape(1, -1),
-                dtype=float,
+            x_scaled = scale_feature_matrix(
+                x, self.gp_historical_db_feature_scale
             )
-            if not np.all(np.isfinite(x_scaled)):
-                raise ValueError("scaled X contains non-finite values")
 
             self.gp_historical_db_x_scaled = x_scaled
             self.gp_historical_db_y_residual = np.ascontiguousarray(
@@ -5451,25 +5446,13 @@ class CartesianImpedanceController(Node):
         """Query the persistent residual DB without affecting active torque."""
         result = self._new_historical_residual_db_shadow_result()
 
-        try:
-            q_arr = np.asarray(q, dtype=float)
-            dq_arr = np.asarray(dq, dtype=float)
-        except (TypeError, ValueError):
+        x_query = build_joint_feature(q, dq)
+        if x_query is None:
             return result
-        if (
-            q_arr.shape != (7,)
-            or dq_arr.shape != (7,)
-            or not np.all(np.isfinite(q_arr))
-            or not np.all(np.isfinite(dq_arr))
-        ):
-            return result
-
-        x_query = np.concatenate([q_arr, dq_arr])
-        x_query_scaled = np.ascontiguousarray(
-            x_query / self.gp_historical_db_feature_scale,
-            dtype=float,
+        x_query_scaled = scale_feature(
+            x_query, self.gp_historical_db_feature_scale
         )
-        if not np.all(np.isfinite(x_query_scaled)):
+        if x_query_scaled is None:
             return result
         result["query_valid"] = 1
 
@@ -5482,50 +5465,36 @@ class CartesianImpedanceController(Node):
         ):
             return result
 
-        try:
-            with np.errstate(over="ignore", invalid="ignore"):
-                delta = self.gp_historical_db_x_scaled - x_query_scaled.reshape(1, -1)
-                distance_sq = np.einsum("ij,ij->i", delta, delta)
-            if (
-                distance_sq.shape != (self.gp_historical_db_row_count,)
-                or not np.all(np.isfinite(distance_sq))
-                or np.any(distance_sq < 0.0)
-            ):
-                return result
-
-            k_used = min(self.gp_historical_db_k, self.gp_historical_db_row_count)
-            nearest_indices = np.argpartition(distance_sq, kth=k_used - 1)[:k_used]
-            nearest_indices = nearest_indices[np.argsort(distance_sq[nearest_indices])]
-            nearest_distances = np.sqrt(distance_sq[nearest_indices])
-            prediction = np.mean(
-                self.gp_historical_db_y_residual[nearest_indices],
-                axis=0,
-            )
-        except (TypeError, ValueError, IndexError, FloatingPointError):
-            return result
-
-        result["k_used"] = int(k_used)
-        result["nearest_distance"] = float(nearest_distances[0])
-        result["mean_topk_distance"] = float(np.mean(nearest_distances))
-        result["distance_pass"] = int(
-            result["nearest_distance"] <= self.gp_historical_db_max_distance
+        support = query_scaled_nearest_support(
+            self.gp_historical_db_x_scaled,
+            self.gp_historical_db_y_residual,
+            x_query_scaled,
+            self.gp_historical_db_k,
+            self.gp_historical_db_max_distance,
         )
-        if prediction.shape != (7,) or not np.all(np.isfinite(prediction)):
+        if not support["valid"]:
             return result
-
-        result["prediction"] = prediction.copy()
+        result["k_used"] = int(support["k_used"])
+        result["nearest_distance"] = float(support["nearest_distance"])
+        result["mean_topk_distance"] = float(support["mean_topk_distance"])
+        result["distance_pass"] = int(support["distance_pass"])
+        result["prediction"] = np.asarray(
+            support["prediction"], dtype=float
+        ).copy()
         result["prediction_valid"] = 1
-        result["available"] = int(
-            bool(
-                result["loaded"]
-                and result["query_valid"]
-                and result["prediction_valid"]
-                and not result["online_disabled"]
-            )
+        (
+            result["available"],
+            result["gated_prediction"],
+            result["gated_source_code"],
+        ) = select_legacy_gated_prediction(
+            result["prediction"],
+            result["gated_prediction"],
+            result["gated_source_code"],
+            result["loaded"],
+            result["query_valid"],
+            result["prediction_valid"],
+            result["online_disabled"],
         )
-        if result["available"]:
-            result["gated_prediction"] = prediction.copy()
-            result["gated_source_code"] = 4
         return result
 
     def _reset_historical_residual_db_shadow_state(self):

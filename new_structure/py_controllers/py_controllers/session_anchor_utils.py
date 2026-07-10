@@ -18,8 +18,45 @@
 """
 
 import json
+from pathlib import Path
 
 import numpy as np
+
+
+def load_session_home_payload(file_path):
+    """Load a session-home JSON object with the controller's legacy errors."""
+    file_path = Path(file_path)
+    try:
+        payload = json.loads(file_path.read_text())
+    except Exception as e:
+        raise ValueError(
+            f"[SessionHome] failed to parse session home JSON "
+            f"'{file_path}': {e}"
+        )
+    if not isinstance(payload, dict):
+        raise ValueError(
+            f"[SessionHome] session home JSON '{file_path}' is not an object."
+        )
+    return payload
+
+
+def read_optional_q_at_capture(payload, error_prefix):
+    """Return optional finite 7D q_at_capture, preserving schema errors."""
+    q_at_capture = payload.get('q_at_capture')
+    if q_at_capture is None:
+        return None
+    try:
+        q_vec = np.asarray(q_at_capture, dtype=float)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"{error_prefix}q_at_capture must be null or 7 finite values."
+        )
+    if q_vec.shape != (7,) or not np.all(np.isfinite(q_vec)):
+        raise ValueError(
+            f"{error_prefix}q_at_capture must be null or 7 finite values, "
+            f"got {q_at_capture!r}."
+        )
+    return q_vec
 
 
 def parse_vec3_parameter(value, name):
@@ -161,20 +198,7 @@ def validate_session_anchor_payload(
     )
     read_anchor_vec3(payload, 'nominal_fixed_start_xyz', error_prefix)
 
-    q_at_capture = payload.get('q_at_capture')
-    if q_at_capture is not None:
-        try:
-            q_vec = np.asarray(q_at_capture, dtype=float)
-        except (TypeError, ValueError):
-            raise ValueError(
-                f"[SessionAnchor] '{file_path}': q_at_capture must be "
-                "null or 7 finite values."
-            )
-        if q_vec.shape != (7,) or not np.all(np.isfinite(q_vec)):
-            raise ValueError(
-                f"[SessionAnchor] '{file_path}': q_at_capture must be "
-                f"null or 7 finite values, got {q_at_capture!r}."
-            )
+    read_optional_q_at_capture(payload, error_prefix)
 
     # 文件内部一致性：session_start/shifted_center 必须与 anchor_delta 自洽。
     internal_tol = 1e-6
