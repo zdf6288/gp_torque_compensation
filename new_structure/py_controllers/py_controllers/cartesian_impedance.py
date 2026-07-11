@@ -38,6 +38,7 @@ from py_controllers.historical_db_support import (
     select_active_gated_prediction,
 )
 from py_controllers.historical_db_metadata import (
+    default_metadata_path,
     load_metadata_sidecar,
     validate_historical_db_metadata,
 )
@@ -4755,9 +4756,24 @@ class CartesianImpedanceController(Node):
             if not np.all(np.isfinite(x)) or not np.all(np.isfinite(y_residual)):
                 raise ValueError(f"X and {target_key} must contain only finite values")
 
-            sidecar_metadata, sidecar_path = load_metadata_sidecar(
-                db_path, self.gp_historical_db_metadata_path
-            )
+            try:
+                sidecar_metadata, sidecar_path = load_metadata_sidecar(
+                    db_path, self.gp_historical_db_metadata_path
+                )
+            except ValueError as e:
+                if self.gp_historical_db_metadata_enforcement_enabled:
+                    raise
+                sidecar_metadata = {}
+                sidecar_path = (
+                    os.path.expanduser(self.gp_historical_db_metadata_path)
+                    if self.gp_historical_db_metadata_path
+                    else default_metadata_path(db_path)
+                )
+                self.get_logger().warn(
+                    "[GP Hist DB] Ignoring malformed optional metadata "
+                    "sidecar because metadata enforcement is disabled: "
+                    f"{e}"
+                )
             self.gp_historical_db_metadata_sidecar_path = str(sidecar_path)
             if sidecar_metadata:
                 metadata.update(sidecar_metadata)
