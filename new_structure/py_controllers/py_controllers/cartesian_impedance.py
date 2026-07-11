@@ -501,6 +501,7 @@ class CartesianImpedanceController(Node):
         self._session_home_refused = False
         self._normal_run_gate_decision = None
         self._session_home_joint_gate_decision = None
+        self._session_home_joint_gate_context = None
         self.session_home_return_active = False
         self.session_home_return_reason = ''
         self._session_home_return_start_time = None
@@ -2586,6 +2587,9 @@ class CartesianImpedanceController(Node):
             self._mark_effort_publish_skipped("joint_command_stale")
             return
 
+        if not self._joint_reference_home_gate_allows_effort(q, dq):
+            return
+
         tau = (
             self.joint_reference_kp * (self.q_des_joint - q)
             + self.joint_reference_kd * (self.dq_des_joint - dq)
@@ -4050,6 +4054,8 @@ class CartesianImpedanceController(Node):
         )
         self.session_home_resolved = True
         self.session_home_source = source
+        self._session_home_joint_gate_decision = None
+        self._session_home_joint_gate_context = None
         if (
             self.trajectory_reference_mode != 'session_relative'
             or self.session_relative_apply_to_startup_and_return
@@ -4160,8 +4166,6 @@ class CartesianImpedanceController(Node):
         return True
 
     def _evaluate_session_home_joint_gate(self, x_curr, q, dq):
-        if self._session_home_joint_gate_decision is not None:
-            return bool(self._session_home_joint_gate_decision["allowed"])
         required_for_hist = bool(
             self.session_home_joint_check_required_for_hist
             and self._historical_db_source_requested()
@@ -4169,6 +4173,12 @@ class CartesianImpedanceController(Node):
         enabled = bool(
             self.session_home_joint_check_enabled or required_for_hist
         )
+        gate_context = (enabled, required_for_hist)
+        if (
+            self._session_home_joint_gate_decision is not None
+            and self._session_home_joint_gate_context == gate_context
+        ):
+            return bool(self._session_home_joint_gate_decision["allowed"])
         metrics = compute_joint_home_metrics(
             q, dq, self.session_home_q_at_capture
         )
@@ -4179,6 +4189,7 @@ class CartesianImpedanceController(Node):
             require_q_home=required_for_hist,
         )
         self._session_home_joint_gate_decision = classification
+        self._session_home_joint_gate_context = gate_context
         if classification["decision"] == "NOT_ENABLED":
             return True
         try:
@@ -4203,6 +4214,16 @@ class CartesianImpedanceController(Node):
         else:
             self.get_logger().info(message)
         return bool(classification["allowed"])
+
+    def _joint_reference_home_gate_allows_effort(self, q, dq):
+        if self._evaluate_session_home_joint_gate(
+            self._last_ee_pose, q, dq
+        ):
+            return True
+        self._mark_effort_publish_skipped(
+            "joint_session_home_gate_refused"
+        )
+        return False
 
     def _evaluate_normal_run_start_gate(self, x_curr, q=None, dq=None):
         """Three-tier run-start gate against session home. True allows effort."""
